@@ -74,6 +74,19 @@ test("transcriptFor scopes anchors to the current run, not stale earlier tasks",
   assert.ok(out.length <= 4000, `expected <= 4000, got ${out.length}`);
 });
 
+test("transcriptFor honours its ceiling even at a tiny budget", () => {
+  const msgs = [
+    { author: "user", content: "u".repeat(500), phase: "user" },
+    { author: "agent", agent: "claude", content: "a".repeat(500), phase: "collaboration", round: 1 },
+    { author: "agent", agent: "codex", content: "b".repeat(500), phase: "collaboration", round: 2 },
+  ];
+  // Budget is clamped up to a small floor so the marker fits; output must not blow past it.
+  const floor = "[Older context was trimmed by the local orchestrator.]".length + "\n\n---\n\n".length + 40;
+  const out = transcriptFor(session(msgs), 60);
+  assert.ok(out.length <= floor, `expected <= ${floor}, got ${out.length}`);
+  assert.match(out, /trimmed|anchor truncated/);
+});
+
 test("transcriptFor handles empty / missing messages", () => {
   assert.equal(transcriptFor(session([])), "");
   assert.equal(transcriptFor({}), "");

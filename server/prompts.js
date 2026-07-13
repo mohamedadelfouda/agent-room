@@ -16,7 +16,10 @@ export function transcriptFor(session, maxChars = 24000) {
   const TRIM = "[Older context was trimmed by the local orchestrator.]";
   const blocks = msgs.map(render);
   const joined = blocks.join(SEP);
-  if (joined.length <= maxChars) return joined;
+  // Clamp to a small floor so the trim marker itself always fits — this keeps the ≤ cap
+  // ceiling below real even if a caller passes a tiny budget (no current caller does).
+  const cap = Math.max(maxChars, TRIM.length + SEP.length + 40);
+  if (joined.length <= cap) return joined;
 
   // Under delta-only middle rounds the full plan/position lives ONLY in the round-1 agent
   // turns, and a blind tail-slice would drop them (they sit at the head). So keep them as
@@ -37,9 +40,15 @@ export function transcriptFor(session, maxChars = 24000) {
   }
   let anchorText = anchorIdx.map((i) => blocks[i]).join(SEP);
   // Hard ceiling: even one run's own round-1 proposals could be huge. Cap the anchors so
-  // anchorText + SEP + TRIM never exceeds maxChars (the ≤ maxChars guarantee must hold).
-  const anchorBudget = Math.max(0, maxChars - TRIM.length - SEP.length);
-  if (anchorText.length > anchorBudget) anchorText = `${anchorText.slice(0, Math.max(0, anchorBudget - 20))}\n…[anchor truncated]`;
+  // anchorText + SEP + TRIM never exceeds the budget (the ≤ cap guarantee must hold). The
+  // clamp above ensures anchorBudget > SUFFIX, so the else branch always applies.
+  const SUFFIX = "\n…[anchor truncated]";
+  const anchorBudget = Math.max(0, cap - TRIM.length - SEP.length);
+  if (anchorText.length > anchorBudget) {
+    anchorText = anchorBudget <= SUFFIX.length
+      ? SUFFIX.slice(0, anchorBudget)
+      : anchorText.slice(0, anchorBudget - SUFFIX.length) + SUFFIX;
+  }
 
   // Fill from the most recent tail, strictly AFTER the anchors so the output stays in
   // chronological order and earlier runs are dropped entirely.
@@ -48,7 +57,7 @@ export function transcriptFor(session, maxChars = 24000) {
   let used = anchorText.length + TRIM.length + SEP.length * 2;
   for (let i = msgs.length - 1; i > lastAnchor; i -= 1) {
     const cost = blocks[i].length + SEP.length;
-    if (used + cost > maxChars) break;
+    if (used + cost > cap) break;
     tail.unshift(blocks[i]);
     used += cost;
   }
