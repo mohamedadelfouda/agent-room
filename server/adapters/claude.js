@@ -37,7 +37,7 @@ export async function runClaude({ prompt, config, cwd, onEvent, registerChild })
   const permission = config.permission || "read";
   const permArgs =
     permission === "chat" ? ["--permission-mode", "auto", "--allowedTools", "WebSearch,WebFetch,Read,Grep,Glob", "--disallowedTools", "Bash,Edit,Write,NotebookEdit"]
-    : permission === "planread" ? ["--permission-mode", "auto", "--allowedTools", "Read,Grep,Glob", "--disallowedTools", "Bash,Edit,Write,NotebookEdit"]
+    : permission === "planread" ? ["--permission-mode", "auto", "--allowedTools", "Read,Grep,Glob", "--disallowedTools", "Bash,Edit,Write,NotebookEdit,WebSearch,WebFetch,Task", "--strict-mcp-config"]
     : permission === "edit" ? ["--permission-mode", "acceptEdits", "--allowedTools", "Read Edit Write Grep Glob"]
     : (permission === "run" || permission === "full") ? ["--permission-mode", "bypassPermissions"]
     : ["--disallowedTools", "*"];

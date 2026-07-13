@@ -6,6 +6,7 @@ import { runClaude } from "./adapters/claude.js";
 import { collaborationPrompt, debatePrompt, synthesisPrompt, chatPrompt } from "./prompts.js";
 import { parseConvergence, stripConvergence, assessRound } from "./convergence.js";
 import { projectSnapshot } from "./project.js";
+import fs from "node:fs/promises";
 
 const activeRuns = new Map();
 const adapters = { codex: runCodex, claude: runClaude };
@@ -80,8 +81,14 @@ export async function runOrchestration(sessionId, request, emit) {
 
     // When a project is attached, planning turns read it (read-only) from its git root,
     // grounded by one shared snapshot given to BOTH agents so they start from the same view.
-    const projectPath = session.project?.path || "";
-    const projSnapshot = projectPath ? await projectSnapshot(projectPath) : "";
+    // Re-validate the path at run time (it may have been deleted/moved since attach) so we
+    // fall back to text-only planning instead of failing the whole run on a bad cwd.
+    let projectPath = session.project?.path || "";
+    if (projectPath) {
+      try { if (!(await fs.stat(projectPath)).isDirectory()) projectPath = ""; }
+      catch { projectPath = ""; }
+    }
+    const projSnapshot = (projectPath && mode !== "chat") ? await projectSnapshot(projectPath) : "";
 
     const selected = ["codex", "claude"].filter((key) => request.agents?.[key]?.enabled !== false);
     if (selected.length < 2) throw new Error("Enable Codex and Claude for this MVP");
