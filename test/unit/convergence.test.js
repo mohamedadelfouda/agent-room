@@ -44,3 +44,20 @@ test("assessRound: dedups disagreements and ignores empties / empty input", () =
   assert.deepEqual(assessRound([{ converged: false, open: "scope" }, { converged: false, open: "scope" }]).disagreements, ["scope"]);
   assert.equal(assessRound([]).bothConverged, false);
 });
+
+test("parseConvergence takes the LAST marker, not the first (agent restating)", () => {
+  // A "converged ... but" then the real final verdict must not falsely stop early.
+  const r = parseConvergence("answer\nCONVERGENCE: converged\nactually:\nCONVERGENCE: open — pricing");
+  assert.equal(r.converged, false);
+  assert.equal(r.open, "pricing");
+});
+
+test("stripConvergence removes EVERY marker line (no leak)", () => {
+  const out = stripConvergence("answer\nCONVERGENCE: converged\nnote\nCONVERGENCE: open — pricing");
+  assert.equal(out.includes("CONVERGENCE"), false);
+});
+
+test("assessRound needs all agents present and >= 2 (never stop on one)", () => {
+  assert.equal(assessRound([{ converged: true, open: "" }]).bothConverged, false); // single agent
+  assert.equal(assessRound([{ converged: true, open: "" }, null]).bothConverged, false); // one missing
+});

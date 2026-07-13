@@ -225,13 +225,21 @@ export async function runOrchestration(sessionId, request, emit) {
       }
     }
 
-    // Early-stop / disagreement report (collaboration & debate only).
-    if (earlyConverged) {
-      session.messages.push(makeMessage({ author: "system", content: `الوكيلان اتفقا في الجولة ${earlyConverged} — تم إيقاف الجولات المتبقية.`, phase: "converged", mode }));
-      await persistAndEmit(session, emit);
-    } else if (mode !== "chat" && rounds >= 2 && lastDisagreements.length) {
-      const list = lastDisagreements.map((d) => `• ${d}`).join("\n");
-      session.messages.push(makeMessage({ author: "system", content: `خلصت الـ${rounds} جولات والوكيلان لسه مش متفقين. نقاط الاختلاف:\n${list}\n\nمحتاجين جولات إضافية؟`, phase: "needs_more_rounds", mode }));
+    // Early-stop / disagreement report (multi-round collaboration & debate only).
+    if (!state.cancelled && mode !== "chat" && rounds >= 2) {
+      let report = null;
+      if (earlyConverged) {
+        report = earlyConverged < rounds
+          ? { content: `الوكيلان اتفقا في الجولة ${earlyConverged} — تم إيقاف الجولات المتبقية.`, phase: "converged" }
+          : { content: `الوكيلان اتفقا في الجولة الأخيرة (${earlyConverged}).`, phase: "converged" };
+      } else if (lastDisagreements.length) {
+        const list = lastDisagreements.map((d) => `• ${d}`).join("\n");
+        report = { content: `خلصت الـ${rounds} جولات والوكيلان لسه مش متفقين. نقاط الاختلاف:\n${list}\n\nمحتاجين جولات إضافية؟`, phase: "needs_more_rounds" };
+      } else {
+        // Finished all rounds without agreement and without articulated points (e.g. markers missing).
+        report = { content: `خلصت الـ${rounds} جولات من غير اتفاق واضح بين الوكيلين. تحب جولات إضافية؟`, phase: "needs_more_rounds" };
+      }
+      session.messages.push(makeMessage({ author: "system", content: report.content, phase: report.phase, mode }));
       await persistAndEmit(session, emit);
     }
 
