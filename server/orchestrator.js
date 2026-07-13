@@ -133,10 +133,13 @@ export async function runOrchestration(sessionId, request, emit) {
         error.agentLabel = labels[agent];
         throw error;
       }
-      // Pull the CONVERGENCE control line out of the reply (used for early-stop) and hide
-      // it from the shown message. Only meaningful in collaboration/debate.
-      const convergence = parseConvergence(result.text);
-      const message = makeMessage({ author: "agent", agent, role, content: stripConvergence(result.text), round, phase, mode });
+      // The CONVERGENCE control line is only requested (and only meaningful) in the
+      // collaboration/debate turns — parse it for early-stop and strip it there. Chat and
+      // synthesis replies never ask for it, so they're left exactly as the agent wrote them
+      // (otherwise a chat answer that legitimately contains that line would be corrupted).
+      const usesMarker = phase === "collaboration" || phase === "opening" || phase === "rebuttal";
+      const convergence = usesMarker ? parseConvergence(result.text) : { converged: false, open: "" };
+      const message = makeMessage({ author: "agent", agent, role, content: usesMarker ? stripConvergence(result.text) : result.text, round, phase, mode });
       message.convergence = convergence;
       message.meta = {
         requestedModel: cfg.model || "(default)", requestedEffort: cfg.effort || "",
