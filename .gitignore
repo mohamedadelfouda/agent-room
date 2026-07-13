@@ -7,3 +7,6 @@ logs/
 node_modules/
 .DS_Store
 .agent-workspaces/
+
+# review-gate attestation marker (machine-local)
+.review-gate/.gate/
