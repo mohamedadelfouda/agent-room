@@ -23,6 +23,17 @@ test("runProcess caps accumulated stdout so a runaway CLI can't blow up memory",
   });
 });
 
+test("runProcess caps a single line larger than the buffer (not just many lines)", async () => {
+  // One ~6MB line with no newline: readline delivers it whole at EOF, so the cap must slice
+  // the line itself, not merely gate on the pre-append length.
+  await withScript("process.stdout.write('x'.repeat(6*1024*1024))\n", async (file) => {
+    const r = await runProcess({ command: "node", args: [file] });
+    assert.equal(r.code, 0);
+    assert.ok(r.stdout.length <= 5 * 1024 * 1024, `stdout ${r.stdout.length} should be capped near 4MB`);
+    assert.match(r.stdout, /\[truncated\]/);
+  });
+});
+
 test("runProcess returns small output intact and streams every line", async () => {
   await withScript("console.log('a');console.log('b')\n", async (file) => {
     const lines = [];

@@ -77,8 +77,10 @@ execute‑and‑review model.
 
 - Agents default to **read‑only** for planning; write access is granted only to the one
   executor you pick, for one run, inside an isolated worktree.
-- Secrets and personal paths are redacted from logs and error details. Only agents' final
-  answers are saved to sessions — their step‑by‑step reasoning is not persisted.
+- Secrets and personal paths are redacted from logs and error details. Agents' final answers
+  are saved to sessions; if a run fails after it has already streamed some output, that
+  visible partial text is saved too (clearly labeled as partial), so a session file can hold
+  partial responses from failed runs. Agents' step‑by‑step reasoning is never persisted.
 
 ## License
 

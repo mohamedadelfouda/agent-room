@@ -19,14 +19,27 @@ export function validateOption(value, label, { allowEmpty = true } = {}) {
 const ALLOWED_CLI = new Set(["claude", "codex", "gh", "git"]);
 export function allowedCommand(input, allowed = ALLOWED_CLI) {
   const cmd = validateOption(input, "Command", { allowEmpty: false });
-  // Reject internal whitespace. On Windows runProcess uses shell:true, and cmd.exe would
-  // re-tokenize on spaces — so "calc /claude" (basename "claude") would actually run calc.
-  // A real CLI name/path has no internal space, and a space-containing path already breaks
-  // under shell:true, so banning spaces closes the split-parsing bypass with no real loss.
-  if (/\s/.test(cmd)) throw new Error("Command must not contain spaces");
+  // On Windows runProcess uses shell:true, and cmd.exe re-tokenizes on spaces — so
+  // "calc /claude" (basename "claude") would actually run calc. Ban internal whitespace
+  // there to close that split-parsing bypass. On POSIX runProcess uses shell:false, so a
+  // full path like "/Users/Jane Doe/bin/codex" is passed as a single safe argument — don't
+  // reject it (validateOption already blocks shell metacharacters on every platform).
+  if (process.platform === "win32" && /\s/.test(cmd)) throw new Error("Command must not contain spaces");
   const base = cmd.split(/[\\/]/).pop().replace(/\.(exe|cmd|bat|ps1)$/i, "").toLowerCase();
   if (!allowed.has(base)) throw new Error(`Command not allowed — only: ${[...allowed].join(", ")}`);
   return cmd;
+}
+
+const TRUNCATED = "…[truncated]\n";
+// Append `line\n` to a retained buffer without letting it exceed `max`. readline delivers
+// whole lines (at EOF a child can emit one line far larger than `max`), so gating only on
+// the current length would append the entire oversized line — we must slice the chunk to the
+// remaining room. Adds a one-time truncation marker and never grows past ~max + marker.
+function appendCapped(buf, line, max) {
+  if (buf.length >= max) return buf.endsWith(TRUNCATED) ? buf : buf + TRUNCATED;
+  const chunk = `${line}\n`;
+  const room = max - buf.length;
+  return chunk.length <= room ? buf + chunk : buf + chunk.slice(0, room) + TRUNCATED;
 }
 
 export function runProcess({ command, args = [], input = "", cwd, env = {}, onStdoutLine, onStderrLine, timeoutMs = 0, registerChild }) {
@@ -61,15 +74,13 @@ export function runProcess({ command, args = [], input = "", cwd, env = {}, onSt
 
     const stdoutRl = readline.createInterface({ input: child.stdout });
     stdoutRl.on("line", (line) => {
-      if (stdout.length < MAX_BUF) stdout += `${line}\n`;
-      else if (!stdout.endsWith("…[truncated]\n")) stdout += "…[truncated]\n";
+      stdout = appendCapped(stdout, line, MAX_BUF);
       onStdoutLine?.(line);
     });
 
     const stderrRl = readline.createInterface({ input: child.stderr });
     stderrRl.on("line", (line) => {
-      if (stderr.length < MAX_BUF) stderr += `${line}\n`;
-      else if (!stderr.endsWith("…[truncated]\n")) stderr += "…[truncated]\n";
+      stderr = appendCapped(stderr, line, MAX_BUF);
       onStderrLine?.(line);
     });
 

