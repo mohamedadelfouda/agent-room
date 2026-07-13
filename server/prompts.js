@@ -3,61 +3,85 @@ function clean(text) {
 }
 
 export function transcriptFor(session, maxChars = 24000) {
-  const lines = [];
-  for (const message of session.messages ?? []) {
+  const msgs = session.messages ?? [];
+  const render = (message) => {
     const speaker = message.author === "user"
       ? "USER"
       : message.author === "system"
         ? "SYSTEM"
         : `${String(message.agent || "AGENT").toUpperCase()}${message.role ? ` (${message.role})` : ""}`;
-    lines.push(`[${speaker} | ${message.phase || "message"}${message.round ? ` | round ${message.round}` : ""}]\n${clean(message.content)}`);
+    return `[${speaker} | ${message.phase || "message"}${message.round ? ` | round ${message.round}` : ""}]\n${clean(message.content)}`;
+  };
+  const SEP = "\n\n---\n\n";
+  const TRIM = "[Older context was trimmed by the local orchestrator.]";
+  const blocks = msgs.map(render);
+  const joined = blocks.join(SEP);
+  if (joined.length <= maxChars) return joined;
+
+  // Under delta-only middle rounds the full plan/position lives ONLY in the round-1 agent
+  // turns, and a blind tail-slice would drop them (they sit at the head). So keep them as
+  // verbatim "anchors" and fill the rest from the most recent tail.
+  //
+  // But sessions are PERSISTENT and multi-run: each new task appends another `user` turn and
+  // a fresh round-1 opener to the same message list. Matching every round===1 would pin
+  // stale proposals from earlier, unrelated tasks — wasting the budget on exactly the
+  // full-rewrite bloat this change removes, and potentially dropping the current task. So
+  // scope the anchors to the CURRENT run only: the latest `user` turn and the round-1 agent
+  // turns after it.
+  let lastUserIdx = -1;
+  for (let i = msgs.length - 1; i >= 0; i -= 1) { if (msgs[i].author === "user") { lastUserIdx = i; break; } }
+  const anchorIdx = [];
+  if (lastUserIdx >= 0) anchorIdx.push(lastUserIdx);
+  for (let i = lastUserIdx + 1; i < msgs.length; i += 1) {
+    if (msgs[i].author === "agent" && msgs[i].round === 1) anchorIdx.push(i);
   }
-  let joined = lines.join("\n\n---\n\n");
-  if (joined.length > maxChars) {
-    joined = `[Older context was trimmed by the local orchestrator.]\n\n${joined.slice(-maxChars)}`;
+  let anchorText = anchorIdx.map((i) => blocks[i]).join(SEP);
+  // Hard ceiling: even one run's own round-1 proposals could be huge. Cap the anchors so
+  // anchorText + SEP + TRIM never exceeds maxChars (the ≤ maxChars guarantee must hold).
+  const anchorBudget = Math.max(0, maxChars - TRIM.length - SEP.length);
+  if (anchorText.length > anchorBudget) anchorText = `${anchorText.slice(0, Math.max(0, anchorBudget - 20))}\n…[anchor truncated]`;
+
+  // Fill from the most recent tail, strictly AFTER the anchors so the output stays in
+  // chronological order and earlier runs are dropped entirely.
+  const lastAnchor = anchorIdx.length ? anchorIdx[anchorIdx.length - 1] : lastUserIdx;
+  const tail = [];
+  let used = anchorText.length + TRIM.length + SEP.length * 2;
+  for (let i = msgs.length - 1; i > lastAnchor; i -= 1) {
+    const cost = blocks[i].length + SEP.length;
+    if (used + cost > maxChars) break;
+    tail.unshift(blocks[i]);
+    used += cost;
   }
-  return joined;
+  return [anchorText, TRIM, tail.join(SEP)].filter(Boolean).join(SEP);
 }
 
 export function collaborationPrompt({ session, agentLabel, role, round, totalRounds, userTask, projectSnapshot = "" }) {
   const tools = projectSnapshot
-    ? `You may READ the attached project's files (Read/Grep/Glob) to ground your answer in the real code — read only, never modify files or run commands.`
-    : `Do not use tools, modify files, or run commands.`;
-  // Round 1 lays out the full proposal; later rounds are DELTA-ONLY — do not restate the
-  // whole plan every round (it wastes context/subscriptions). The finalizer writes the full version.
-  const structure = round === 1
-    ? `Required response structure:
-1. What I accept from the shared work
-2. What I would change or add
-3. Updated shared proposal
-4. Remaining uncertainty, if any`
-    : `This is a follow-up round — do NOT restate the whole plan. Reply with ONLY your delta since the other agent's latest turn:
-1. Accepted — what you now accept from their latest turn (one or two lines)
-2. Corrections — what is wrong in their latest turn and why (skip if none)
-3. New delta — only what you are adding or changing this round (no full rewrite)
-4. Unresolved — the specific open point, if any
-Keep it tight; the final synthesis assembles the complete plan.`;
-  return `You are ${agentLabel}, participating in one persistent multi-agent session controlled by the user.
-Current mode: COLLABORATION.
-Your assigned role: ${role || "Collaborator"}.
-Current collaboration round: ${round} of ${totalRounds}.
+    ? `You can READ the attached project (Read/Grep/Glob) to ground what you say in the real code — read only, never edit or run anything. When you make a claim about the code, point to the file (and the line when you can), and be honest about what you actually checked versus what you're inferring.`
+    : `Work from what's in front of you — don't reach for tools, edit files, or run commands.`;
+  // Round 1 is where you lay the whole thing out. After that it's DELTA-ONLY: say what
+  // changed, not the whole plan again (re-writing it every round burns context for nothing).
+  // Only the final synthesis rebuilds the complete version.
+  const guidance = round === 1
+    ? `Lay out your take in full this round. Talk through what's already solid in the shared work, what you'd change or add and why, the proposal as you'd shape it now, and anything you're honestly still unsure about. Write it the way you'd talk it through with a colleague you respect — in your own voice, not as a stiff numbered form.`
+    : `This is a later round, so keep it to what's actually new — don't rewrite the whole plan. In a few honest lines: what you now accept from the other agent's last turn, where they're off and why, the one or two things you're really adding this round, and whatever's still open between you. If you've got nothing substantive left to add, just say so — don't pad it out.`;
+  const control = round >= 2
+    ? `\nOne housekeeping line for the orchestrator (not for the reader): make the very last line of your message either\nCONVERGENCE: converged\nor\nCONVERGENCE: open — <the specific point(s) you two still don't agree on>\nSay "converged" only when you genuinely agree with the other agent's latest position and have nothing real left to add or dispute. Don't wrap it in quotes or a code block, don't translate it, and don't write anything after it.\n`
+    : "";
+  return `You're ${agentLabel}, one of two agents thinking this through together in a shared session that the user runs and ultimately decides on.
+Your seat at the table: ${role || "Collaborator"}.
+This is round ${round}, and there's room for up to ${totalRounds} — but you're not here to fill rounds. The moment you and the other agent genuinely land in the same place, the session stops early, and that's exactly the outcome we want.
 
-Goal:
-Work with the other agent toward one stronger shared answer. Do not merely repeat earlier text. Identify what is already useful, correct weak points, add missing reasoning, and move the shared solution forward.
+You're not competing. You're building one answer that's better than either of you would reach alone: take what's good in the other agent's work, fix what's weak, add what's missing, and move the shared solution forward. Don't just echo what's already on the table.
 
-${structure}
-
-After the structured response above, output on its own final line exactly one of:
-CONVERGENCE: converged
-CONVERGENCE: open — <the specific point(s) you still disagree on with the other agent>
-Use "converged" only if you genuinely agree with the other agent's latest position and have nothing substantive left to add or dispute. This line is a control signal for the local orchestrator, not part of your answer.
-
-Answer in the same language as the user's latest message. Do not claim you directly share a provider-side session with another model; the local orchestrator is supplying the shared transcript. ${tools}
+${guidance}
+${control}
+Reply in the same language the user last used. You don't literally share a session with the other model — the local orchestrator is handing you the shared transcript, so don't pretend otherwise. ${tools}
 ${projectSnapshot ? `\n${projectSnapshot}\n` : ""}
-Latest user task:
+What the user asked for:
 ${clean(userTask)}
 
-Shared session transcript:
+The conversation so far:
 ${transcriptFor(session)}`;
 }
 
@@ -79,45 +103,27 @@ ${transcriptFor(session)}`;
 
 export function debatePrompt({ session, agentLabel, role, opponentLabel, round, totalRounds, userTask, independent, projectSnapshot = "" }) {
   const tools = projectSnapshot
-    ? `You may READ the attached project's files (Read/Grep/Glob) to ground your argument in the real code — read only, never modify files or run commands.`
-    : `Do not use tools, modify files, or run commands.`;
-  return `You are ${agentLabel}, participating in one persistent multi-agent session controlled by the user.
-Current mode: DEBATE.
-Your assigned position/role: ${role || "Critical debater"}.
-Opponent: ${opponentLabel}.
-Current debate round: ${round} of ${totalRounds}.
+    ? `You can READ the attached project (Read/Grep/Glob) to ground your argument in the real code — read only, never edit or run anything. When you cite the code, name the file (and the line when you can), and keep what you verified separate from what you're inferring.`
+    : `Argue from what's in front of you — don't reach for tools, edit files, or run commands.`;
+  const guidance = independent
+    ? `This is your opening. Form your own position from the task and the earlier context — don't shadow how your opponent framed theirs. Make the real case: where you stand and why, your strongest arguments, what you'll honestly concede, where the other side falls short, what evidence or test would actually change your mind, the call you'd make, and how confident you are (0–100). Argue it like you mean it, in your own voice — not as a checklist.`
+    : `This is a rebuttal, so go straight at the strongest opposing point on the table — don't re-argue your whole case. In a few sharp, honest lines: what you now concede from their last turn, your best specific challenge to it, anything genuinely new you're bringing this round, what's still unsettled between you, and your updated confidence (0–100).`;
+  const control = !independent
+    ? `\nOne housekeeping line for the orchestrator, not the reader: make the very last line of your message either\nCONVERGENCE: converged\nor\nCONVERGENCE: open — <what the two of you still dispute>\nSay "converged" only if this is genuinely settled for you — you now agree or fully concede and have nothing real left to contest. No quotes, no code block, no translation, and nothing written after it.\n`
+    : "";
+  return `You're ${agentLabel}, debating in a shared session that the user runs and ultimately decides on.
+Your position: ${role || "Critical debater"}.
+Across the table: ${opponentLabel}.
+This is round ${round}, with room for up to ${totalRounds} — but the session can stop early the moment the disagreement is genuinely resolved, so don't stretch it just to fill rounds.
 
-${independent
-    ? "This is the independent opening round. Form your position from the user's task and earlier session context without imitating an opponent's current-round answer."
-    : "This is a rebuttal round. Address the strongest opposing claims already present in the shared transcript. Concede valid points and challenge weak ones with specific reasoning."}
-
-${independent
-    ? `Required response structure:
-1. My position
-2. Strongest supporting arguments
-3. What I concede
-4. Rebuttal to the opposing position
-5. What evidence or test would change my mind
-6. Recommended decision
-7. Confidence from 0 to 100`
-    : `This is a rebuttal round — do NOT restate your whole position. Reply with ONLY your delta since the opponent's latest turn:
-1. Concede — what you now accept from their latest turn (skip if none)
-2. Rebuttal — your strongest specific challenge to their latest point
-3. New delta — any new argument or evidence you are adding this round (no full rewrite)
-4. Unresolved — what still stands between you, and your updated confidence (0–100)
-The final synthesis assembles the complete decision.`}
-
-After the structured response above, output on its own final line exactly one of:
-CONVERGENCE: converged
-CONVERGENCE: open — <the specific point(s) still in dispute with the opponent>
-Use "converged" only if the debate is genuinely resolved for you — you now agree or fully concede and have nothing substantive left to dispute. This line is a control signal for the local orchestrator, not part of your answer.
-
-Answer in the same language as the user's latest message. ${tools}
+${guidance}
+${control}
+Reply in the same language the user last used. ${tools}
 ${projectSnapshot ? `\n${projectSnapshot}\n` : ""}
-Debate question:
+The question on the table:
 ${clean(userTask)}
 
-Shared session transcript:
+The debate so far:
 ${transcriptFor(session)}`;
 }
 
