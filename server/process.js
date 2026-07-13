@@ -25,6 +25,10 @@ export function runProcess({ command, args = [], input = "", cwd, env = {}, onSt
     });
 
     registerChild?.(child);
+    // Cap each accumulated stream so a verbose/runaway CLI can't grow memory without bound.
+    // Streaming (onStdoutLine/onStderrLine) still gets every line; only the retained buffer
+    // is capped, with a one-time truncation marker appended.
+    const MAX_BUF = 4 * 1024 * 1024;
     let stdout = "";
     let stderr = "";
     let settled = false;
@@ -41,13 +45,15 @@ export function runProcess({ command, args = [], input = "", cwd, env = {}, onSt
 
     const stdoutRl = readline.createInterface({ input: child.stdout });
     stdoutRl.on("line", (line) => {
-      stdout += `${line}\n`;
+      if (stdout.length < MAX_BUF) stdout += `${line}\n`;
+      else if (!stdout.endsWith("…[truncated]\n")) stdout += "…[truncated]\n";
       onStdoutLine?.(line);
     });
 
     const stderrRl = readline.createInterface({ input: child.stderr });
     stderrRl.on("line", (line) => {
-      stderr += `${line}\n`;
+      if (stderr.length < MAX_BUF) stderr += `${line}\n`;
+      else if (!stderr.endsWith("…[truncated]\n")) stderr += "…[truncated]\n";
       onStderrLine?.(line);
     });
 
