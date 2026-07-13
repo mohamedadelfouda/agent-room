@@ -1,0 +1,8 @@
+# Real session transcripts contain private prompts/answers/paths — never commit them.
+data/sessions/*.json
+!data/sessions/.gitkeep
+# Logs may contain paths/errors — keep them local.
+logs/
+*.log
+node_modules/
+.DS_Store
