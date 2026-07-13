@@ -165,7 +165,8 @@ export async function rejectExecution(sessionId, taskId) {
   const session = await getSession(sessionId);
   const rec = findExecution(session, taskId);
   if (!rec) throw new Error("Execution not found");
-  await removeWorktree(session.project.path, rec.worktree.path, rec.worktree.branch);
+  // A blocked_secret record has no worktree (already discarded) — guard against it.
+  if (rec.worktree?.path) await removeWorktree(session.project.path, rec.worktree.path, rec.worktree.branch);
   rec.status = "rejected";
   rec.decidedAt = new Date().toISOString();
   await saveSession(session);

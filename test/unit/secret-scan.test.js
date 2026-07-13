@@ -25,6 +25,13 @@ test("detects secret-looking assignments", () => {
   assert.ok(scanForSecrets([{ path: "a.js", content: 'const password = "hunter2xyz";' }]).some((x) => x.rule === "secret-assignment"));
 });
 
+test("detects unquoted secret assignments but not code refs", () => {
+  assert.ok(scanForSecrets([{ path: "config.sh", content: "DB_PASSWORD=supersecretlongvalue" }]).some((x) => x.rule === "secret-assignment-unquoted"));
+  // env-var / code references should not false-positive
+  assert.deepEqual(scanForSecrets([{ path: "a.js", content: "const password = process.env.PW;" }]), []);
+  assert.deepEqual(scanForSecrets([{ path: "a.js", content: "let secret = require('./s');" }]), []);
+});
+
 test("reports the line number but never the secret value", () => {
   const f = scanForSecrets([{ path: "a", content: "line1\nx = sk-abcdefghij1234567890xyz\nline3" }]);
   const hit = f.find((x) => x.rule === "openai-key");

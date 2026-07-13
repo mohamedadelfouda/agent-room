@@ -19,45 +19,59 @@ export async function isGitRepo(projectPath) {
 }
 
 // Create an isolated worktree + branch for one executor. Never share a worktree between agents.
+// Captures the base SHA it branches from so the diff/secret-scan can be taken against the
+// branch point — NOT HEAD — otherwise an executor that runs `git commit` itself would move
+// HEAD past its own change and hide it from a HEAD-based diff.
 export async function createWorktree(projectPath, agent, taskId) {
   if (!SAFE.test(agent) || !SAFE.test(taskId)) throw new Error("Invalid agent/taskId");
   if (!(await isGitRepo(projectPath))) throw new Error("Project is not a git repository");
+  const { stdout: sha } = await git(["rev-parse", "HEAD"], projectPath);
+  const baseSha = sha.trim();
   const rel = path.join(".agent-workspaces", agent, taskId);
   const wtPath = path.join(projectPath, rel);
   const branch = `agent/${agent}/${taskId}`;
   await fs.mkdir(path.dirname(wtPath), { recursive: true });
   await git(["worktree", "add", "-b", branch, wtPath, "HEAD"], projectPath);
-  return { path: wtPath, branch, rel };
+  return { path: wtPath, branch, rel, baseSha };
 }
 
-// Full diff of what the executor changed (tracked + untracked), plus a compact stat.
-// Diffs against HEAD — not the index — so it captures changes the agent may have
-// already `git add`-ed as well as unstaged ones; otherwise a staged change would be
-// invisible here yet still get committed. `add -N` (intent-to-add) makes untracked
-// files show up WITHOUT writing their blobs to the object database (nothing is stored
-// until a real commit, after the secret scan passes and the user accepts).
-export async function getDiff(wtPath) {
+// Full diff of what the executor changed since the branch point, plus a compact stat.
+// Diffs against baseSha (the branch point) — not HEAD — so it captures changes the agent
+// staged AND any it committed itself (which would otherwise move HEAD past them and hide
+// them). `add -N` (intent-to-add) makes untracked files show up WITHOUT writing their
+// blobs to the object database (nothing is stored until a real commit, after the secret
+// scan passes and the user accepts).
+export async function getDiff(wtPath, baseSha) {
+  const base = baseSha || "HEAD";
   await git(["add", "-A", "-N"], wtPath);
-  const { stdout: patch } = await git(["diff", "HEAD", "--no-color"], wtPath);
-  const { stdout: stat } = await git(["diff", "HEAD", "--stat", "--no-color"], wtPath);
-  const { stdout: names } = await git(["diff", "HEAD", "--name-status", "--no-color"], wtPath);
+  const { stdout: patch } = await git(["diff", base, "--no-color"], wtPath);
+  const { stdout: stat } = await git(["diff", base, "--stat", "--no-color"], wtPath);
+  const { stdout: names } = await git(["diff", base, "--name-status", "--no-color"], wtPath);
   return { patch, stat: stat.trim(), files: names.trim() };
 }
 
-// The changed + new files with their current on-disk contents, for the secret scan.
-// Deleted files are skipped (nothing to scan); binary/unreadable files come back with
-// empty content so only their filename is checked.
-export async function changedFiles(wtPath) {
-  const { stdout } = await git(["status", "--porcelain", "--untracked-files=all"], wtPath);
+const MAX_SCAN_BYTES = 2 * 1024 * 1024;
+
+// The changed + new files (since baseSha) with their current on-disk contents, for the
+// secret scan. Enumerated with `-z` so non-ASCII names aren't C-quoted. Deleted files are
+// skipped; symlinks are NOT followed (a symlink to /dev/zero or a huge file would hang/OOM)
+// and only their name is checked; files over MAX_SCAN_BYTES are name-checked only.
+export async function changedFiles(wtPath, baseSha) {
+  const base = baseSha || "HEAD";
+  const names = new Set();
+  const { stdout: diffZ } = await git(["diff", base, "--name-only", "-z"], wtPath);
+  for (const n of diffZ.split("\0")) if (n) names.add(n);
+  const { stdout: untrackedZ } = await git(["ls-files", "--others", "--exclude-standard", "-z"], wtPath);
+  for (const n of untrackedZ.split("\0")) if (n) names.add(n);
+
   const out = [];
-  for (const line of stdout.split(/\r?\n/)) {
-    if (!line.trim()) continue;
-    if (line.slice(0, 2).includes("D")) continue;
-    let rel = line.slice(3).trim();
-    if (rel.includes(" -> ")) rel = rel.split(" -> ").pop();
-    rel = rel.replace(/^"(.*)"$/, "$1");
+  for (const rel of names) {
+    const full = path.join(wtPath, rel);
+    let st;
+    try { st = await fs.lstat(full); } catch { continue; } // deleted / gone — nothing to scan
+    if (st.isSymbolicLink() || !st.isFile()) { out.push({ path: rel, content: "" }); continue; }
     let content = "";
-    try { content = await fs.readFile(path.join(wtPath, rel), "utf8"); } catch {}
+    try { if (st.size <= MAX_SCAN_BYTES) content = await fs.readFile(full, "utf8"); } catch {}
     out.push({ path: rel, content });
   }
   return out;

@@ -85,3 +85,51 @@ test("getDiff shows changes the agent already staged (diff vs HEAD, not index)",
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("a secret the executor commits ITSELF is still caught (scan vs base SHA)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "ar-selfcommit-"));
+  try {
+    git(dir, "init", "-q");
+    git(dir, "config", "user.email", "t@example.com");
+    git(dir, "config", "user.name", "t");
+    writeFileSync(join(dir, "README.md"), "hello\n");
+    git(dir, "add", "-A");
+    git(dir, "commit", "-qm", "init");
+    const baseSha = git(dir, "rev-parse", "HEAD").trim();
+
+    // The executor writes a secret and commits it itself — HEAD moves past it, so a
+    // HEAD-based scan would see nothing. The base-SHA scan must still catch it.
+    writeFileSync(join(dir, "deploy.sh"), "AWS_KEY=AKIAIOSFODNN7EXAMPLE\n");
+    git(dir, "add", "-A");
+    git(dir, "commit", "-qm", "wip");
+
+    const files = await changedFiles(dir, baseSha);
+    assert.ok(files.some((f) => f.path === "deploy.sh"), "self-committed file must be scanned");
+    assert.ok(hasBlockingSecrets(scanForSecrets(files)), "self-committed secret must block");
+    assert.match((await getDiff(dir, baseSha)).files, /deploy\.sh/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a secret in a non-ASCII filename is read and scanned", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "ar-unicode-"));
+  try {
+    git(dir, "init", "-q");
+    git(dir, "config", "user.email", "t@example.com");
+    git(dir, "config", "user.name", "t");
+    writeFileSync(join(dir, "README.md"), "hello\n");
+    git(dir, "add", "-A");
+    git(dir, "commit", "-qm", "init");
+    const baseSha = git(dir, "rev-parse", "HEAD").trim();
+
+    writeFileSync(join(dir, "café.js"), "const k = 'sk-abcdefghij1234567890xyz';\n");
+    const files = await changedFiles(dir, baseSha);
+    const hit = files.find((f) => f.path.includes("caf"));
+    assert.ok(hit, "non-ASCII filename must be listed");
+    assert.ok(hit.content.includes("sk-"), "its content must actually be read");
+    assert.ok(hasBlockingSecrets(scanForSecrets(files)));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

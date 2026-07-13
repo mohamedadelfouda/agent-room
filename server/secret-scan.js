@@ -25,6 +25,10 @@ const CONTENT_RULES = [
   { rule: "google-api-key", severity: "high", re: /\bAIza[0-9A-Za-z_-]{35}\b/ },
   { rule: "aws-secret-key", severity: "high", re: /aws_secret_access_key\s*[=:]\s*['"]?[A-Za-z0-9/+]{40}/i },
   { rule: "secret-assignment", severity: "high", re: /(?:api[_-]?key|secret|password|passwd|access[_-]?token|auth[_-]?token)\s*[=:]\s*['"][^'"\n]{8,}['"]/i },
+  // Unquoted form (dotenv / shell / Dockerfile ENV): KEY=longvalue with no quotes. Requires
+  // a 12+ char value and skips obvious code refs (process.env, require, literals) to limit
+  // false positives; still fail-closed, so the user reviews anything it flags.
+  { rule: "secret-assignment-unquoted", severity: "high", re: /(?:api[_-]?key|secret|password|passwd|access[_-]?token|auth[_-]?token)\s*[=:]\s*(?!(?:process|os|env|require|import|null|true|false|undefined)\b)[^\s'"#][^\s'"]{11,}/i },
 ];
 
 // files: [{ path, content }]. content "" for binary/unreadable (filename check still runs).

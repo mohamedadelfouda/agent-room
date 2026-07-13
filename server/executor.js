@@ -2,6 +2,7 @@ import { createWorktree, getDiff, commitAll, changedFiles } from "./worktree.js"
 import { runClaude } from "./adapters/claude.js";
 import { runCodex } from "./adapters/codex.js";
 import { scanForSecrets, hasBlockingSecrets } from "./secret-scan.js";
+import { redact } from "./logger.js";
 
 const adapters = { claude: runClaude, codex: runCodex };
 
@@ -23,11 +24,11 @@ export async function runExecution({ projectPath, executor, mode = "edit", task,
     registerChild,
   });
 
-  const diff = await getDiff(wt.path);
-  // Scan the changed file CONTENTS before committing — a secret must not enter the git
-  // object database via our auto-commit. Only commit when the scan is clean; a blocked
-  // execution never gets a commit, and the caller discards the worktree.
-  const secretFindings = scanForSecrets(await changedFiles(wt.path));
+  // Scan against the branch point (baseSha), not HEAD, so anything the executor committed
+  // itself is included. Scan the changed file CONTENTS before committing — a secret must
+  // not enter the object database via our auto-commit; only commit when the scan is clean.
+  const diff = await getDiff(wt.path, wt.baseSha);
+  const secretFindings = scanForSecrets(await changedFiles(wt.path, wt.baseSha));
   let committed = false;
   if (!hasBlockingSecrets(secretFindings)) {
     await commitAll(wt.path, `agent(${executor}): ${String(task).slice(0, 60)}`);
@@ -37,8 +38,9 @@ export async function runExecution({ projectPath, executor, mode = "edit", task,
     taskId,
     executor,
     mode,
-    worktree: { path: wt.path, branch: wt.branch, rel: wt.rel },
-    text: result.text,
+    worktree: { path: wt.path, branch: wt.branch, rel: wt.rel, baseSha: wt.baseSha },
+    // Redact the agent's own narration — it can echo a secret it created ("I set KEY=sk-…").
+    text: redact(result.text),
     meta: { model: result.model ?? null, effort: result.effort ?? null, durationMs: result.durationMs ?? null, exitCode: result.exitCode ?? null },
     diff,
     secretFindings,
