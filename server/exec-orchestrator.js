@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { getSession, saveSession } from "./store.js";
 import { runExecution } from "./executor.js";
-import { removeWorktree, mergeBranch, pushBranch, hasRemote } from "./worktree.js";
+import { removeWorktree, mergeBranch, pushBranch, hasRemote, pruneObjects } from "./worktree.js";
 import { runClaude } from "./adapters/claude.js";
 import { runCodex } from "./adapters/codex.js";
 import { terminateProcess } from "./process.js";
@@ -71,6 +71,9 @@ export async function runExecuteAndReview(sessionId, req, emit) {
     if (hasBlockingSecrets(execResult.secretFindings)) {
       emit({ type: "exec_phase", phase: "blocked_secret", agent: executor });
       await removeWorktree(project.path, execResult.worktree.path, execResult.worktree.branch);
+      // If the executor committed the secret to its (now-deleted) branch itself, purge the
+      // orphaned objects so the value isn't recoverable from the repo.
+      await pruneObjects(project.path);
       const sBlocked = await getSession(sessionId);
       sBlocked.executions = sBlocked.executions || [];
       sBlocked.executions.push({
@@ -106,6 +109,7 @@ export async function runExecuteAndReview(sessionId, req, emit) {
       worktree: execResult.worktree,
       executorText: execResult.text, executorMeta: execResult.meta,
       diff: { files: execResult.diff.files, stat: execResult.diff.stat, patch: String(execResult.diff.patch).slice(0, 200000) },
+      secretFindings: execResult.secretFindings, // non-blocking warnings (e.g. unscanned large files)
       review, status: "awaiting_user", createdAt: new Date().toISOString(),
     };
     const s2 = await getSession(sessionId);

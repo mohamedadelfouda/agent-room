@@ -70,8 +70,11 @@ export async function changedFiles(wtPath, baseSha) {
     let st;
     try { st = await fs.lstat(full); } catch { continue; } // deleted / gone — nothing to scan
     if (st.isSymbolicLink() || !st.isFile()) { out.push({ path: rel, content: "" }); continue; }
+    // Files over the cap are flagged (oversize) so the scan can surface that they were
+    // NOT content-scanned, rather than silently checking only the filename.
+    if (st.size > MAX_SCAN_BYTES) { out.push({ path: rel, content: "", oversize: true }); continue; }
     let content = "";
-    try { if (st.size <= MAX_SCAN_BYTES) content = await fs.readFile(full, "utf8"); } catch {}
+    try { content = await fs.readFile(full, "utf8"); } catch {}
     out.push({ path: rel, content });
   }
   return out;
@@ -107,6 +110,14 @@ export async function mergeBranch(projectPath, branch) {
 // Push the executor's branch to origin (needed before opening a PR).
 export async function pushBranch(projectPath, branch) {
   await git(["push", "-u", "origin", branch], projectPath);
+}
+
+// Purge now-unreachable loose objects (best-effort). Used after discarding a
+// blocked-secret execution: if the executor committed a secret to its branch itself,
+// deleting the branch leaves those commits/blobs unreachable — prune drops them. Only
+// removes objects unreachable from refs/reflogs, so the user's own data is untouched.
+export async function pruneObjects(projectPath) {
+  try { await git(["prune", "--expire=now"], projectPath); } catch {}
 }
 
 // Discard an executor's worktree and its branch (used on reject / cleanup).
