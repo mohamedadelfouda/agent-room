@@ -31,12 +31,34 @@ export async function createWorktree(projectPath, agent, taskId) {
 }
 
 // Full diff of what the executor changed (tracked + untracked), plus a compact stat.
+// Uses `add -N` (intent-to-add) so untracked files appear in the diff WITHOUT writing
+// their blobs into the object database — nothing is stored until a real commit, which
+// only happens after the secret scan passes and the user accepts.
 export async function getDiff(wtPath) {
-  await git(["add", "-A"], wtPath);
-  const { stdout: patch } = await git(["diff", "--cached", "--no-color"], wtPath);
-  const { stdout: stat } = await git(["diff", "--cached", "--stat", "--no-color"], wtPath);
-  const { stdout: names } = await git(["diff", "--cached", "--name-status", "--no-color"], wtPath);
+  await git(["add", "-A", "-N"], wtPath);
+  const { stdout: patch } = await git(["diff", "--no-color"], wtPath);
+  const { stdout: stat } = await git(["diff", "--stat", "--no-color"], wtPath);
+  const { stdout: names } = await git(["diff", "--name-status", "--no-color"], wtPath);
   return { patch, stat: stat.trim(), files: names.trim() };
+}
+
+// The changed + new files with their current on-disk contents, for the secret scan.
+// Deleted files are skipped (nothing to scan); binary/unreadable files come back with
+// empty content so only their filename is checked.
+export async function changedFiles(wtPath) {
+  const { stdout } = await git(["status", "--porcelain", "--untracked-files=all"], wtPath);
+  const out = [];
+  for (const line of stdout.split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    if (line.slice(0, 2).includes("D")) continue;
+    let rel = line.slice(3).trim();
+    if (rel.includes(" -> ")) rel = rel.split(" -> ").pop();
+    rel = rel.replace(/^"(.*)"$/, "$1");
+    let content = "";
+    try { content = await fs.readFile(path.join(wtPath, rel), "utf8"); } catch {}
+    out.push({ path: rel, content });
+  }
+  return out;
 }
 
 export async function listWorktrees(projectPath) {

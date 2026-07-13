@@ -5,6 +5,7 @@ import { removeWorktree, mergeBranch, pushBranch, hasRemote } from "./worktree.j
 import { runClaude } from "./adapters/claude.js";
 import { runCodex } from "./adapters/codex.js";
 import { terminateProcess } from "./process.js";
+import { hasBlockingSecrets } from "./secret-scan.js";
 import { logError } from "./logger.js";
 
 const activeExec = new Map();
@@ -64,6 +65,26 @@ export async function runExecuteAndReview(sessionId, req, emit) {
       onEvent: (e) => emit({ type: "exec_activity", agent: executor, event: e }),
       registerChild,
     });
+
+    // Secret gate: if the change carries secrets, stop before review/commit, discard
+    // the worktree, and surface the findings (path/rule/line only — never the value).
+    if (hasBlockingSecrets(execResult.secretFindings)) {
+      emit({ type: "exec_phase", phase: "blocked_secret", agent: executor });
+      await removeWorktree(project.path, execResult.worktree.path, execResult.worktree.branch);
+      const sBlocked = await getSession(sessionId);
+      sBlocked.executions = sBlocked.executions || [];
+      sBlocked.executions.push({
+        taskId: execResult.taskId, executor, reviewer, mode, task,
+        executorText: execResult.text, executorMeta: execResult.meta,
+        diff: { files: execResult.diff.files, stat: execResult.diff.stat, patch: "" },
+        secretFindings: execResult.secretFindings,
+        review: null, status: "blocked_secret", createdAt: new Date().toISOString(),
+      });
+      await saveSession(sBlocked);
+      emit({ type: "exec_secret_blocked", taskId: execResult.taskId, findings: execResult.secretFindings });
+      emit({ type: "exec_ready", taskId: execResult.taskId });
+      return;
+    }
 
     // 2) Reviewer reads the diff (read-only, no writing).
     let review = null;

@@ -1,6 +1,7 @@
-import { createWorktree, getDiff, commitAll } from "./worktree.js";
+import { createWorktree, getDiff, commitAll, changedFiles } from "./worktree.js";
 import { runClaude } from "./adapters/claude.js";
 import { runCodex } from "./adapters/codex.js";
+import { scanForSecrets, hasBlockingSecrets } from "./secret-scan.js";
 
 const adapters = { claude: runClaude, codex: runCodex };
 
@@ -23,8 +24,15 @@ export async function runExecution({ projectPath, executor, mode = "edit", task,
   });
 
   const diff = await getDiff(wt.path);
-  // Commit the executor's work onto its branch so accept (merge/PR) has something to take.
-  await commitAll(wt.path, `agent(${executor}): ${String(task).slice(0, 60)}`);
+  // Scan the changed file CONTENTS before committing — a secret must not enter the git
+  // object database via our auto-commit. Only commit when the scan is clean; a blocked
+  // execution never gets a commit, and the caller discards the worktree.
+  const secretFindings = scanForSecrets(await changedFiles(wt.path));
+  let committed = false;
+  if (!hasBlockingSecrets(secretFindings)) {
+    await commitAll(wt.path, `agent(${executor}): ${String(task).slice(0, 60)}`);
+    committed = true;
+  }
   return {
     taskId,
     executor,
@@ -33,5 +41,7 @@ export async function runExecution({ projectPath, executor, mode = "edit", task,
     text: result.text,
     meta: { model: result.model ?? null, effort: result.effort ?? null, durationMs: result.durationMs ?? null, exitCode: result.exitCode ?? null },
     diff,
+    secretFindings,
+    committed,
   };
 }
