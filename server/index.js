@@ -11,6 +11,7 @@ import { runOrchestration, stopRun, isRunning, abortAllRuns } from "./orchestrat
 import { runExecuteAndReview, acceptExecution, rejectExecution, isExecuting, stopExec } from "./exec-orchestrator.js";
 import { isGitRepo, hasRemote } from "./worktree.js";
 import { logInfo, logError, logPath } from "./logger.js";
+import { hostAllowed, checkApiAuth, issueCookieHeader, securityHeaders } from "./security.js";
 
 // First-run detection: are the CLIs installed + is GitHub authed? Uses shell-aware runners
 // so Windows .cmd shims (like codex.cmd) resolve correctly.
@@ -92,7 +93,7 @@ const PORT = Number(process.env.PORT || 3210);
 const clients = new Map();
 
 function json(res, status, data) {
-  res.writeHead(status, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
+  res.writeHead(status, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store", ...securityHeaders() });
   res.end(JSON.stringify(data));
 }
 
@@ -117,6 +118,7 @@ function addSseClient(sessionId, req, res) {
     "Content-Type": "text/event-stream; charset=utf-8",
     "Cache-Control": "no-cache, no-transform",
     Connection: "keep-alive",
+    ...securityHeaders(),
   });
   res.write(`data: ${JSON.stringify({ type: "connected", sessionId })}\n\n`);
   const set = clients.get(sessionId) ?? new Set();
@@ -141,7 +143,10 @@ async function serveStatic(urlPath, res) {
   if (!filePath.startsWith(PUBLIC_DIR)) return false;
   try {
     const data = await fs.readFile(filePath);
-    res.writeHead(200, { "Content-Type": `${mimeType(filePath)}; charset=utf-8`, "Cache-Control": "no-store" });
+    const headers = { "Content-Type": `${mimeType(filePath)}; charset=utf-8`, "Cache-Control": "no-store", ...securityHeaders() };
+    // The HTML page carries the session cookie that authorizes subsequent /api calls.
+    if (requested === "/index.html") headers["Set-Cookie"] = issueCookieHeader();
+    res.writeHead(200, headers);
     res.end(data);
     return true;
   } catch {
@@ -162,6 +167,18 @@ const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host || "localhost"}`);
   const parts = url.pathname.split("/").filter(Boolean);
   try {
+    // Global host allowlist (DNS-rebinding defense) — reject before any routing or body read.
+    if (!hostAllowed(req.headers.host, PORT)) {
+      res.writeHead(403, { "Content-Type": "text/plain; charset=utf-8", ...securityHeaders() });
+      return res.end("Forbidden host");
+    }
+    // Every /api/* route requires the per-run session token (cookie or header),
+    // plus a matching Origin for state-changing methods. The page itself (served
+    // statically) needs no token — it's what delivers the cookie.
+    if (parts[0] === "api") {
+      const auth = checkApiAuth(req, PORT);
+      if (!auth.ok) return json(res, auth.status, { error: auth.error });
+    }
     if (req.method === "GET" && url.pathname === "/api/health") {
       return json(res, 200, { ok: true, node: process.version, platform: process.platform });
     }
@@ -251,6 +268,7 @@ const server = http.createServer(async (req, res) => {
       res.writeHead(200, {
         "Content-Type": "text/markdown; charset=utf-8",
         "Content-Disposition": `attachment; filename=\"agent-room-${session.id}.md\"`,
+        ...securityHeaders(),
       });
       return res.end(md);
     }
