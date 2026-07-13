@@ -69,7 +69,6 @@ export async function runCodex({ prompt, config, cwd, onEvent, registerChild }) 
 
   let sessionId = null;
   let errorMessage = null;
-  const rawEvents = [];
   const startedAt = Date.now();
   const result = await runProcess({
     command,
@@ -80,7 +79,6 @@ export async function runCodex({ prompt, config, cwd, onEvent, registerChild }) 
     onStdoutLine(line) {
       try {
         const parsed = JSON.parse(line);
-        rawEvents.push(parsed);
         sessionId ||= extractSessionId(parsed);
         const type = String(parsed.type || "");
         if (type === "error" || type === "turn.failed") errorMessage = extractCodexError(parsed) || errorMessage;
@@ -111,13 +109,14 @@ export async function runCodex({ prompt, config, cwd, onEvent, registerChild }) 
     Object.assign(error, meta);
     throw error;
   }
-  if (!finalText) finalText = result.stdout.trim();
+  // No raw-stdout fallback: the final answer comes only from Codex's --output-last-message
+  // file. Raw stdout is the JSON event stream (can carry reasoning) — never surface it.
   if (!finalText) {
     const error = new Error("Codex completed without a final response");
     Object.assign(error, meta);
     throw error;
   }
-  return { text: finalText, sessionId, rawEvents, ...meta };
+  return { text: finalText, sessionId, ...meta };
 }
 
 export async function discoverCodexModels({ command = "codex" } = {}) {
