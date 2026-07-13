@@ -61,3 +61,27 @@ test("a clean change scans clean", async () => {
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("getDiff shows changes the agent already staged (diff vs HEAD, not index)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "ar-staged-"));
+  try {
+    git(dir, "init", "-q");
+    git(dir, "config", "user.email", "t@example.com");
+    git(dir, "config", "user.name", "t");
+    writeFileSync(join(dir, "README.md"), "hello\n");
+    git(dir, "add", "-A");
+    git(dir, "commit", "-qm", "init");
+
+    // The agent modifies + stages a file itself, plus leaves an untracked one.
+    writeFileSync(join(dir, "README.md"), "hello\nworld\n");
+    git(dir, "add", "README.md");
+    writeFileSync(join(dir, "new.js"), "export const y = 2;\n");
+
+    const diff = await getDiff(dir);
+    assert.match(diff.files, /README\.md/, "staged change must appear in the review diff");
+    assert.match(diff.files, /new\.js/, "untracked change must appear");
+    assert.match(diff.patch, /world/, "staged content must be in the patch");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

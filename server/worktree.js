@@ -31,14 +31,16 @@ export async function createWorktree(projectPath, agent, taskId) {
 }
 
 // Full diff of what the executor changed (tracked + untracked), plus a compact stat.
-// Uses `add -N` (intent-to-add) so untracked files appear in the diff WITHOUT writing
-// their blobs into the object database — nothing is stored until a real commit, which
-// only happens after the secret scan passes and the user accepts.
+// Diffs against HEAD — not the index — so it captures changes the agent may have
+// already `git add`-ed as well as unstaged ones; otherwise a staged change would be
+// invisible here yet still get committed. `add -N` (intent-to-add) makes untracked
+// files show up WITHOUT writing their blobs to the object database (nothing is stored
+// until a real commit, after the secret scan passes and the user accepts).
 export async function getDiff(wtPath) {
   await git(["add", "-A", "-N"], wtPath);
-  const { stdout: patch } = await git(["diff", "--no-color"], wtPath);
-  const { stdout: stat } = await git(["diff", "--stat", "--no-color"], wtPath);
-  const { stdout: names } = await git(["diff", "--name-status", "--no-color"], wtPath);
+  const { stdout: patch } = await git(["diff", "HEAD", "--no-color"], wtPath);
+  const { stdout: stat } = await git(["diff", "HEAD", "--stat", "--no-color"], wtPath);
+  const { stdout: names } = await git(["diff", "HEAD", "--name-status", "--no-color"], wtPath);
   return { patch, stat: stat.trim(), files: names.trim() };
 }
 
