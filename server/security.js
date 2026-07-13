@@ -8,12 +8,14 @@ import crypto from "node:crypto";
 // (SameSite=Strict), which — together with the Host and Origin checks — closes the
 // unauthenticated-localhost / DNS-rebinding / CSRF hole.
 const TOKEN = crypto.randomBytes(32).toString("hex");
+const TOKEN_BUF = Buffer.from(TOKEN);
 const COOKIE_NAME = "agentRoomToken";
 const MUTATING = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 
 export function issueCookieHeader() {
-  // No Secure flag: the server is plain http on 127.0.0.1. Session-lifetime cookie.
-  return `${COOKIE_NAME}=${TOKEN}; HttpOnly; SameSite=Strict; Path=/; Max-Age=86400`;
+  // No Secure flag: plain http on 127.0.0.1. Session cookie (no Max-Age) — the token is
+  // regenerated each server run, so it shouldn't outlive the browser session.
+  return `${COOKIE_NAME}=${TOKEN}; HttpOnly; SameSite=Strict; Path=/`;
 }
 
 function parseCookies(header = "") {
@@ -34,14 +36,13 @@ export function hostAllowed(host, port) {
   return p === undefined || p === String(port);
 }
 
+// Requires an exact port match. Cookies are scoped to the host, not the port, so a page
+// on another local port (e.g. 127.0.0.1:80, whose Origin omits the port) is a different
+// origin that must not pass just because the port is blank. Assumes a present origin.
 function originAllowed(origin, port) {
-  if (!origin) return true; // same-origin GETs and non-browser clients send no Origin
   let u;
   try { u = new URL(origin); } catch { return false; }
   if (!LOOPBACK.has(u.hostname)) return false;
-  // Require an exact port match. Cookies are scoped to the host, not the port, so a
-  // page on another local port (e.g. 127.0.0.1:80, whose Origin omits the port) is a
-  // different origin that must not pass the CSRF check just because the port is blank.
   const originPort = u.port || (u.protocol === "https:" ? "443" : "80");
   return originPort === String(port);
 }
@@ -51,11 +52,20 @@ function originAllowed(origin, port) {
 // globally (see hostAllowed) so even non-/api requests can't be reached via a
 // rebound hostname.
 export function checkApiAuth(req, port) {
-  if (MUTATING.has(req.method) && !originAllowed(req.headers.origin, port)) {
-    return { ok: false, status: 403, error: "Forbidden origin" };
+  // State-changing requests MUST carry a matching Origin. A missing Origin is rejected:
+  // the app always sends one on its POSTs, and accepting "no Origin" would let a
+  // same-host cross-port page (the cookie is host-scoped, so it still attaches) bypass
+  // the port-isolation check.
+  if (MUTATING.has(req.method)) {
+    const origin = req.headers.origin;
+    if (!origin || !originAllowed(origin, port)) return { ok: false, status: 403, error: "Forbidden origin" };
   }
   const provided = parseCookies(req.headers.cookie)[COOKIE_NAME] || req.headers["x-agent-room-token"];
-  if (!provided || provided.length !== TOKEN.length || !crypto.timingSafeEqual(Buffer.from(provided), Buffer.from(TOKEN))) {
+  if (!provided) return { ok: false, status: 401, error: "Unauthorized" };
+  // Compare by BYTE length (Buffer), not string length — a multi-byte string could match
+  // TOKEN's char count but differ in bytes and make timingSafeEqual throw.
+  const providedBuf = Buffer.from(provided);
+  if (providedBuf.length !== TOKEN_BUF.length || !crypto.timingSafeEqual(providedBuf, TOKEN_BUF)) {
     return { ok: false, status: 401, error: "Unauthorized" };
   }
   return { ok: true };

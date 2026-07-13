@@ -58,6 +58,19 @@ test("checkApiAuth rejects same-host different-port writes (cookie is port-agnos
   assert.equal(checkApiAuth({ method: "POST", headers: { cookie, origin: "http://127.0.0.1:9999" } }, PORT).ok, false);
 });
 
+test("checkApiAuth rejects state-changing requests with NO Origin", () => {
+  const r = checkApiAuth({ method: "POST", headers: { cookie } }, PORT); // valid cookie, no Origin
+  assert.equal(r.ok, false);
+  assert.equal(r.status, 403);
+});
+
+test("checkApiAuth rejects a multi-byte token without throwing", () => {
+  // 64 chars but 65 UTF-8 bytes — must fail closed, not crash timingSafeEqual.
+  const multibyte = "a".repeat(63) + "é";
+  assert.doesNotThrow(() => checkApiAuth({ method: "GET", headers: { cookie: `agentRoomToken=${multibyte}` } }, PORT));
+  assert.equal(checkApiAuth({ method: "GET", headers: { cookie: `agentRoomToken=${multibyte}` } }, PORT).status, 401);
+});
+
 test("issueCookieHeader is HttpOnly + SameSite=Strict", () => {
   const c = issueCookieHeader();
   assert.match(c, /agentRoomToken=/);
