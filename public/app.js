@@ -483,7 +483,7 @@ function highlightDiff(patch) {
   }).join("\n");
 }
 function modeLabel(m) { return { edit: t("modeEdit"), run: t("modeRun"), full: t("modeFull") }[m] || m; }
-function execStatusLabel(s) { return { awaiting_user: t("execAwaiting"), merged: "merged ✓", pr_opened: "PR ✓", rejected: "rejected" }[s] || s; }
+function execStatusLabel(s) { return { awaiting_user: t("execAwaiting"), merged: "merged ✓", pr_opened: "PR ✓", rejected: "rejected", blocked_secret: "🔒 secrets blocked" }[s] || s; }
 function renderExecutions() {
   const chat = $("chat");
   for (const ex of currentSession?.executions ?? []) {
@@ -492,6 +492,7 @@ function renderExecutions() {
     body += `<div class="exec-part"><div class="exec-label">${esc(t("executor"))} (${esc(ex.executor)})</div><div class="exec-text">${esc(ex.executorText || "")}</div></div>`;
     if (ex.diff?.patch) body += `<div class="exec-part exec-diff"><div class="exec-label">${esc(ex.diff.files || "")}</div><pre>${highlightDiff(ex.diff.patch)}</pre></div>`;
     if (ex.review?.text) body += `<div class="exec-part"><div class="exec-label">${esc(t("reviewer"))} (${esc(ex.reviewer)})</div><div class="exec-text">${esc(ex.review.text)}</div></div>`;
+    if (ex.secretFindings?.length) body += `<div class="exec-part"><div class="exec-label">🔒 secret scan blocked this change — remove the secret and re-run</div><div class="exec-text">${ex.secretFindings.map((f) => `${esc(f.path)}${f.line ? ":" + f.line : ""} — ${esc(f.rule)} (${esc(f.severity)})`).join("<br>")}</div></div>`;
     if (ex.status === "awaiting_user") {
       body += `<div class="exec-decision"><button class="btn-primary" data-accept="merge" data-task="${esc(ex.taskId)}">${esc(t("mergeLocal"))}</button>`;
       if (currentSession.project?.hasRemote) body += `<button class="btn-ghost" data-accept="pr" data-task="${esc(ex.taskId)}">${esc(t("openPr"))}</button>`;
