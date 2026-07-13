@@ -32,9 +32,12 @@ export async function runClaude({ prompt, config, cwd, onEvent, registerChild })
   // pre-approves (it does not restrict), and --permission-mode auto is permissive,
   // so we also DENY Bash/Edit/Write explicitly — deny rules win, which keeps chat
   // read-only even if a web page it reads tries to trigger a write/command.
+  // "planread" lets a planning agent READ the attached project (Read/Grep/Glob) to ground
+  // its answer, but never edit, run commands, or search the web.
   const permission = config.permission || "read";
   const permArgs =
     permission === "chat" ? ["--permission-mode", "auto", "--allowedTools", "WebSearch,WebFetch,Read,Grep,Glob", "--disallowedTools", "Bash,Edit,Write,NotebookEdit"]
+    : permission === "planread" ? ["--permission-mode", "auto", "--allowedTools", "Read,Grep,Glob", "--disallowedTools", "Bash,Edit,Write,NotebookEdit"]
     : permission === "edit" ? ["--permission-mode", "acceptEdits", "--allowedTools", "Read Edit Write Grep Glob"]
     : (permission === "run" || permission === "full") ? ["--permission-mode", "bypassPermissions"]
     : ["--disallowedTools", "*"];

@@ -5,6 +5,7 @@ import { runCodex } from "./adapters/codex.js";
 import { runClaude } from "./adapters/claude.js";
 import { collaborationPrompt, debatePrompt, synthesisPrompt, chatPrompt } from "./prompts.js";
 import { parseConvergence, stripConvergence, assessRound } from "./convergence.js";
+import { projectSnapshot } from "./project.js";
 
 const activeRuns = new Map();
 const adapters = { codex: runCodex, claude: runClaude };
@@ -77,6 +78,11 @@ export async function runOrchestration(sessionId, request, emit) {
     const userTask = String(request.content || "").trim();
     if (!userTask) throw new Error("Write a message first");
 
+    // When a project is attached, planning turns read it (read-only) from its git root,
+    // grounded by one shared snapshot given to BOTH agents so they start from the same view.
+    const projectPath = session.project?.path || "";
+    const projSnapshot = projectPath ? await projectSnapshot(projectPath) : "";
+
     const selected = ["codex", "claude"].filter((key) => request.agents?.[key]?.enabled !== false);
     if (selected.length < 2) throw new Error("Enable Codex and Claude for this MVP");
 
@@ -95,7 +101,16 @@ export async function runOrchestration(sessionId, request, emit) {
 
     const callAgent = async (agent, prompt, round, phase) => {
       if (state.cancelled) throw new Error("Run stopped by user");
-      const cfg = phase === "chat" ? { ...request.agents[agent], permission: "chat" } : request.agents[agent];
+      // Planning turns run inside the attached project (read-only) so they can read its
+      // files; chat stays in the scratch workspace; unattached planning is text-only.
+      const isDiscussion = phase === "collaboration" || phase === "opening" || phase === "rebuttal" || phase === "synthesis";
+      const useProject = isDiscussion && projectPath;
+      const cfg = phase === "chat"
+        ? { ...request.agents[agent], permission: "chat" }
+        : useProject
+          ? { ...request.agents[agent], permission: "planread" }
+          : request.agents[agent];
+      const cwd = useProject ? projectPath : `${rootPath()}/workspace`;
       const role = String(cfg.role || (mode === "debate" ? "Debater" : "Collaborator"));
       const contextChars = prompt.length;
       const contextMessages = session.messages.length;
@@ -106,7 +121,7 @@ export async function runOrchestration(sessionId, request, emit) {
         result = await adapters[agent]({
           prompt,
           config: cfg,
-          cwd: `${rootPath()}/workspace`,
+          cwd,
           registerChild,
           onEvent(event) {
             if (event.kind === "delta") {
@@ -179,6 +194,7 @@ export async function runOrchestration(sessionId, request, emit) {
             round,
             totalRounds: rounds,
             userTask,
+            projectSnapshot: projSnapshot,
           });
           roundMsgs.push(await callAgent(agent, prompt, round, "collaboration"));
         }
@@ -202,6 +218,7 @@ export async function runOrchestration(sessionId, request, emit) {
           totalRounds: rounds,
           userTask,
           independent: true,
+          projectSnapshot: projSnapshot,
         });
         return callAgent(agent, prompt, 1, "opening");
       }));
@@ -219,6 +236,7 @@ export async function runOrchestration(sessionId, request, emit) {
             totalRounds: rounds,
             userTask,
             independent: false,
+            projectSnapshot: projSnapshot,
           });
           return callAgent(agent, prompt, round, "rebuttal");
         }));
@@ -254,6 +272,7 @@ export async function runOrchestration(sessionId, request, emit) {
         role: request.agents[finalizer].role,
         userTask,
         mode,
+        projectSnapshot: projSnapshot,
       });
       await callAgent(finalizer, prompt, rounds + 1, "synthesis");
     }
