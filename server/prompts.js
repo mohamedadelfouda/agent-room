@@ -19,7 +19,10 @@ export function transcriptFor(session, maxChars = 24000) {
   return joined;
 }
 
-export function collaborationPrompt({ session, agentLabel, role, round, totalRounds, userTask }) {
+export function collaborationPrompt({ session, agentLabel, role, round, totalRounds, userTask, projectSnapshot = "" }) {
+  const tools = projectSnapshot
+    ? `You may READ the attached project's files (Read/Grep/Glob) to ground your answer in the real code — read only, never modify files or run commands.`
+    : `Do not use tools, modify files, or run commands.`;
   return `You are ${agentLabel}, participating in one persistent multi-agent session controlled by the user.
 Current mode: COLLABORATION.
 Your assigned role: ${role || "Collaborator"}.
@@ -39,8 +42,8 @@ CONVERGENCE: converged
 CONVERGENCE: open — <the specific point(s) you still disagree on with the other agent>
 Use "converged" only if you genuinely agree with the other agent's latest position and have nothing substantive left to add or dispute. This line is a control signal for the local orchestrator, not part of your answer.
 
-Answer in the same language as the user's latest message. Do not claim you directly share a provider-side session with another model; the local orchestrator is supplying the shared transcript. Do not use tools, modify files, or run commands.
-
+Answer in the same language as the user's latest message. Do not claim you directly share a provider-side session with another model; the local orchestrator is supplying the shared transcript. ${tools}
+${projectSnapshot ? `\n${projectSnapshot}\n` : ""}
 Latest user task:
 ${clean(userTask)}
 
@@ -64,7 +67,10 @@ Shared session transcript (for context only):
 ${transcriptFor(session)}`;
 }
 
-export function debatePrompt({ session, agentLabel, role, opponentLabel, round, totalRounds, userTask, independent }) {
+export function debatePrompt({ session, agentLabel, role, opponentLabel, round, totalRounds, userTask, independent, projectSnapshot = "" }) {
+  const tools = projectSnapshot
+    ? `You may READ the attached project's files (Read/Grep/Glob) to ground your argument in the real code — read only, never modify files or run commands.`
+    : `Do not use tools, modify files, or run commands.`;
   return `You are ${agentLabel}, participating in one persistent multi-agent session controlled by the user.
 Current mode: DEBATE.
 Your assigned position/role: ${role || "Critical debater"}.
@@ -89,8 +95,8 @@ CONVERGENCE: converged
 CONVERGENCE: open — <the specific point(s) still in dispute with the opponent>
 Use "converged" only if the debate is genuinely resolved for you — you now agree or fully concede and have nothing substantive left to dispute. This line is a control signal for the local orchestrator, not part of your answer.
 
-Answer in the same language as the user's latest message. Do not use tools, modify files, or run commands.
-
+Answer in the same language as the user's latest message. ${tools}
+${projectSnapshot ? `\n${projectSnapshot}\n` : ""}
 Debate question:
 ${clean(userTask)}
 
@@ -98,7 +104,10 @@ Shared session transcript:
 ${transcriptFor(session)}`;
 }
 
-export function synthesisPrompt({ session, agentLabel, role, userTask, mode }) {
+export function synthesisPrompt({ session, agentLabel, role, userTask, mode, projectSnapshot = "" }) {
+  const tools = projectSnapshot
+    ? `You may READ the attached project's files (Read/Grep/Glob) to verify claims against the real code — read only, never modify files or run commands.`
+    : `Do not use tools or change files.`;
   return `You are ${agentLabel}, acting as the final synthesizer/judge in a persistent multi-agent session.
 Mode completed: ${String(mode).toUpperCase()}.
 Your role: ${role || "Judge and synthesizer"}.
@@ -114,8 +123,8 @@ Required response structure:
 6. الخطوة العملية التالية
 7. درجة الثقة
 
-Use the language of the user's latest message. Do not use tools or change files.
-
+Use the language of the user's latest message. ${tools}
+${projectSnapshot ? `\n${projectSnapshot}\n` : ""}
 Original/current user task:
 ${clean(userTask)}
 
