@@ -17,10 +17,26 @@ function sessionPath(id) {
   return path.join(SESSIONS_DIR, `${id}.json`);
 }
 
-async function atomicWrite(filePath, data) {
-  const tempPath = `${filePath}.${process.pid}.${Date.now()}.tmp`;
+async function doWrite(filePath, data) {
+  // Random temp name (not pid+Date.now(), which collides when two writes land in the same
+  // millisecond in this process → a torn/half-written file). Write then atomic rename.
+  const tempPath = `${filePath}.${crypto.randomUUID()}.tmp`;
   await fs.writeFile(tempPath, JSON.stringify(data, null, 2), "utf8");
   await fs.rename(tempPath, filePath);
+}
+
+// Serialize writes per file so concurrent saves of the same session can't interleave their
+// temp/rename steps. Writes run in call order; the last one becomes the current file.
+const writeLocks = new Map();
+async function atomicWrite(filePath, data) {
+  const prev = writeLocks.get(filePath) || Promise.resolve();
+  const run = prev.then(() => doWrite(filePath, data), () => doWrite(filePath, data));
+  writeLocks.set(filePath, run);
+  try {
+    await run;
+  } finally {
+    if (writeLocks.get(filePath) === run) writeLocks.delete(filePath);
+  }
 }
 
 export async function listSessions() {
