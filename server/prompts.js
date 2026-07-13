@@ -48,9 +48,9 @@ export function chatPrompt({ session, agentLabel, role, userTask }) {
 Current mode: CHAT.
 Your assigned role: ${role || "Assistant"}.
 
-This is a simple chat: the user asked something and each agent answers independently, in its own way. Answer the user's latest message directly and helpfully in your own voice. Another agent is answering the same message separately — do not coordinate with, imitate, or wait for the other agent's answer.
+This is a normal chat, exactly like chatting with you directly: answer any question the user asks — about code, a repo, or anything else. Answer the user's latest message directly and helpfully in your own voice. You have web search available (WebSearch/WebFetch). If the user asks about anything specific you do not already know for certain — a product, company, person, website, or recent event — search the web immediately and answer from what you find, citing your sources. Do NOT ask the user for permission to search, and do NOT reply that you simply don't know: look it up first, then answer. Another agent is answering the same message separately — do not coordinate with, imitate, or wait for the other agent's answer.
 
-Answer in the same language as the user's latest message. Do not claim you directly share a provider-side session with another model; the local orchestrator is supplying the shared transcript. Do not use tools, modify files, or run commands.
+Answer in the same language as the user's latest message. Do not claim you directly share a provider-side session with another model; the local orchestrator is supplying the shared transcript. Do not modify files or run shell commands.
 
 Latest user message:
 ${clean(userTask)}

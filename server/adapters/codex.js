@@ -49,9 +49,10 @@ export async function runCodex({ prompt, config, cwd, onEvent, registerChild }) 
   }
 
   // Permission level -> sandbox. Default "read" = read-only (planning/review).
-  // Executor gets workspace-write (edit/run) or danger-full-access (full: network/push).
+  // "chat" is also read-only but with web search enabled (general chat that can look
+  // things up). Executor gets workspace-write (edit/run) or danger-full-access (full).
   const permission = config.permission || "read";
-  const sandbox = permission === "read" ? "read-only" : permission === "full" ? "danger-full-access" : "workspace-write";
+  const sandbox = (permission === "read" || permission === "chat") ? "read-only" : permission === "full" ? "danger-full-access" : "workspace-write";
   const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "agent-room-codex-"));
   const outputPath = path.join(tempDir, "final.txt");
   const args = [
@@ -62,6 +63,7 @@ export async function runCodex({ prompt, config, cwd, onEvent, registerChild }) 
     "-c", `model_reasoning_effort=${effort}`,
     "--output-last-message", outputPath,
   ];
+  if (permission === "chat") args.push("--enable", "web_search_request");
   if (model) args.push("--model", model);
   args.push("-");
 
