@@ -39,7 +39,11 @@ function originAllowed(origin, port) {
   let u;
   try { u = new URL(origin); } catch { return false; }
   if (!LOOPBACK.has(u.hostname)) return false;
-  return !u.port || u.port === String(port);
+  // Require an exact port match. Cookies are scoped to the host, not the port, so a
+  // page on another local port (e.g. 127.0.0.1:80, whose Origin omits the port) is a
+  // different origin that must not pass the CSRF check just because the port is blank.
+  const originPort = u.port || (u.protocol === "https:" ? "443" : "80");
+  return originPort === String(port);
 }
 
 // Auth check for /api/* routes: valid token (cookie or X-Agent-Room-Token header),

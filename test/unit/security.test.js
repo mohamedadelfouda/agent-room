@@ -50,6 +50,14 @@ test("checkApiAuth allows same-origin writes and no-Origin GETs", () => {
   assert.ok(checkApiAuth({ method: "GET", headers: { cookie } }, PORT).ok);
 });
 
+test("checkApiAuth rejects same-host different-port writes (cookie is port-agnostic)", () => {
+  // A page on 127.0.0.1:80 serializes its Origin without a port; it must not pass.
+  const r = checkApiAuth({ method: "POST", headers: { cookie, origin: "http://127.0.0.1" } }, PORT);
+  assert.equal(r.ok, false);
+  assert.equal(r.status, 403);
+  assert.equal(checkApiAuth({ method: "POST", headers: { cookie, origin: "http://127.0.0.1:9999" } }, PORT).ok, false);
+});
+
 test("issueCookieHeader is HttpOnly + SameSite=Strict", () => {
   const c = issueCookieHeader();
   assert.match(c, /agentRoomToken=/);
