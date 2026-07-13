@@ -27,9 +27,12 @@ export async function runClaude({ prompt, config, cwd, onEvent, registerChild })
   // Permission level controls what the agent may do. Default "read" keeps the safe
   // planning/review behavior (no file writes, no commands). Only an explicitly chosen
   // executor gets write/run permissions — the reviewer always stays "read".
+  // "chat" is a general chat that can look things up on the web (WebSearch/WebFetch)
+  // and read, but never edit files or run shell commands.
   const permission = config.permission || "read";
   const permArgs =
-    permission === "edit" ? ["--permission-mode", "acceptEdits", "--allowedTools", "Read Edit Write Grep Glob"]
+    permission === "chat" ? ["--permission-mode", "auto", "--allowedTools", "WebSearch,WebFetch,Read,Grep,Glob"]
+    : permission === "edit" ? ["--permission-mode", "acceptEdits", "--allowedTools", "Read Edit Write Grep Glob"]
     : (permission === "run" || permission === "full") ? ["--permission-mode", "bypassPermissions"]
     : ["--disallowedTools", "*"];
   const args = [

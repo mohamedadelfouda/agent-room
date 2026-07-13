@@ -94,7 +94,7 @@ export async function runOrchestration(sessionId, request, emit) {
 
     const callAgent = async (agent, prompt, round, phase) => {
       if (state.cancelled) throw new Error("Run stopped by user");
-      const cfg = request.agents[agent];
+      const cfg = phase === "chat" ? { ...request.agents[agent], permission: "chat" } : request.agents[agent];
       const role = String(cfg.role || (mode === "debate" ? "Debater" : "Collaborator"));
       const contextChars = prompt.length;
       const contextMessages = session.messages.length;
