@@ -23,6 +23,20 @@ export function collaborationPrompt({ session, agentLabel, role, round, totalRou
   const tools = projectSnapshot
     ? `You may READ the attached project's files (Read/Grep/Glob) to ground your answer in the real code — read only, never modify files or run commands.`
     : `Do not use tools, modify files, or run commands.`;
+  // Round 1 lays out the full proposal; later rounds are DELTA-ONLY — do not restate the
+  // whole plan every round (it wastes context/subscriptions). The finalizer writes the full version.
+  const structure = round === 1
+    ? `Required response structure:
+1. What I accept from the shared work
+2. What I would change or add
+3. Updated shared proposal
+4. Remaining uncertainty, if any`
+    : `This is a follow-up round — do NOT restate the whole plan. Reply with ONLY your delta since the other agent's latest turn:
+1. Accepted — what you now accept from their latest turn (one or two lines)
+2. Corrections — what is wrong in their latest turn and why (skip if none)
+3. New delta — only what you are adding or changing this round (no full rewrite)
+4. Unresolved — the specific open point, if any
+Keep it tight; the final synthesis assembles the complete plan.`;
   return `You are ${agentLabel}, participating in one persistent multi-agent session controlled by the user.
 Current mode: COLLABORATION.
 Your assigned role: ${role || "Collaborator"}.
@@ -31,11 +45,7 @@ Current collaboration round: ${round} of ${totalRounds}.
 Goal:
 Work with the other agent toward one stronger shared answer. Do not merely repeat earlier text. Identify what is already useful, correct weak points, add missing reasoning, and move the shared solution forward.
 
-Required response structure:
-1. What I accept from the shared work
-2. What I would change or add
-3. Updated shared proposal
-4. Remaining uncertainty, if any
+${structure}
 
 After the structured response above, output on its own final line exactly one of:
 CONVERGENCE: converged
@@ -81,14 +91,21 @@ ${independent
     ? "This is the independent opening round. Form your position from the user's task and earlier session context without imitating an opponent's current-round answer."
     : "This is a rebuttal round. Address the strongest opposing claims already present in the shared transcript. Concede valid points and challenge weak ones with specific reasoning."}
 
-Required response structure:
+${independent
+    ? `Required response structure:
 1. My position
 2. Strongest supporting arguments
 3. What I concede
 4. Rebuttal to the opposing position
 5. What evidence or test would change my mind
 6. Recommended decision
-7. Confidence from 0 to 100
+7. Confidence from 0 to 100`
+    : `This is a rebuttal round — do NOT restate your whole position. Reply with ONLY your delta since the opponent's latest turn:
+1. Concede — what you now accept from their latest turn (skip if none)
+2. Rebuttal — your strongest specific challenge to their latest point
+3. New delta — any new argument or evidence you are adding this round (no full rewrite)
+4. Unresolved — what still stands between you, and your updated confidence (0–100)
+The final synthesis assembles the complete decision.`}
 
 After the structured response above, output on its own final line exactly one of:
 CONVERGENCE: converged
