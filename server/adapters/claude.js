@@ -108,7 +108,9 @@ export async function runClaude({ prompt, config, cwd, onEvent, registerChild })
     Object.assign(error, meta);
     throw error;
   }
-  finalText = String(finalText || streamedText || result.stdout).trim();
+  // No raw-stdout fallback: use only parsed final text or the visible delta stream. Raw
+  // stdout is the JSON event stream (can carry thinking) — never surface it as the answer.
+  finalText = String(finalText || streamedText).trim();
   if (!finalText) {
     const error = new Error("Claude completed without a final response");
     Object.assign(error, meta);
