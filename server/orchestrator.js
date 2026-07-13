@@ -3,7 +3,7 @@ import { rootPath } from "./store.js";
 import { terminateProcess } from "./process.js";
 import { runCodex } from "./adapters/codex.js";
 import { runClaude } from "./adapters/claude.js";
-import { collaborationPrompt, debatePrompt, synthesisPrompt } from "./prompts.js";
+import { collaborationPrompt, debatePrompt, synthesisPrompt, chatPrompt } from "./prompts.js";
 
 const activeRuns = new Map();
 const adapters = { codex: runCodex, claude: runClaude };
@@ -71,7 +71,7 @@ export async function runOrchestration(sessionId, request, emit) {
 
   try {
     const session = await getSession(sessionId);
-    const mode = request.mode === "debate" ? "debate" : "collaboration";
+    const mode = request.mode === "debate" ? "debate" : request.mode === "chat" ? "chat" : "collaboration";
     const rounds = Math.max(1, Math.min(5, Number(request.rounds) || 2));
     const userTask = String(request.content || "").trim();
     if (!userTask) throw new Error("Write a message first");
@@ -145,7 +145,19 @@ export async function runOrchestration(sessionId, request, emit) {
       return message;
     };
 
-    if (mode === "collaboration") {
+    if (mode === "chat") {
+      // Simple chat: each agent answers the user independently, in parallel, one pass.
+      const snapshot = structuredClone(session);
+      await Promise.all(selected.map((agent) => {
+        const prompt = chatPrompt({
+          session: snapshot,
+          agentLabel: labels[agent],
+          role: request.agents[agent].role,
+          userTask,
+        });
+        return callAgent(agent, prompt, 1, "chat");
+      }));
+    } else if (mode === "collaboration") {
       for (let round = 1; round <= rounds; round += 1) {
         for (const agent of selected) {
           const prompt = collaborationPrompt({
@@ -196,7 +208,7 @@ export async function runOrchestration(sessionId, request, emit) {
     }
 
     const finalizer = request.finalizer;
-    if (finalizer && finalizer !== "none" && selected.includes(finalizer) && !state.cancelled) {
+    if (mode !== "chat" && finalizer && finalizer !== "none" && selected.includes(finalizer) && !state.cancelled) {
       const prompt = synthesisPrompt({
         session,
         agentLabel: labels[finalizer],

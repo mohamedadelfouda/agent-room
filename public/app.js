@@ -14,7 +14,7 @@ const STRINGS = {
   ar: {
     newSession:"جلسة جديدة", sessions:"الجلسات", connected:"متصل", disconnected:"غير متصل — اضغط لإعادة المحاولة",
     emptyTitle:"جلسة واحدة، أكثر من عقل", emptyBody:"أنشئ جلسة، اختر التعاون أو المناظرة، وحدّد الموديل والـeffort لكل وكيل. أنت صاحب القرار.",
-    mode:"أسلوب الجولة", modeCollab:"تعاون", modeDebate:"Debate", rounds:"عدد الجولات", roundsShort:"جولات", finalizer:"الخلاصة النهائية", none:"بدون",
+    mode:"أسلوب الجولة", modeCollab:"تعاون", modeDebate:"Debate", modeChat:"شات", rounds:"عدد الجولات", roundsShort:"جولات", finalizer:"الخلاصة النهائية", none:"بدون",
     command:"Command", role:"الدور", check:"فحص", load:"تحميل", notChecked:"لم يتم الفحص", ready:"جاهز", export:"تصدير", stop:"إيقاف",
     send:"ابدأ الجولة", composerPh:"اكتب الفكرة أو السؤال...", namePh:"مثال: تطوير التحليل المالي", nameLabel:"اسم الجلسة",
     firstLabel:"الموضوع أو أول رسالة (اختياري)", newSessionTitle:"جلسة جديدة", cancel:"إلغاء", create:"إنشاء",
@@ -34,7 +34,7 @@ const STRINGS = {
   en: {
     newSession:"New session", sessions:"Sessions", connected:"Connected", disconnected:"Disconnected — click to retry",
     emptyTitle:"One session, many minds", emptyBody:"Create a session, choose Collaboration or Debate, set model and effort per agent. You decide.",
-    mode:"Mode", modeCollab:"Collaborate", modeDebate:"Debate", rounds:"Rounds", roundsShort:"rounds", finalizer:"Final synthesis", none:"None",
+    mode:"Mode", modeCollab:"Collaborate", modeDebate:"Debate", modeChat:"Chat", rounds:"Rounds", roundsShort:"rounds", finalizer:"Final synthesis", none:"None",
     command:"Command", role:"Role", check:"Check", load:"Load", notChecked:"Not checked", ready:"Ready", export:"Export", stop:"Stop",
     send:"Start round", composerPh:"Type your idea or question...", namePh:"e.g. Financial analysis feature", nameLabel:"Session name",
     firstLabel:"Topic or first message (optional)", newSessionTitle:"New session", cancel:"Cancel", create:"Create",
@@ -96,12 +96,16 @@ async function api(path, options = {}) {
 
 /* ---------------- mode + setup drawer ---------------- */
 function setMode(next, silent) {
-  mode = next === "debate" ? "debate" : "collaboration";
+  mode = next === "debate" ? "debate" : next === "chat" ? "chat" : "collaboration";
   document.querySelectorAll(".mode-btn").forEach((b) => b.classList.toggle("is-active", b.dataset.mode === mode));
   if (mode === "debate") {
     if ($("codexRole").value === "شريك في الحل") $("codexRole").value = "الموقف الثاني / المعارض";
     if ($("claudeRole").value === "شريك في الحل") $("claudeRole").value = "الموقف الأول / المؤيد";
   }
+  // Chat is a single independent pass per message — rounds and finalizer don't apply.
+  const isChat = mode === "chat";
+  $("rounds").disabled = isChat;
+  $("finalizer").disabled = isChat;
   updateSetupSummary();
   if (!silent) saveSettings();
 }
@@ -115,8 +119,9 @@ function updateSetupSummary() {
   const parts = [];
   if ($("claudeEnabled").checked) parts.push("Claude");
   if ($("codexEnabled").checked) parts.push("Codex");
-  const modeLabel = mode === "debate" ? "Debate" : t("modeCollab");
-  $("setupSummary").textContent = `${modeLabel} · ${parts.join(" + ") || "—"} · ${$("rounds").value} ${t("roundsShort")}`;
+  const modeLabel = mode === "debate" ? "Debate" : mode === "chat" ? t("modeChat") : t("modeCollab");
+  const roundsPart = mode === "chat" ? "" : ` · ${$("rounds").value} ${t("roundsShort")}`;
+  $("setupSummary").textContent = `${modeLabel} · ${parts.join(" + ") || "—"}${roundsPart}`;
 }
 
 /* ---------------- sessions rail ---------------- */
