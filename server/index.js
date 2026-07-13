@@ -8,7 +8,7 @@ import { listSessions, createSession, getSession, rootPath } from "./store.js";
 import { checkCommand, runProcess } from "./process.js";
 import { discoverCodexModels } from "./adapters/codex.js";
 import { runOrchestration, stopRun, isRunning, abortAllRuns } from "./orchestrator.js";
-import { runExecuteAndReview, acceptExecution, rejectExecution, isExecuting, stopExec } from "./exec-orchestrator.js";
+import { runExecuteAndReview, acceptExecution, rejectExecution, isExecuting, stopExec, abortAllExecutions } from "./exec-orchestrator.js";
 import { isGitRepo, hasRemote } from "./worktree.js";
 import { logInfo, logError, logPath } from "./logger.js";
 import { hostAllowed, checkApiAuth, issueCookieHeader, securityHeaders } from "./security.js";
@@ -75,6 +75,7 @@ async function gracefulShutdown(reason, error) {
   shuttingDown = true;
   logError(`graceful shutdown (${reason})`, error?.stack || (error ? String(error) : ""));
   try { await abortAllRuns(reason); } catch (e) { logError("abortAllRuns failed during shutdown", String(e)); }
+  try { await abortAllExecutions(reason); } catch (e) { logError("abortAllExecutions failed during shutdown", String(e)); }
   try { server.close(); } catch {}
   setTimeout(() => process.exit(1), 1500).unref();
 }
