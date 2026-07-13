@@ -1,7 +1,7 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { runProcess, validateOption } from "../process.js";
+import { runProcess, validateOption, allowedCommand } from "../process.js";
 import { redact } from "../logger.js";
 
 function extractSessionId(value, depth = 0) {
@@ -41,7 +41,9 @@ function extractCodexError(parsed) {
 }
 
 export async function runCodex({ prompt, config, cwd, onEvent, registerChild }) {
-  const command = validateOption(config.command || "codex", "Codex command", { allowEmpty: false });
+  // Restrict the client-supplied command to the codex CLI (and apply the win32 space-ban):
+  // enforce the allowlist on the real execution path, not only the diagnostic endpoints.
+  const command = allowedCommand(config.command || "codex", new Set(["codex"]));
   const model = validateOption(config.model || "", "Codex model");
   const effort = validateOption(config.effort || "high", "Codex effort", { allowEmpty: false });
   if (!new Set(["minimal", "low", "medium", "high", "xhigh"]).has(effort)) {
