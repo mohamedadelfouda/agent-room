@@ -34,6 +34,11 @@ Required response structure:
 3. Updated shared proposal
 4. Remaining uncertainty, if any
 
+After the structured response above, output on its own final line exactly one of:
+CONVERGENCE: converged
+CONVERGENCE: open — <the specific point(s) you still disagree on with the other agent>
+Use "converged" only if you genuinely agree with the other agent's latest position and have nothing substantive left to add or dispute. This line is a control signal for the local orchestrator, not part of your answer.
+
 Answer in the same language as the user's latest message. Do not claim you directly share a provider-side session with another model; the local orchestrator is supplying the shared transcript. Do not use tools, modify files, or run commands.
 
 Latest user task:
@@ -78,6 +83,11 @@ Required response structure:
 5. What evidence or test would change my mind
 6. Recommended decision
 7. Confidence from 0 to 100
+
+After the structured response above, output on its own final line exactly one of:
+CONVERGENCE: converged
+CONVERGENCE: open — <the specific point(s) still in dispute with the opponent>
+Use "converged" only if the debate is genuinely resolved for you — you now agree or fully concede and have nothing substantive left to dispute. This line is a control signal for the local orchestrator, not part of your answer.
 
 Answer in the same language as the user's latest message. Do not use tools, modify files, or run commands.
 

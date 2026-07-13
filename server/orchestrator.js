@@ -4,6 +4,7 @@ import { terminateProcess } from "./process.js";
 import { runCodex } from "./adapters/codex.js";
 import { runClaude } from "./adapters/claude.js";
 import { collaborationPrompt, debatePrompt, synthesisPrompt, chatPrompt } from "./prompts.js";
+import { parseConvergence, stripConvergence, assessRound } from "./convergence.js";
 
 const activeRuns = new Map();
 const adapters = { codex: runCodex, claude: runClaude };
@@ -132,7 +133,11 @@ export async function runOrchestration(sessionId, request, emit) {
         error.agentLabel = labels[agent];
         throw error;
       }
-      const message = makeMessage({ author: "agent", agent, role, content: result.text, round, phase, mode });
+      // Pull the CONVERGENCE control line out of the reply (used for early-stop) and hide
+      // it from the shown message. Only meaningful in collaboration/debate.
+      const convergence = parseConvergence(result.text);
+      const message = makeMessage({ author: "agent", agent, role, content: stripConvergence(result.text), round, phase, mode });
+      message.convergence = convergence;
       message.meta = {
         requestedModel: cfg.model || "(default)", requestedEffort: cfg.effort || "",
         reportedModel: result.model ?? null, durationMs: result.durationMs ?? null,
@@ -144,6 +149,9 @@ export async function runOrchestration(sessionId, request, emit) {
       emit({ type: "agent_complete", sessionId, agent, message, providerSessionId: result.sessionId || null });
       return message;
     };
+
+    let earlyConverged = 0;
+    let lastDisagreements = [];
 
     if (mode === "chat") {
       // Simple chat: each agent answers the user independently, in parallel, one pass.
@@ -159,6 +167,7 @@ export async function runOrchestration(sessionId, request, emit) {
       }));
     } else if (mode === "collaboration") {
       for (let round = 1; round <= rounds; round += 1) {
+        const roundMsgs = [];
         for (const agent of selected) {
           const prompt = collaborationPrompt({
             session,
@@ -168,7 +177,13 @@ export async function runOrchestration(sessionId, request, emit) {
             totalRounds: rounds,
             userTask,
           });
-          await callAgent(agent, prompt, round, "collaboration");
+          roundMsgs.push(await callAgent(agent, prompt, round, "collaboration"));
+        }
+        // From round 2 on (both have seen each other), stop early if both agents agree.
+        if (round >= 2) {
+          const r = assessRound(roundMsgs.map((m) => m.convergence));
+          lastDisagreements = r.disagreements;
+          if (r.bothConverged) { earlyConverged = round; break; }
         }
       }
     } else {
@@ -190,7 +205,7 @@ export async function runOrchestration(sessionId, request, emit) {
 
       for (let round = 2; round <= rounds; round += 1) {
         const snapshot = structuredClone(session);
-        await Promise.all(selected.map((agent) => {
+        const roundMsgs = await Promise.all(selected.map((agent) => {
           const opponent = selected.find((key) => key !== agent);
           const prompt = debatePrompt({
             session: snapshot,
@@ -204,7 +219,20 @@ export async function runOrchestration(sessionId, request, emit) {
           });
           return callAgent(agent, prompt, round, "rebuttal");
         }));
+        const r = assessRound(roundMsgs.map((m) => m.convergence));
+        lastDisagreements = r.disagreements;
+        if (r.bothConverged) { earlyConverged = round; break; }
       }
+    }
+
+    // Early-stop / disagreement report (collaboration & debate only).
+    if (earlyConverged) {
+      session.messages.push(makeMessage({ author: "system", content: `الوكيلان اتفقا في الجولة ${earlyConverged} — تم إيقاف الجولات المتبقية.`, phase: "converged", mode }));
+      await persistAndEmit(session, emit);
+    } else if (mode !== "chat" && rounds >= 2 && lastDisagreements.length) {
+      const list = lastDisagreements.map((d) => `• ${d}`).join("\n");
+      session.messages.push(makeMessage({ author: "system", content: `خلصت الـ${rounds} جولات والوكيلان لسه مش متفقين. نقاط الاختلاف:\n${list}\n\nمحتاجين جولات إضافية؟`, phase: "needs_more_rounds", mode }));
+      await persistAndEmit(session, emit);
     }
 
     const finalizer = request.finalizer;
