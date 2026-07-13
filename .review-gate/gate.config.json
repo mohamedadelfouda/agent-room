@@ -1,5 +1,5 @@
 {
-  "$comment": "Review Gate config for Agent Room. gateMode 'push' (fires on git push, marker binds to HEAD). Agent Room has no tsc/eslint/vitest yet, so typecheck = the existing 'npm run check' (node --check) and lint/test are disabled until PR-1 adds the test harness + broader check (AR-0.2). When tests land, set test.cmd = 'npm test' and enabled: true, and expand check to all files. perFile:false runs the command once for the whole project.",
+  "$comment": "Review Gate config for Agent Room. gateMode 'push' (fires on git push, marker binds to HEAD). typecheck = 'npm run check' (node --check across all server/ + public/ files); test = 'npm test' (node:test unit suite). lint stays disabled until a linter is added. perFile:false runs each command once for the whole project.",
   "gateMode": "push",
   "verify": {
     "typecheck": {
@@ -11,7 +11,9 @@
       "enabled": false
     },
     "test": {
-      "enabled": false
+      "cmd": "npm test",
+      "perFile": false,
+      "enabled": true
     }
   },
   "lintableExtensions": ["js", "mjs", "cjs"],

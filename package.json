@@ -7,7 +7,9 @@
   "scripts": {
     "start": "node server/index.js",
     "dev": "node --watch server/index.js",
-    "check": "node --check server/index.js && node --check server/orchestrator.js && node --check public/app.js"
+    "check": "node scripts/check-syntax.mjs",
+    "test": "node --test",
+    "ci": "npm run check && npm test"
   },
   "engines": {
     "node": ">=20"
