@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { validateOption } from "../../server/process.js";
+import { validateOption, allowedCommand } from "../../server/process.js";
 
 test("validateOption accepts normal option values", () => {
   assert.equal(validateOption("sonnet", "model"), "sonnet");
@@ -34,4 +34,23 @@ test("validateOption rejects shell metacharacters (command-injection guard)", ()
 test("validateOption rejects values longer than 180 chars", () => {
   assert.throws(() => validateOption("a".repeat(181), "x"), /unsupported/);
   assert.equal(validateOption("a".repeat(180), "x"), "a".repeat(180));
+});
+
+test("allowedCommand accepts known CLIs, including paths and .exe/.cmd", () => {
+  assert.equal(allowedCommand("claude"), "claude");
+  assert.equal(allowedCommand("C:/tools/claude.exe"), "C:/tools/claude.exe");
+  assert.equal(allowedCommand("/usr/bin/gh"), "/usr/bin/gh");
+  assert.equal(allowedCommand("codex.cmd"), "codex.cmd");
+});
+
+test("allowedCommand rejects arbitrary / unlisted / empty commands", () => {
+  for (const bad of ["rm", "powershell", "node", "python", "curl", ""]) {
+    assert.throws(() => allowedCommand(bad), /not allowed|required/);
+  }
+});
+
+test("allowedCommand honors a custom allowlist and still blocks metacharacters", () => {
+  assert.equal(allowedCommand("codex", new Set(["codex"])), "codex");
+  assert.throws(() => allowedCommand("claude", new Set(["codex"])), /not allowed/);
+  assert.throws(() => allowedCommand("claude; rm -rf"), /unsupported/);
 });

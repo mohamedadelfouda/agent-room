@@ -5,7 +5,7 @@ import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import os from "node:os";
 import { listSessions, createSession, getSession, rootPath } from "./store.js";
-import { checkCommand, runProcess } from "./process.js";
+import { checkCommand, runProcess, allowedCommand } from "./process.js";
 import { discoverCodexModels } from "./adapters/codex.js";
 import { runOrchestration, stopRun, isRunning, abortAllRuns } from "./orchestrator.js";
 import { runExecuteAndReview, acceptExecution, rejectExecution, isExecuting, stopExec } from "./exec-orchestrator.js";
@@ -274,12 +274,13 @@ const server = http.createServer(async (req, res) => {
     }
     if (req.method === "POST" && url.pathname === "/api/cli/check") {
       const body = await readJson(req);
-      return json(res, 200, await checkCommand(body.command));
+      try { return json(res, 200, await checkCommand(allowedCommand(body.command))); }
+      catch (e) { return json(res, 200, { ok: false, version: "", detail: e.message }); }
     }
     if (req.method === "POST" && url.pathname === "/api/codex/models") {
       const body = await readJson(req);
       try {
-        return json(res, 200, { models: await discoverCodexModels({ command: body.command }) });
+        return json(res, 200, { models: await discoverCodexModels({ command: allowedCommand(body.command, new Set(["codex"])) }) });
       } catch (error) {
         return json(res, 200, { models: [], warning: error.message });
       }

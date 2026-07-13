@@ -13,6 +13,17 @@ export function validateOption(value, label, { allowEmpty = true } = {}) {
   return text;
 }
 
+// Client-supplied executable names must resolve to a known CLI (by basename), so a request
+// body can never point us at an arbitrary program. validateOption already blocks shell
+// metacharacters; this also blocks non-allowlisted commands / bare paths.
+const ALLOWED_CLI = new Set(["claude", "codex", "gh", "git"]);
+export function allowedCommand(input, allowed = ALLOWED_CLI) {
+  const cmd = validateOption(input, "Command", { allowEmpty: false });
+  const base = cmd.split(/[\\/]/).pop().replace(/\.(exe|cmd|bat|ps1)$/i, "").toLowerCase();
+  if (!allowed.has(base)) throw new Error(`Command not allowed — only: ${[...allowed].join(", ")}`);
+  return cmd;
+}
+
 export function runProcess({ command, args = [], input = "", cwd, env = {}, onStdoutLine, onStderrLine, timeoutMs = 0, registerChild }) {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, {
