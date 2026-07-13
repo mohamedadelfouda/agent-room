@@ -28,6 +28,8 @@ const STRINGS = {
     approveTitle:"اعتماد التنفيذ", approveGo:"اعتمد ونفّذ",
     execExecuting:(a)=>`${a} بينفّذ في worktree...`, execReviewing:(a)=>`${a} بيراجع (قراءة فقط)...`, execAwaiting:"خلص — بانتظار قرارك",
     mergeLocal:"دمج محلي", openPr:"افتح PR", reject:"رفض", attached:"مربوط", notGit:"مش git repo", sameAgent:"المنفّذ والمراجع لازم مختلفين",
+    workLocation:"مكان الشغل (اختياري)", projNone:"بدون", projLocal:"فولدر لوكال", projGithub:"GitHub",
+    repoSearchPh:"ابحث في ريبوهاتك...", useFolder:"استخدم", update:"تحديث", updating:"جاري التحديث...", cloning:"جاري استنساخ الريبو...", noRepos:"مفيش ريبوهات", noFolders:"مفيش مجلدات",
   },
   en: {
     newSession:"New session", sessions:"Sessions", connected:"Connected", disconnected:"Disconnected — click to retry",
@@ -46,6 +48,8 @@ const STRINGS = {
     approveTitle:"Approve execution", approveGo:"Approve & run",
     execExecuting:(a)=>`${a} is executing in a worktree...`, execReviewing:(a)=>`${a} is reviewing (read-only)...`, execAwaiting:"Done — awaiting your decision",
     mergeLocal:"Merge locally", openPr:"Open PR", reject:"Reject", attached:"Attached", notGit:"not a git repo", sameAgent:"Executor and reviewer must differ",
+    workLocation:"Work location (optional)", projNone:"None", projLocal:"Local folder", projGithub:"GitHub",
+    repoSearchPh:"Search your repos...", useFolder:"Use", update:"Update", updating:"Updating...", cloning:"Cloning repo...", noRepos:"No repos", noFolders:"No folders",
   },
 };
 const t = (key) => STRINGS[lang][key];
@@ -287,7 +291,14 @@ async function loadCodexModels() {
 }
 
 /* ---------------- new session modal ---------------- */
-function openNewSessionModal() { $("newSessionName").value = ""; $("newSessionFirst").value = ""; hideModalError(); $("newSessionModal").classList.remove("hidden"); $("newSessionName").focus(); }
+function openNewSessionModal() {
+  $("newSessionName").value = ""; $("newSessionFirst").value = "";
+  chosenProject = null; $("projChosen").classList.add("hidden");
+  $("fsList").dataset.loaded = ""; $("repoList").dataset.loaded = ""; if ($("repoSearch")) $("repoSearch").value = "";
+  setProjTab("none");
+  hideModalError();
+  $("newSessionModal").classList.remove("hidden"); $("newSessionName").focus();
+}
 function closeNewSessionModal() { $("newSessionModal").classList.add("hidden"); }
 function showModalError(m) { const el = $("newSessionError"); el.textContent = m; el.classList.remove("hidden"); }
 function hideModalError() { const el = $("newSessionError"); el.textContent = ""; el.classList.add("hidden"); }
@@ -295,13 +306,24 @@ async function confirmNewSession() {
   const title = $("newSessionName").value.trim() || t("newSession");
   const first = $("newSessionFirst").value.trim();
   hideModalError();
+  const createBtn = $("newSessionCreate"); createBtn.disabled = true;
   try {
     const session = await api("/api/sessions", { method: "POST", body: JSON.stringify({ title }) });
+    if (chosenProject) {
+      let projectPath = chosenProject.path;
+      if (chosenProject.type === "github") {
+        showChosen(t("cloning"));
+        const cl = await api("/api/github/clone", { method: "POST", body: JSON.stringify({ repo: chosenProject.repo }) });
+        projectPath = cl.path;
+      }
+      await api(`/api/sessions/${session.id}/project`, { method: "POST", body: JSON.stringify({ path: projectPath }) });
+    }
     closeNewSessionModal();
     await refreshSessions();
     await openSession(session.id);
     if (first) { $("messageInput").value = first; $("messageInput").focus(); }
   } catch (error) { showModalError(error.message); }
+  finally { createBtn.disabled = false; }
 }
 
 /* ---------------- connection ---------------- */
@@ -318,16 +340,89 @@ async function loadOnboard() {
     const s = await api("/api/agents/status");
     list.innerHTML = "";
     const rows = [
-      { name: "Claude Code", ok: s.claude.installed, detail: s.claude.version || s.claude.detail },
-      { name: "Codex CLI", ok: s.codex.installed, detail: s.codex.version || s.codex.detail },
-      { name: "GitHub (gh)", ok: s.github.authed, detail: s.github.detail },
+      { name: "Claude Code", ok: s.claude.installed, detail: s.claude.version || s.claude.detail, agent: "claude" },
+      { name: "Codex CLI", ok: s.codex.installed, detail: s.codex.version || s.codex.detail, agent: "codex" },
+      { name: "GitHub (gh)", ok: s.github.authed, detail: s.github.detail, agent: null },
     ];
     for (const r of rows) {
       const row = document.createElement("div"); row.className = "onboard-row";
       row.innerHTML = `<span class="onboard-dot ${r.ok ? "ok" : "bad"}"></span><span class="ob-name">${esc(r.name)}</span><span class="ob-detail">${esc(r.detail || "")}</span>`;
+      if (r.agent) {
+        const actions = document.createElement("span"); actions.className = "ob-actions";
+        const btn = document.createElement("button"); btn.className = "btn-mini"; btn.textContent = t("update");
+        btn.onclick = () => updateAgentCli(r.agent, btn);
+        actions.appendChild(btn); row.appendChild(actions);
+      }
       list.appendChild(row);
     }
   } catch (e) { list.textContent = e.message; }
+}
+async function updateAgentCli(agent, btn) {
+  btn.disabled = true; btn.textContent = t("updating");
+  try {
+    const r = await api("/api/agents/update", { method: "POST", body: JSON.stringify({ agent }) });
+    btn.textContent = r.ok ? "✓" : "!";
+    setTimeout(loadOnboard, 1000);
+  } catch (e) { btn.textContent = "!"; btn.title = e.message; btn.disabled = false; }
+}
+
+/* project picker (new-session modal) */
+let projMode = "none";
+let chosenProject = null;
+let repoCache = [];
+function setProjTab(mode) {
+  projMode = mode;
+  document.querySelectorAll(".proj-tab").forEach((b) => b.classList.toggle("is-active", b.dataset.proj === mode));
+  $("projLocalPane").hidden = mode !== "local";
+  $("projGithubPane").hidden = mode !== "github";
+  if (mode === "none") { chosenProject = null; $("projChosen").classList.add("hidden"); }
+  if (mode === "local" && $("fsList").dataset.loaded !== "1") fsNavigate("");
+  if (mode === "github" && $("repoList").dataset.loaded !== "1") loadRepos();
+}
+function showChosen(text) { const el = $("projChosen"); el.textContent = "✓ " + text; el.classList.remove("hidden"); }
+async function fsNavigate(p) {
+  const list = $("fsList"); list.innerHTML = `<div class="fs-empty">…</div>`;
+  try {
+    const r = await api(`/api/fs/list?path=${encodeURIComponent(p)}`);
+    list.dataset.loaded = "1";
+    $("fsPath").textContent = r.path || "—";
+    $("fsUp").dataset.parent = r.parent ?? "";
+    $("fsUp").disabled = r.parent === null;
+    list.innerHTML = "";
+    if (r.path) {
+      const cur = document.createElement("div"); cur.className = "fs-item";
+      cur.innerHTML = `${r.isGit ? '<span class="fs-git">git</span>' : '<span class="fs-ic">📂</span>'}<span class="fs-name">${esc(t("useFolder"))} ← ${esc(r.path)}</span><button class="fs-use">${esc(t("useFolder"))}</button>`;
+      cur.querySelector(".fs-use").onclick = () => { chosenProject = { type: "local", path: r.path }; showChosen("📁 " + r.path); };
+      list.appendChild(cur);
+    }
+    for (const d of r.dirs) {
+      const row = document.createElement("div"); row.className = "fs-item";
+      row.innerHTML = `<span class="fs-ic">📁</span><span class="fs-name">${esc(d.name)}</span>`;
+      row.querySelector(".fs-name").onclick = () => fsNavigate(d.path);
+      list.appendChild(row);
+    }
+    if (!r.dirs.length && !r.path) list.innerHTML = `<div class="fs-empty">${esc(t("noFolders"))}</div>`;
+  } catch (e) { list.innerHTML = `<div class="fs-empty">${esc(e.message)}</div>`; }
+}
+async function loadRepos() {
+  const list = $("repoList"); list.innerHTML = `<div class="fs-empty">…</div>`;
+  try {
+    const r = await api("/api/github/repos");
+    list.dataset.loaded = "1";
+    repoCache = r.repos || [];
+    renderRepos("");
+  } catch (e) { list.innerHTML = `<div class="fs-empty">${esc(e.message)}</div>`; }
+}
+function renderRepos(q) {
+  const list = $("repoList"); list.innerHTML = "";
+  const repos = repoCache.filter((r) => r.nameWithOwner.toLowerCase().includes(q.toLowerCase()));
+  if (!repos.length) { list.innerHTML = `<div class="fs-empty">${esc(t("noRepos"))}</div>`; return; }
+  for (const r of repos.slice(0, 60)) {
+    const row = document.createElement("div"); row.className = "fs-item"; row.style.cursor = "pointer";
+    row.innerHTML = `<span class="fs-ic">◉</span><span class="fs-name">${esc(r.nameWithOwner)}</span><span class="repo-vis">${esc(r.visibility)}</span>`;
+    row.onclick = () => { chosenProject = { type: "github", repo: r.nameWithOwner }; showChosen("◉ " + r.nameWithOwner); };
+    list.appendChild(row);
+  }
 }
 function openOnboard() { $("onboardModal").classList.remove("hidden"); loadOnboard(); }
 function closeOnboard() { $("onboardModal").classList.add("hidden"); localStorage.setItem("agent-room-onboarded", "1"); }
@@ -427,6 +522,9 @@ $("emptyNewBtn").onclick = openNewSessionModal;
 $("newSessionCreate").onclick = confirmNewSession;
 $("newSessionCancel").onclick = closeNewSessionModal;
 $("newSessionName").addEventListener("keydown", (e) => { if (e.key === "Enter") confirmNewSession(); });
+document.querySelectorAll(".proj-tab").forEach((b) => b.onclick = () => setProjTab(b.dataset.proj));
+$("fsUp").onclick = () => fsNavigate($("fsUp").dataset.parent || "");
+$("repoSearch").addEventListener("input", () => renderRepos($("repoSearch").value));
 $("sendBtn").onclick = sendMessage;
 $("stopBtn").onclick = async () => { if (currentSessionId) await api(`/api/sessions/${currentSessionId}/stop`, { method: "POST", body: "{}" }); };
 $("exportBtn").onclick = () => { if (currentSessionId) location.href = `/api/sessions/${currentSessionId}/export`; };

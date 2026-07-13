@@ -253,6 +253,25 @@ details.tech pre { margin-top: 8px; background: var(--bg); border: 1px solid var
 .onboard-row .ob-name { font-weight: 600; }
 .onboard-row .ob-detail { color: var(--faint); font-size: 12px; margin-inline-start: auto; text-align: end; max-width: 55%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .onboard-hint { color: var(--warn); font-size: 12px; }
+.onboard-row .ob-actions { margin-inline-start: auto; display: flex; gap: 6px; }
+
+/* Project picker + folder browser */
+.segmented .proj-tab { flex: 1; border: 0; background: transparent; color: var(--muted); padding: 7px; border-radius: 6px; cursor: pointer; }
+.segmented .proj-tab.is-active { background: var(--accent); color: var(--accent-ink); font-weight: 600; }
+.proj-pane { margin-top: 10px; }
+.fs-bar { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.fs-path { font-size: 12px; color: var(--muted); direction: ltr; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+.fs-list { max-height: 210px; overflow-y: auto; border: 1px solid var(--line-soft); border-radius: 9px; }
+.fs-item { display: flex; align-items: center; gap: 9px; padding: 9px 12px; border-bottom: 1px solid var(--line-soft); font-size: 13px; }
+.fs-item:last-child { border-bottom: 0; }
+.fs-item:hover { background: var(--surface-2); }
+.fs-name { flex: 1; cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fs-ic { color: var(--faint); }
+.fs-git { font-size: 10px; color: var(--ok); border: 1px solid color-mix(in oklch, var(--ok) 40%, var(--line)); border-radius: 999px; padding: 1px 6px; }
+.fs-use { font-size: 11px; color: var(--accent-ink); background: var(--accent); border: 0; border-radius: 6px; padding: 4px 9px; cursor: pointer; }
+.repo-vis { font-size: 10px; color: var(--faint); }
+.proj-chosen { margin-top: 8px; font-size: 12px; color: var(--ok); }
+.fs-empty { padding: 12px; color: var(--faint); font-size: 12px; text-align: center; }
 
 /* Execute panel */
 .exec-actions { display: flex; align-items: center; gap: 10px; justify-content: flex-end; }

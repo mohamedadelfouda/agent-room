@@ -203,12 +203,31 @@
   </div>
 
   <div id="newSessionModal" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="newSessionModalTitle">
-    <div class="modal">
+    <div class="modal modal-lg">
       <h2 id="newSessionModalTitle" data-i18n="newSessionTitle">جلسة جديدة</h2>
       <div class="field"><label for="newSessionName" data-i18n="nameLabel">اسم الجلسة</label>
         <input id="newSessionName" type="text" placeholder="" data-i18n-ph="namePh" /></div>
+
+      <div class="field">
+        <label data-i18n="workLocation">مكان الشغل (اختياري)</label>
+        <div class="segmented" id="projPicker">
+          <button type="button" class="proj-tab is-active" data-proj="none" data-i18n="projNone">بدون</button>
+          <button type="button" class="proj-tab" data-proj="local" data-i18n="projLocal">فولدر لوكال</button>
+          <button type="button" class="proj-tab" data-proj="github" data-i18n="projGithub">GitHub</button>
+        </div>
+        <div id="projLocalPane" class="proj-pane" hidden>
+          <div class="fs-bar"><button type="button" id="fsUp" class="btn-mini">⬆</button><span id="fsPath" class="fs-path"></span></div>
+          <div id="fsList" class="fs-list"></div>
+        </div>
+        <div id="projGithubPane" class="proj-pane" hidden>
+          <input id="repoSearch" type="text" placeholder="ابحث في ريبوهاتك..." data-i18n-ph="repoSearchPh" />
+          <div id="repoList" class="fs-list"></div>
+        </div>
+        <div id="projChosen" class="proj-chosen hidden"></div>
+      </div>
+
       <div class="field"><label for="newSessionFirst" data-i18n="firstLabel">الموضوع أو أول رسالة (اختياري)</label>
-        <textarea id="newSessionFirst" rows="3" placeholder="" data-i18n-ph="composerPh"></textarea></div>
+        <textarea id="newSessionFirst" rows="2" placeholder="" data-i18n-ph="composerPh"></textarea></div>
       <div id="newSessionError" class="modal-error hidden"></div>
       <div class="modal-actions">
         <button id="newSessionCancel" class="btn-ghost" data-i18n="cancel">إلغاء</button>

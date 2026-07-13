@@ -3,6 +3,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import os from "node:os";
 import { listSessions, createSession, getSession, rootPath } from "./store.js";
 import { checkCommand, runProcess } from "./process.js";
 import { discoverCodexModels } from "./adapters/codex.js";
@@ -26,6 +27,45 @@ async function detectAgents() {
     codex: { installed: codex.ok, version: codex.version, detail: codex.detail },
     github,
   };
+}
+
+// List the user's GitHub repos (so they pick instead of pasting a URL).
+async function ghRepos() {
+  const r = await runProcess({ command: "gh", args: ["repo", "list", "--limit", "100", "--json", "nameWithOwner,url,visibility,updatedAt"], timeoutMs: 15000 });
+  if (r.code !== 0) throw new Error((r.stderr || "gh repo list failed").split(/\r?\n/)[0]);
+  return JSON.parse(r.stdout || "[]");
+}
+// Clone a chosen repo into a local projects folder, return its path.
+async function ghClone(repo) {
+  if (!/^[\w.-]+\/[\w.-]+$/.test(repo)) throw new Error("Invalid repo name");
+  const base = path.join(os.homedir(), "AgentRoomProjects");
+  await fs.mkdir(base, { recursive: true });
+  const name = repo.split("/").pop().replace(/\.git$/, "");
+  const dest = path.join(base, name);
+  try { await fs.access(dest); return { path: dest, existed: true }; } catch {}
+  const r = await runProcess({ command: "gh", args: ["repo", "clone", repo, dest], timeoutMs: 180000 });
+  if (r.code !== 0) throw new Error((r.stderr || "clone failed").split(/\r?\n/).slice(-2).join(" "));
+  return { path: dest, existed: false };
+}
+// Server-side folder browser (no manual path typing). Empty path => drives on Windows.
+async function listDirs(p) {
+  if (!p) {
+    const drives = [];
+    for (const L of "CDEFGABHIJKLMNOPQRSTUVWXYZ") { try { await fs.access(`${L}:\\`); drives.push({ name: `${L}:\\`, path: `${L}:\\` }); } catch {} }
+    return { path: "", parent: null, dirs: drives, isGit: false };
+  }
+  const entries = await fs.readdir(p, { withFileTypes: true });
+  const dirs = entries.filter((e) => e.isDirectory() && !e.name.startsWith(".")).map((e) => ({ name: e.name, path: path.join(p, e.name) })).sort((a, b) => a.name.localeCompare(b.name));
+  const parent = path.dirname(p);
+  return { path: p, parent: parent === p ? "" : parent, dirs, isGit: await isGitRepo(p) };
+}
+// Update a CLI from inside the tool (claude update / codex update).
+async function updateAgent(agent) {
+  const cmd = agent === "claude" ? "claude" : agent === "codex" ? "codex" : null;
+  if (!cmd) throw new Error("Unknown agent");
+  const r = await runProcess({ command: cmd, args: ["update"], timeoutMs: 240000 });
+  const out = `${r.stdout}\n${r.stderr}`.trim().split(/\r?\n/).filter(Boolean).slice(-6).join("\n");
+  return { ok: r.code === 0, output: out.slice(0, 900) };
 }
 
 let shuttingDown = false;
@@ -186,6 +226,24 @@ const server = http.createServer(async (req, res) => {
     }
     if (req.method === "GET" && url.pathname === "/api/agents/status") {
       return json(res, 200, await detectAgents());
+    }
+    if (req.method === "POST" && url.pathname === "/api/agents/update") {
+      const body = await readJson(req);
+      try { return json(res, 200, await updateAgent(String(body.agent || ""))); }
+      catch (e) { return json(res, 400, { error: e.message }); }
+    }
+    if (req.method === "GET" && url.pathname === "/api/github/repos") {
+      try { return json(res, 200, { repos: await ghRepos() }); }
+      catch (e) { return json(res, 200, { repos: [], error: e.message }); }
+    }
+    if (req.method === "POST" && url.pathname === "/api/github/clone") {
+      const body = await readJson(req);
+      try { return json(res, 200, await ghClone(String(body.repo || ""))); }
+      catch (e) { return json(res, 400, { error: e.message }); }
+    }
+    if (req.method === "GET" && url.pathname === "/api/fs/list") {
+      try { return json(res, 200, await listDirs(url.searchParams.get("path") || "")); }
+      catch (e) { return json(res, 400, { error: e.message }); }
     }
     if (parts[0] === "api" && parts[1] === "sessions" && parts[2] && parts[3] === "export" && req.method === "GET") {
       const session = await getSession(parts[2]);
