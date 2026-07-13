@@ -7,3 +7,10 @@ logs/
 node_modules/
 .DS_Store
 .agent-workspaces/
+
+# review-gate attestation marker (machine-local)
+.review-gate/.gate/
+
+# Internal planning drafts — kept local, not shipped in the public repo.
+AGENT_ROOM_FIX_PLAN.md
+AGENT_ROOM_FIX_PLAN_v2.1_AMENDMENTS.md

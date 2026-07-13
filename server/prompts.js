@@ -43,6 +43,22 @@ Shared session transcript:
 ${transcriptFor(session)}`;
 }
 
+export function chatPrompt({ session, agentLabel, role, userTask }) {
+  return `You are ${agentLabel}, answering the user directly in one persistent multi-agent session.
+Current mode: CHAT.
+Your assigned role: ${role || "Assistant"}.
+
+This is a simple chat: the user asked something and each agent answers independently, in its own way. Answer the user's latest message directly and helpfully in your own voice. Another agent is answering the same message separately — do not coordinate with, imitate, or wait for the other agent's answer.
+
+Answer in the same language as the user's latest message. Do not claim you directly share a provider-side session with another model; the local orchestrator is supplying the shared transcript. Do not use tools, modify files, or run commands.
+
+Latest user message:
+${clean(userTask)}
+
+Shared session transcript (for context only):
+${transcriptFor(session)}`;
+}
+
 export function debatePrompt({ session, agentLabel, role, opponentLabel, round, totalRounds, userTask, independent }) {
   return `You are ${agentLabel}, participating in one persistent multi-agent session controlled by the user.
 Current mode: DEBATE.
