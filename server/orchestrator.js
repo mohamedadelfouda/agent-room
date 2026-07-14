@@ -48,7 +48,9 @@ export function isRunning(sessionId) {
 export async function abortAllRuns(reason = "server_shutdown") {
   for (const [sessionId, state] of activeRuns) {
     state.cancelled = true;
-    for (const child of state.children) terminateProcess(child);
+    // Shutdown path: SIGKILL now (see terminateProcess) so a detached agent can't outlive the
+    // server's ~1500ms exit, which would otherwise beat the SIGTERM→SIGKILL escalation timer.
+    for (const child of state.children) terminateProcess(child, { immediate: true });
     try {
       const session = await getSession(sessionId);
       session.status = "interrupted";

@@ -7,7 +7,11 @@ decision‑maker**.
 They plan together (collaborate or debate). When it's time to act, **you pick one executor
 and one reviewer**. Only the executor writes; the reviewer reads. Never two writers.
 
-Runs entirely on `127.0.0.1`. No API keys, no cloud, no data leaves your machine.
+Runs on `127.0.0.1` with **no cloud backend of its own** and **no API keys** — it uses your
+Claude and Codex subscriptions. It does **not** send your data to any Agent Room server.
+It **does** send your prompts and project context to Anthropic and OpenAI through their
+official `claude` / `codex` CLIs — exactly as if you ran those tools yourself. Sessions are
+stored locally as plain‑text JSON.
 
 ---
 
@@ -60,8 +64,11 @@ On Windows you can also double‑click `start-windows.bat`; on macOS, `start-mac
 - A small local Node server (`server/`) drives the official CLIs as child processes, streams
   their output, and stores each session as JSON under `data/sessions/` (git‑ignored).
 - The UI (`public/`) is plain HTML / CSS / JS — no build step.
-- Execution runs in a git worktree under `.agent-workspaces/<agent>/<task>` so the executor
-  is fully isolated until you accept.
+- Execution runs in a git **worktree** under `.agent-workspaces/<agent>/<task>`, so the
+  executor's **code changes** are kept off your working tree until you accept. A worktree
+  isolates Git changes — it is **not** a security sandbox (the process can still read other
+  files, the network, and env); read‑only planning and per‑run permissions are what limit
+  what an agent can do.
 
 See [DESIGN.md](DESIGN.md) for the design system and [EXECUTION.md](EXECUTION.md) for the
 execute‑and‑review model.
@@ -70,8 +77,12 @@ execute‑and‑review model.
 
 - Agents default to **read‑only** for planning; write access is granted only to the one
   executor you pick, for one run, inside an isolated worktree.
-- Secrets and personal paths are redacted from logs and error details. Agent "thinking" is
-  never stored.
+- Secrets and personal paths are redacted from **logs and error details**. **Session files are
+  not redacted:** an agent's final answer — and, if a run fails after it has already streamed
+  some output, its visible partial text (clearly labeled as partial) — is saved verbatim to
+  `data/sessions/*.json` (which also holds `session.messages`), so those files can contain
+  whatever the agents wrote, including sensitive text. Agents' step‑by‑step reasoning is never
+  persisted.
 
 ## License
 

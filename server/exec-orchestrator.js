@@ -20,6 +20,18 @@ export function stopExec(id) {
   return true;
 }
 
+// Cancel every in-flight execution and kill its child processes — used at shutdown so an
+// executor/reviewer agent never keeps running after the server exits. Each run's own
+// finally block then clears its registry entry.
+export async function abortAllExecutions(reason = "server_shutdown") {
+  for (const [, s] of activeExec) {
+    s.cancelled = true;
+    // Shutdown path: SIGKILL now — the server's ~1500ms exit would beat the SIGTERM→SIGKILL
+    // escalation timer, leaving a detached executor/reviewer running after the server exits.
+    for (const c of s.children) terminateProcess(c, { immediate: true });
+  }
+}
+
 function gh(args, cwd) {
   return new Promise((resolve, reject) => {
     execFile("gh", args, { cwd, windowsHide: true, maxBuffer: 1024 * 1024 * 16 }, (err, stdout, stderr) => {

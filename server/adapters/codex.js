@@ -1,7 +1,7 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { runProcess, validateOption } from "../process.js";
+import { runProcess, validateOption, allowedCommand } from "../process.js";
 import { redact } from "../logger.js";
 
 function extractSessionId(value, depth = 0) {
@@ -41,7 +41,9 @@ function extractCodexError(parsed) {
 }
 
 export async function runCodex({ prompt, config, cwd, onEvent, registerChild }) {
-  const command = validateOption(config.command || "codex", "Codex command", { allowEmpty: false });
+  // Restrict the client-supplied command to the codex CLI (and apply the win32 space-ban):
+  // enforce the allowlist on the real execution path, not only the diagnostic endpoints.
+  const command = allowedCommand(config.command || "codex", new Set(["codex"]));
   const model = validateOption(config.model || "", "Codex model");
   const effort = validateOption(config.effort || "high", "Codex effort", { allowEmpty: false });
   if (!new Set(["minimal", "low", "medium", "high", "xhigh"]).has(effort)) {
@@ -69,7 +71,6 @@ export async function runCodex({ prompt, config, cwd, onEvent, registerChild }) 
 
   let sessionId = null;
   let errorMessage = null;
-  const rawEvents = [];
   const startedAt = Date.now();
   const result = await runProcess({
     command,
@@ -80,7 +81,6 @@ export async function runCodex({ prompt, config, cwd, onEvent, registerChild }) 
     onStdoutLine(line) {
       try {
         const parsed = JSON.parse(line);
-        rawEvents.push(parsed);
         sessionId ||= extractSessionId(parsed);
         const type = String(parsed.type || "");
         if (type === "error" || type === "turn.failed") errorMessage = extractCodexError(parsed) || errorMessage;
@@ -111,13 +111,14 @@ export async function runCodex({ prompt, config, cwd, onEvent, registerChild }) 
     Object.assign(error, meta);
     throw error;
   }
-  if (!finalText) finalText = result.stdout.trim();
+  // No raw-stdout fallback: the final answer comes only from Codex's --output-last-message
+  // file. Raw stdout is the JSON event stream (can carry reasoning) — never surface it.
   if (!finalText) {
     const error = new Error("Codex completed without a final response");
     Object.assign(error, meta);
     throw error;
   }
-  return { text: finalText, sessionId, rawEvents, ...meta };
+  return { text: finalText, sessionId, ...meta };
 }
 
 export async function discoverCodexModels({ command = "codex" } = {}) {

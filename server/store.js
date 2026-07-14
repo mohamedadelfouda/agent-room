@@ -17,10 +17,35 @@ function sessionPath(id) {
   return path.join(SESSIONS_DIR, `${id}.json`);
 }
 
+async function doWrite(filePath, data) {
+  // Random temp name (not pid+Date.now(), which collides when two writes land in the same
+  // millisecond in this process → a torn/half-written file). Write then atomic rename.
+  const tempPath = `${filePath}.${crypto.randomUUID()}.tmp`;
+  try {
+    await fs.writeFile(tempPath, JSON.stringify(data, null, 2), "utf8");
+    await fs.rename(tempPath, filePath);
+  } finally {
+    // On success the rename already consumed tempPath (rm is a no-op / ENOENT); on a
+    // writeFile/rename failure this removes the leftover so temp files don't accumulate.
+    // The original error still propagates.
+    await fs.rm(tempPath, { force: true }).catch(() => {});
+  }
+}
+
+// Serialize async operations per file so concurrent saves — and full read-modify-write
+// sequences — for the same session run in call order and never interleave. Ops run in call
+// order; the chain survives a failing op so later waiters still proceed.
+const writeLocks = new Map();
+function runExclusive(filePath, task) {
+  const prev = writeLocks.get(filePath) || Promise.resolve();
+  const run = prev.then(task, task);
+  const tail = run.then(() => {}, () => {}); // non-rejecting, so one failure can't stall the chain
+  writeLocks.set(filePath, tail);
+  tail.then(() => { if (writeLocks.get(filePath) === tail) writeLocks.delete(filePath); });
+  return run;
+}
 async function atomicWrite(filePath, data) {
-  const tempPath = `${filePath}.${process.pid}.${Date.now()}.tmp`;
-  await fs.writeFile(tempPath, JSON.stringify(data, null, 2), "utf8");
-  await fs.rename(tempPath, filePath);
+  return runExclusive(filePath, () => doWrite(filePath, data));
 }
 
 export async function listSessions() {
@@ -78,14 +103,21 @@ export async function saveSession(session) {
 }
 
 export async function addMessage(id, message) {
-  const session = await getSession(id);
+  const filePath = sessionPath(id);
   const saved = {
     id: crypto.randomUUID(),
     createdAt: new Date().toISOString(),
     ...message,
   };
-  session.messages.push(saved);
-  await saveSession(session);
+  // Serialize the whole load→append→save under the per-session lock so two concurrent
+  // addMessage calls can't both read the same state and clobber each other's message.
+  // (Use doWrite, not saveSession, inside the lock to avoid re-entering runExclusive.)
+  await runExclusive(filePath, async () => {
+    const session = await getSession(id);
+    session.messages.push(saved);
+    session.updatedAt = new Date().toISOString();
+    await doWrite(filePath, session);
+  });
   return saved;
 }
 

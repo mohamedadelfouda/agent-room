@@ -1,4 +1,4 @@
-import { runProcess, validateOption } from "../process.js";
+import { runProcess, validateOption, allowedCommand } from "../process.js";
 import { redact } from "../logger.js";
 
 function contentText(content) {
@@ -17,7 +17,10 @@ function parseClaudeLine(line) {
 }
 
 export async function runClaude({ prompt, config, cwd, onEvent, registerChild }) {
-  const command = validateOption(config.command || "claude", "Claude command", { allowEmpty: false });
+  // Restrict the client-supplied command to the claude CLI (and apply the win32 space-ban):
+  // this is the path that actually spawns the agent, so the allowlist must be enforced HERE,
+  // not only on the diagnostic endpoints.
+  const command = allowedCommand(config.command || "claude", new Set(["claude"]));
   const model = validateOption(config.model || "sonnet", "Claude model", { allowEmpty: false });
   const effort = validateOption(config.effort || "high", "Claude effort", { allowEmpty: false });
   if (!new Set(["low", "medium", "high", "xhigh", "max", "ultracode"]).has(effort)) {
@@ -108,7 +111,9 @@ export async function runClaude({ prompt, config, cwd, onEvent, registerChild })
     Object.assign(error, meta);
     throw error;
   }
-  finalText = String(finalText || streamedText || result.stdout).trim();
+  // No raw-stdout fallback: use only parsed final text or the visible delta stream. Raw
+  // stdout is the JSON event stream (can carry thinking) — never surface it as the answer.
+  finalText = String(finalText || streamedText).trim();
   if (!finalText) {
     const error = new Error("Claude completed without a final response");
     Object.assign(error, meta);
