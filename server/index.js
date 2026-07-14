@@ -281,7 +281,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === "POST" && url.pathname === "/api/codex/models") {
       const body = await readJson(req);
       try {
-        return json(res, 200, { models: await discoverCodexModels({ command: allowedCommand(body.command, new Set(["codex"])) }) });
+        return json(res, 200, { models: await discoverCodexModels({ command: allowedCommand(body.command || "codex", new Set(["codex"])) }) });
       } catch (error) {
         return json(res, 200, { models: [], warning: error.message });
       }
