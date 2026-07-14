@@ -3,7 +3,8 @@ import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { runProcess } from "../../server/process.js";
+import { spawn } from "node:child_process";
+import { runProcess, terminateProcess } from "../../server/process.js";
 
 // Run node against a temp .js FILE (not `-e`) so the script's own characters never hit
 // cmd.exe under shell:true on Windows — keeps the test cross-platform.
@@ -32,6 +33,20 @@ test("runProcess caps a single line larger than the buffer (not just many lines)
     assert.ok(r.stdout.length <= 5 * 1024 * 1024, `stdout ${r.stdout.length} should be capped near 4MB`);
     assert.match(r.stdout, /\[truncated\]/);
   });
+});
+
+test("terminateProcess immediate kills a child that ignores SIGTERM (shutdown path)", async () => {
+  // Child traps SIGTERM and would otherwise linger; immediate SIGKILL/taskkill must end it
+  // well before the 2500ms SIGTERM→SIGKILL escalation the shutdown exit would race.
+  const child = spawn(process.execPath, ["-e", "process.on('SIGTERM',()=>{});setInterval(()=>{},1000)"], {
+    detached: process.platform !== "win32",
+    stdio: "ignore",
+  });
+  const closed = new Promise((res) => child.once("close", () => res(true)));
+  const start = Date.now();
+  terminateProcess(child, { immediate: true });
+  await closed;
+  assert.ok(Date.now() - start < 2000, "immediate terminate should not wait for the 2500ms escalation");
 });
 
 test("runProcess returns small output intact and streams every line", async () => {

@@ -100,21 +100,26 @@ export function runProcess({ command, args = [], input = "", cwd, env = {}, onSt
   });
 }
 
-export function terminateProcess(child) {
+// immediate:true sends SIGKILL synchronously instead of SIGTERM-then-escalate. Use it at
+// shutdown: the escalation timer is unref'd and would be beaten by the ~1500ms process.exit,
+// so a detached child that ignores SIGTERM could outlive the server. A synchronous SIGKILL
+// on the process group can't be caught/ignored and is delivered before we exit.
+export function terminateProcess(child, { immediate = false } = {}) {
   if (!child || child.killed) return;
   try {
     if (process.platform === "win32" && child.pid) {
       execFile("taskkill", ["/pid", String(child.pid), "/t", "/f"], () => {});
     } else if (child.pid) {
+      if (immediate) { process.kill(-child.pid, "SIGKILL"); return; }
       process.kill(-child.pid, "SIGTERM");
       setTimeout(() => {
         try { process.kill(-child.pid, "SIGKILL"); } catch {}
       }, 2500).unref();
     } else {
-      child.kill("SIGTERM");
+      child.kill(immediate ? "SIGKILL" : "SIGTERM");
     }
   } catch {
-    try { child.kill("SIGTERM"); } catch {}
+    try { child.kill(immediate ? "SIGKILL" : "SIGTERM"); } catch {}
   }
 }
 

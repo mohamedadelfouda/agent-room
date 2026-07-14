@@ -26,7 +26,9 @@ export function stopExec(id) {
 export async function abortAllExecutions(reason = "server_shutdown") {
   for (const [, s] of activeExec) {
     s.cancelled = true;
-    for (const c of s.children) terminateProcess(c);
+    // Shutdown path: SIGKILL now — the server's ~1500ms exit would beat the SIGTERM→SIGKILL
+    // escalation timer, leaving a detached executor/reviewer running after the server exits.
+    for (const c of s.children) terminateProcess(c, { immediate: true });
   }
 }
 
