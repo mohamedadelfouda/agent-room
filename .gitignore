@@ -3,8 +3,19 @@ data/sessions/*.json
 !data/sessions/.gitkeep
 # Logs may contain paths/errors — keep them local.
 logs/
+workspace/
 *.log
 node_modules/
+.corepack/
+.agents/
+.codex/
+.electron-cache/
+.codex-manual-cache/
+.pnpm-store/
+out/
+*.env
+*.env.*
+!.env.example
 .DS_Store
 .agent-workspaces/
 

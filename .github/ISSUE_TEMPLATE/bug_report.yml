@@ -1,0 +1,38 @@
+name: Bug report
+description: Report a reproducible Agent Room defect
+title: "[Bug]: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: Do not include credentials, private prompts, session JSON, or undisclosed vulnerability details. Use private vulnerability reporting for security issues.
+  - type: input
+    id: version
+    attributes:
+      label: Agent Room version or commit
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options: [Windows, macOS, Linux]
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Reproduction steps
+      description: Include the mode and provider, but redact paths and sensitive data.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected and actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: validation
+    attributes:
+      label: Relevant safe logs or checks

@@ -1,0 +1,44 @@
+# Add a provider or model
+
+## Provider contract
+
+Add one adapter under `server/adapters/`, then register it in `server/providers/registry.js`. A provider definition contains:
+
+- `id`: stable lowercase identifier used in sessions and DOM element IDs;
+- `label`: display name;
+- `command`: native CLI executable name;
+- `commandEnv`: optional host environment variable for a trusted absolute executable path;
+- `defaultModel` and `models`: UI defaults/static choices;
+- `efforts`: accepted reasoning-effort values;
+- `capabilities`: `web`, `projectRead`, `connectors`, and `executeModes`;
+- `run(options)`: adapter function;
+- optional `discoverModels(options)`.
+- optional `updateArgs`; omit it when the CLI has no safe non-interactive self-update command.
+
+The browser reads `GET /api/providers`, so a registered provider automatically appears in collaboration, finalizer, executor, reviewer, health, model, effort, and role controls.
+
+Catalog registration makes a provider visible, but it is not the whole integration. The adapter must implement the capability boundaries it advertises, and its native executable must be the provider's registered command or an explicitly selected canonical absolute path. Collaboration requires at least two enabled providers; debate intentionally requires exactly two.
+
+Bare commands are resolved from the host's native CLI search path. A custom absolute executable is accepted only after the user presses **Trust & check**; the host stores its canonical path for the current app process. Supplying a path in a session request never trusts that path by itself.
+
+## Adapter contract
+
+`run(options)` receives `prompt`, `config`, `cwd`, `onEvent`, and `registerChild`. It returns visible final text plus optional model, effort, duration, exit code, session ID, and truncation metadata. It must:
+
+- resolve only its allowlisted native executable;
+- call `runProcess` with an argument array and `shell: false`;
+- use the `agent` environment policy;
+- apply `agentTimeoutMs`;
+- surface visible partial output without reasoning/event-stream payloads;
+- enforce read permissions and every advertised execution mode in the provider CLI itself; and
+- clean temporary files in `finally`.
+
+Keep tool classes separate. A web call must not also receive local project or connector access. Project access should use either a provider-enforced sandbox or Agent Room's bounded `project__list_directory`/`project__read_file` broker. Connector access requires a strict per-run MCP configuration; otherwise advertise `connectors: false`.
+
+Add adapter tests for command allowlisting, accepted effort values, output parsing, timeouts/truncation, and every advertised permission mode. Do not add an execution mode to `capabilities.executeModes` until the provider can enforce that boundary.
+
+## Adding model choices
+
+Static model aliases belong in the provider's `models` array. If the CLI exposes a machine-readable catalog, implement `discoverModels`; the UI will show a Load button and call `POST /api/providers/:providerId/models`.
+
+Model IDs are data. Do not add branching by model name to the orchestrator.

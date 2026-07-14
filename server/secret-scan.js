@@ -39,10 +39,10 @@ export function scanForSecrets(files = []) {
     if (SENSITIVE_FILENAMES.some((re) => re.test(path))) {
       findings.push({ path, rule: "sensitive-filename", severity: "high", line: 0 });
     }
-    // A file too large to read was not content-scanned — surface it (warn, don't block)
-    // so the user knows a secret could be hiding in an unscanned file.
+    // Fail closed when a changed blob could not be content-scanned. Accepting an opaque
+    // changed blob would make the authoritative accept-time scan meaningless.
     if (file?.oversize) {
-      findings.push({ path, rule: "unscanned-large-file", severity: "medium", line: 0 });
+      findings.push({ path, rule: "unscanned-large-file", severity: "high", line: 0 });
     }
     const content = String(file?.content ?? "");
     if (!content) continue;

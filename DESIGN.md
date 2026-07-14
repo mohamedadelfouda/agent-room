@@ -1,14 +1,14 @@
 # Agent Room — Design System
 
 ## Theme decision (scene sentence)
-A developer at his desk in the evening, reading a live, dense debate between two AI agents on a
+A developer at his desk in the evening, reading a live, dense debate between multiple AI agents on a
 27" screen over a long session, wanting calm focus and zero glare while scanning who-said-what and
 deciding. → **Dark, but warm and low-glare**, not the blue-black "gamer/AI" dark. Refined charcoal
 tinted slightly warm so long reading is comfortable.
 
 ## Color strategy: Restrained
 Warm-tinted neutral surfaces + agents carry the color. The UI chrome is neutral; **identity color
-comes from the agents themselves** (Claude warm, Codex cool), not from a generic brand purple. One
+comes from the configured providers themselves** (the bundled Claude and Codex adapters have warm/cool defaults), not from a generic brand purple. One
 quiet accent for primary user actions. This dodges the "AI tool = neon purple on black" reflex.
 
 All colors OKLCH. Neutrals tinted warm (hue ~60), low chroma.
@@ -17,9 +17,11 @@ All colors OKLCH. Neutrals tinted warm (hue ~60), low chroma.
 --bg:        oklch(0.165 0.008 60)   /* warm near-black */
 --surface:   oklch(0.205 0.008 60)
 --surface-2: oklch(0.245 0.009 60)
---line:      oklch(0.315 0.008 60)
+--line:      oklch(0.53 0.008 60)    /* control boundaries: WCAG non-text contrast */
+--line-soft: oklch(0.38 0.008 60)    /* quiet separators */
 --text:      oklch(0.955 0.006 75)
 --muted:     oklch(0.70 0.012 68)
+--faint:     oklch(0.63 0.012 66)    /* smallest metadata text */
 --accent:    oklch(0.68 0.12 248)    /* calm blue — primary actions (NOT purple) */
 --accent-ink:oklch(0.20 0.03 248)
 --claude:    oklch(0.74 0.10 52)     /* warm terracotta/amber — Claude identity */

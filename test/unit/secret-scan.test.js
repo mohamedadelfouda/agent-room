@@ -39,10 +39,10 @@ test("reports the line number but never the secret value", () => {
   assert.equal(JSON.stringify(hit).includes("sk-abcdefghij"), false);
 });
 
-test("flags an oversized (unscanned) file as a non-blocking medium finding", () => {
+test("blocks an oversized file that could not be content-scanned", () => {
   const f = scanForSecrets([{ path: "assets/big.bin", content: "", oversize: true }]);
-  assert.ok(f.some((x) => x.rule === "unscanned-large-file" && x.severity === "medium"));
-  assert.equal(hasBlockingSecrets(f), false); // warns the user, doesn't block the run
+  assert.ok(f.some((x) => x.rule === "unscanned-large-file" && x.severity === "high"));
+  assert.equal(hasBlockingSecrets(f), true);
 });
 
 test("clean files produce no findings", () => {

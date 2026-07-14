@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, writeFileSync, rmSync, mkdirSync } from "node:fs";
+import { mkdtempSync, writeFileSync, rmSync, mkdirSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { projectSnapshot } from "../../server/project.js";
@@ -21,10 +21,13 @@ test("projectSnapshot reports branch, tree, and read-only guidance", async () =>
     git(dir, "commit", "-qm", "init");
 
     const snap = await projectSnapshot(dir);
-    assert.match(snap, /ATTACHED PROJECT/);
+    assert.match(snap, /SHARED EVIDENCE PACK/);
+    assert.match(snap, /verified-from-project/);
+    assert.match(snap, /not-verified.*Tests/);
     assert.match(snap, /README\.md/);
     assert.match(snap, /server\//);
     assert.match(snap, /Read.?\/.?Grep.?\/.?Glob/);
+    assert.match(snap, /# hi/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -32,4 +35,30 @@ test("projectSnapshot reports branch, tree, and read-only guidance", async () =>
 
 test("projectSnapshot is empty for no path", async () => {
   assert.equal(await projectSnapshot(""), "");
+});
+
+test("projectSnapshot reads README through a byte cap", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "ar-snap-large-"));
+  try {
+    git(dir, "init", "-q");
+    writeFileSync(join(dir, "README.md"), "x".repeat(5 * 1024 * 1024));
+    const snap = await projectSnapshot(dir);
+    assert.ok(snap.length < 10000, `snapshot length was ${snap.length}`);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("projectSnapshot never follows a README symlink outside the project", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "ar-snap-link-"));
+  const outside = join(tmpdir(), `ar-snap-secret-${Date.now()}.txt`);
+  try {
+    git(dir, "init", "-q");
+    writeFileSync(outside, "OUTSIDE_PRIVATE_CONTENT");
+    try { symlinkSync(outside, join(dir, "README.md"), "file"); }
+    catch (error) { if (["EPERM", "EACCES"].includes(error.code)) return t.skip("symlink creation is unavailable"); throw error; }
+    const snap = await projectSnapshot(dir);
+    assert.doesNotMatch(snap, /OUTSIDE_PRIVATE_CONTENT/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(outside, { force: true });
+  }
 });

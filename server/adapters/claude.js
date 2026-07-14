@@ -1,5 +1,7 @@
-import { runProcess, validateOption, allowedCommand } from "../process.js";
+import { approvedProviderCommand, runProcess, validateOption, resolveAllowedCommand } from "../process.js";
 import { redact } from "../logger.js";
+import { CappedText, agentTimeoutMs } from "../output-limits.js";
+import { claudeMcpLaunch } from "../mcp-config.js";
 
 function contentText(content) {
   if (typeof content === "string") return content;
@@ -16,34 +18,42 @@ function parseClaudeLine(line) {
   try { return JSON.parse(line); } catch { return null; }
 }
 
+export function claudePermissionArgs(permission = "read") {
+  if (permission === "chat") {
+    return ["--permission-mode", "auto", "--tools", "WebSearch,WebFetch", "--allowedTools", "WebSearch,WebFetch", "--disallowedTools", "Bash,Edit,Write,NotebookEdit,Read,Grep,Glob,Task"];
+  }
+  if (permission === "project") {
+    return ["--permission-mode", "auto", "--tools", "", "--allowedTools", "mcp__agent_room__project__list_directory,mcp__agent_room__project__read_file", "--disallowedTools", "Bash,Edit,Write,NotebookEdit,Read,Grep,Glob,WebSearch,WebFetch,Task"];
+  }
+  if (permission === "connectors") {
+    return ["--permission-mode", "auto", "--tools", "", "--allowedTools", "mcp__agent_room__connector__*", "--disallowedTools", "Bash,Edit,Write,NotebookEdit,Read,Grep,Glob,WebSearch,WebFetch,Task"];
+  }
+  return ["--tools", "", "--disallowedTools", "*"];
+}
+
 export async function runClaude({ prompt, config, cwd, onEvent, registerChild }) {
-  // Restrict the client-supplied command to the claude CLI (and apply the win32 space-ban):
-  // this is the path that actually spawns the agent, so the allowlist must be enforced HERE,
-  // not only on the diagnostic endpoints.
-  const command = allowedCommand(config.command || "claude", new Set(["claude"]));
+  // Restrict the client-supplied command to a trusted native Claude executable on the path
+  // that actually spawns the agent, not only on diagnostic endpoints.
+  const trustedCommand = process.env.AGENT_ROOM_CLAUDE_COMMAND || "";
+  const requestedCommand = config.command || trustedCommand || "claude";
+  const command = await resolveAllowedCommand(requestedCommand, new Set(["claude"]), { trustedPaths: [trustedCommand, approvedProviderCommand("claude")] });
   const model = validateOption(config.model || "sonnet", "Claude model", { allowEmpty: false });
   const effort = validateOption(config.effort || "high", "Claude effort", { allowEmpty: false });
-  if (!new Set(["low", "medium", "high", "xhigh", "max", "ultracode"]).has(effort)) {
+  if (!new Set(["low", "medium", "high", "xhigh", "max"]).has(effort)) {
     throw new Error(`Unsupported Claude effort: ${effort}`);
   }
 
-  // Permission level controls what the agent may do. Default "read" keeps the safe
-  // planning/review behavior (no file writes, no commands). Only an explicitly chosen
-  // executor gets write/run permissions — the reviewer always stays "read".
-  // "chat" is a general chat that can look things up on the web (WebSearch/WebFetch)
-  // and read, but never edit files or run shell commands. --allowedTools only
-  // pre-approves (it does not restrict), and --permission-mode auto is permissive,
-  // so we also DENY Bash/Edit/Write explicitly — deny rules win, which keeps chat
-  // read-only even if a web page it reads tries to trigger a write/command.
-  // "planread" lets a planning agent READ the attached project (Read/Grep/Glob) to ground
-  // its answer, but never edit, run commands, or search the web.
+  // Permission level controls what the agent may do. Claude exposes collaboration,
+  // web-only chat, connector proposals, and brokered read-only project review; it
+  // does not expose an execution permission.
+  // "chat" is web-only. It never combines untrusted web content with host-file tools.
+  // Project reads use only the host-brokered, canonical-path MCP tools in "project" mode.
+  // --allowedTools only pre-approves; it does not restrict availability. --tools is the
+  // exact built-in surface, while deny rules remain as defense in depth. MCP tools are
+  // supplied separately by Agent Room's strict per-run MCP configuration.
   const permission = config.permission || "read";
-  const permArgs =
-    permission === "chat" ? ["--permission-mode", "auto", "--allowedTools", "WebSearch,WebFetch,Read,Grep,Glob", "--disallowedTools", "Bash,Edit,Write,NotebookEdit"]
-    : permission === "planread" ? ["--permission-mode", "auto", "--allowedTools", "Read,Grep,Glob", "--disallowedTools", "Bash,Edit,Write,NotebookEdit,WebSearch,WebFetch,Task", "--strict-mcp-config"]
-    : permission === "edit" ? ["--permission-mode", "acceptEdits", "--allowedTools", "Read Edit Write Grep Glob"]
-    : (permission === "run" || permission === "full") ? ["--permission-mode", "bypassPermissions"]
-    : ["--disallowedTools", "*"];
+  const permArgs = claudePermissionArgs(permission);
+  const mcp = claudeMcpLaunch(config.mcpSessionId || config.connectorSessionId, permission === "project" ? "project" : permission === "connectors" ? "connectors" : "");
   const args = [
     "-p",
     "--model", model,
@@ -51,51 +61,64 @@ export async function runClaude({ prompt, config, cwd, onEvent, registerChild })
     "--output-format", "stream-json",
     "--verbose",
     "--include-partial-messages",
+    "--setting-sources", "",
+    "--disable-slash-commands",
+    "--no-session-persistence",
+    "--no-chrome",
+    ...mcp.args,
     ...permArgs,
     "Use the complete task supplied through standard input. Return only your response for the shared session.",
   ];
 
   let sessionId = null;
-  let finalText = "";
-  let streamedText = "";
+  const finalText = new CappedText();
+  const streamedText = new CappedText();
   let resultError = null;
   const startedAt = Date.now();
-  const result = await runProcess({
-    command,
-    args,
-    input: prompt,
-    cwd,
-    registerChild,
-    onStdoutLine(line) {
+  let result;
+  try {
+    result = await runProcess({
+      command,
+      args,
+      input: prompt,
+      cwd,
+      envPolicy: "agent",
+      timeoutMs: agentTimeoutMs(config.timeoutMs),
+      containTree: true,
+      registerChild,
+      onStdoutLine(line) {
       const event = parseClaudeLine(line);
       if (!event) {
-        if (line.trim()) streamedText += `${line}\n`;
+        if (line.trim()) streamedText.append(`${line}\n`);
         return;
       }
       sessionId ||= event.session_id || event.sessionId || event.message?.session_id || null;
       if (event.type === "result") {
         if (event.is_error) resultError = typeof event.result === "string" ? event.result : "Claude reported an error";
-        else if (typeof event.result === "string") finalText = event.result;
+        else if (typeof event.result === "string") finalText.replace(event.result);
         return;
       }
       const delta = event.delta?.text || event.content_block_delta?.delta?.text || event.message?.delta?.text;
       if (typeof delta === "string" && delta) {
-        streamedText += delta;
+        streamedText.append(delta);
         onEvent?.({ kind: "delta", text: delta });
         return;
       }
       const messageText = contentText(event.message?.content || event.content);
       if (messageText) {
-        finalText = messageText;
+        finalText.replace(messageText);
       }
       const type = String(event.type || "");
       if (type.includes("error")) onEvent?.({ kind: "error", text: event.error?.message || event.message || type });
       else if (type) onEvent?.({ kind: "activity", text: type });
-    },
-    onStderrLine(line) {
-      if (line.trim()) onEvent?.({ kind: "stderr", text: line.slice(0, 500) });
-    },
-  });
+      },
+      onStderrLine(line) {
+        if (line.trim()) onEvent?.({ kind: "stderr", text: line.slice(0, 500) });
+      },
+    });
+  } finally {
+    mcp.release();
+  }
 
   const durationMs = Date.now() - startedAt;
   const firstLine = (text) => String(text || "").split(/\r?\n/).find((l) => l.trim()) || "";
@@ -105,7 +128,8 @@ export async function runClaude({ prompt, config, cwd, onEvent, registerChild })
     const message = resultError || firstLine(result.stderr) || `Claude exited with code ${result.code}`;
     const error = new Error(message);
     // Only the visible text stream is kept as partial — never thinking/reasoning.
-    error.partial = String(streamedText || finalText || "").trim();
+    error.partial = String(streamedText.toString() || finalText.toString()).trim();
+    error.outputTruncated = finalText.truncated || streamedText.truncated || result.stdoutTruncated;
     // Technical details = exit code + tail of stderr, redacted. Never raw stdout (it carries thinking).
     error.technical = redact([`exitCode=${result.code}`, (result.stderr || "").trim().split(/\r?\n/).slice(-8).join("\n")].filter(Boolean).join("\n")).slice(0, 4000);
     Object.assign(error, meta);
@@ -113,11 +137,11 @@ export async function runClaude({ prompt, config, cwd, onEvent, registerChild })
   }
   // No raw-stdout fallback: use only parsed final text or the visible delta stream. Raw
   // stdout is the JSON event stream (can carry thinking) — never surface it as the answer.
-  finalText = String(finalText || streamedText).trim();
-  if (!finalText) {
+  const text = String(finalText.toString() || streamedText.toString()).trim();
+  if (!text) {
     const error = new Error("Claude completed without a final response");
     Object.assign(error, meta);
     throw error;
   }
-  return { text: finalText, sessionId, ...meta };
+  return { text, sessionId, outputTruncated: finalText.truncated || streamedText.truncated || result.stdoutTruncated, ...meta };
 }

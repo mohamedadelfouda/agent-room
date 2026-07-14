@@ -1,59 +1,210 @@
-import { execFile } from "node:child_process";
-import { getSession, saveSession } from "./store.js";
+import { getSession, listSessions, mutateSession, scratchWorkspacePath } from "./store.js";
 import { runExecution } from "./executor.js";
-import { removeWorktree, mergeBranch, pushBranch, hasRemote, pruneObjects } from "./worktree.js";
-import { runClaude } from "./adapters/claude.js";
-import { runCodex } from "./adapters/codex.js";
-import { terminateProcess } from "./process.js";
+import { assertProjectReady, listAcceptedRefs, listExecutionWorkspaces, listWorktrees, recoverAgentRoomIndexLock, releaseAcceptedCommit, removeWorktree, mergeBranch, pushBranch, pruneObjects } from "./worktree.js";
+import { provider } from "./providers/registry.js";
+import { resolveAllowedCommand, runProcess, terminateProcess } from "./process.js";
 import { hasBlockingSecrets } from "./secret-scan.js";
-import { logError } from "./logger.js";
+import { logError, redact } from "./logger.js";
+import { prepareAcceptedChange, prepareReviewSnapshot } from "./acceptance.js";
+import { recordDecision } from "./decisions.js";
+import { registerProjectScope } from "./project-tools.js";
+import path from "node:path";
+import { assertTrustedProject, projectIdentity } from "./project.js";
+import { githubRepository } from "./github-remote.js";
+import { claimSessionActivity } from "./session-activity.js";
 
 const activeExec = new Map();
-const adapters = { claude: runClaude, codex: runCodex };
+const decisionLocks = new Map();
 
+function withDecisionLock(sessionId, taskId, task) {
+  const key = `${sessionId}:${taskId}`;
+  const previous = decisionLocks.get(key) || Promise.resolve();
+  const run = previous.then(task, task);
+  const tail = run.then(() => {}, () => {});
+  decisionLocks.set(key, tail);
+  tail.then(() => { if (decisionLocks.get(key) === tail) decisionLocks.delete(key); });
+  return run;
+}
 export function isExecuting(id) { return activeExec.has(id); }
-export function stopExec(id) {
+export async function stopExec(id) {
   const s = activeExec.get(id);
   if (!s) return false;
   s.cancelled = true;
-  for (const c of s.children) terminateProcess(c);
-  return true;
+  const results = await Promise.all([...s.children].map((child) => terminateProcess(child)));
+  return results.every(Boolean);
 }
 
 // Cancel every in-flight execution and kill its child processes — used at shutdown so an
 // executor/reviewer agent never keeps running after the server exits. Each run's own
 // finally block then clears its registry entry.
-export async function abortAllExecutions(reason = "server_shutdown") {
+export async function abortAllExecutions() {
   for (const [, s] of activeExec) {
     s.cancelled = true;
     // Shutdown path: SIGKILL now — the server's ~1500ms exit would beat the SIGTERM→SIGKILL
     // escalation timer, leaving a detached executor/reviewer running after the server exits.
-    for (const c of s.children) terminateProcess(c, { immediate: true });
+    await Promise.all([...s.children].map((child) => terminateProcess(child, { immediate: true })));
   }
 }
 
-function gh(args, cwd) {
-  return new Promise((resolve, reject) => {
-    execFile("gh", args, { cwd, windowsHide: true, maxBuffer: 1024 * 1024 * 16 }, (err, stdout, stderr) => {
-      if (err) { err.message = (stderr || err.message || "").trim(); reject(err); }
-      else resolve({ stdout: stdout || "", stderr: stderr || "" });
-    });
-  });
+async function gh(args, cwd, input = "") {
+  const command = await resolveAllowedCommand("gh", new Set(["gh"]));
+  const execution = await runProcess({ command, args, cwd, input, envPolicy: "github", timeoutMs: 120000 });
+  if (execution.code !== 0) throw new Error(redact(execution.stderr || `gh exited with code ${execution.code}`).trim());
+  return execution;
+}
+
+const RETAINED_EXECUTION_STATUSES = new Set(["awaiting_user", "accepted_pending_merge", "accepted_pending_pr"]);
+
+function projectRecoveryState(projects, projectPath) {
+  const current = projects.get(projectPath) || { keep: new Set(), acceptedRefs: new Set() };
+  projects.set(projectPath, current);
+  return current;
+}
+
+async function cleanupExecutionWorkspace(projectPath, worktree, { purgeSecrets = false, acceptedRef = "", acceptedCommit = "" } = {}) {
+  let cleanup = await removeWorktree(projectPath, worktree.path, worktree.branch);
+  if (purgeSecrets) {
+    const purged = await pruneObjects(projectPath, { isolation: worktree.isolation });
+    cleanup = { ok: cleanup.ok && purged.ok, errors: [...cleanup.errors, ...purged.errors] };
+  }
+  if (acceptedRef || acceptedCommit) {
+    const released = await releaseAcceptedCommit(projectPath, acceptedRef, acceptedCommit);
+    cleanup = { ok: cleanup.ok && released.ok, errors: [...cleanup.errors, ...released.errors] };
+  }
+  return cleanup;
+}
+
+export async function reconcileExecutionWorktrees() {
+  const projects = new Map();
+  const recoveredIndexLocks = new Set();
+  for (const summary of await listSessions()) {
+    if (summary.projectPath) projectRecoveryState(projects, summary.projectPath);
+    if (summary.hasRecoverableExecutions === false || (summary.hasRecoverableExecutions === undefined && summary.hasExecutions === false)) continue;
+    try {
+      let session = await getSession(summary.id);
+      for (const execution of session.executions || []) {
+      const executionProjectPath = execution.projectPath || session.project?.path;
+      if (execution.status !== "accepting_merge" || !executionProjectPath || recoveredIndexLocks.has(executionProjectPath)) continue;
+      await recoverAgentRoomIndexLock(executionProjectPath);
+      recoveredIndexLocks.add(executionProjectPath);
+    }
+    const needsStateRecovery = (session.executions || []).some((execution) => ["accepting_merge", "accepting_pr", "rejecting"].includes(execution.status));
+    if (needsStateRecovery) {
+      session = await mutateSession(session.id, (latest) => {
+        for (const execution of latest.executions || []) {
+          if (execution.status === "accepting_merge") execution.status = "accepted_pending_merge";
+          if (execution.status === "accepting_pr") execution.status = "accepted_pending_pr";
+          if (execution.status === "rejecting") execution.status = "rejected_cleanup_pending";
+        }
+        return structuredClone(latest);
+      });
+    }
+    if (session.project?.path) {
+      projectRecoveryState(projects, session.project.path);
+    }
+    for (const execution of session.executions || []) {
+      const executionProjectPath = execution.projectPath || session.project?.path;
+      if (!executionProjectPath) continue;
+      const project = projectRecoveryState(projects, executionProjectPath);
+      if (RETAINED_EXECUTION_STATUSES.has(execution.status)) {
+        if (execution.worktree?.path) project.keep.add(path.resolve(execution.worktree.path));
+        if (execution.acceptedRef) project.acceptedRefs.add(execution.acceptedRef);
+        continue;
+      }
+      if (execution.cleanupPending === false && execution.cleanupCompletedAt) continue;
+      let cleanup = execution.worktree?.path
+        ? await cleanupExecutionWorkspace(executionProjectPath, execution.worktree, {
+          purgeSecrets: execution.status === "blocked_secret",
+          acceptedRef: execution.acceptedRef,
+          acceptedCommit: execution.acceptedCommit,
+        })
+        : execution.acceptedRef
+          ? await releaseAcceptedCommit(executionProjectPath, execution.acceptedRef, execution.acceptedCommit)
+          : { ok: false, errors: ["execution cleanup record is missing its isolated workspace"] };
+      await mutateSession(session.id, (latest) => {
+        const current = findExecution(latest, execution.taskId);
+        if (!current) return;
+        current.cleanupPending = !cleanup.ok;
+        current.cleanupErrors = cleanup.errors.slice(0, 5);
+        if (cleanup.ok) current.cleanupCompletedAt = new Date().toISOString();
+        if (cleanup.ok && current.status === "rejected_cleanup_pending") current.status = "rejected";
+      });
+      }
+    } catch (error) {
+      logError(`execution reconciliation skipped session ${summary.id}`, error.message);
+    }
+  }
+
+  // Remove Agent Room worktrees created before a crash but never persisted.
+  // Still-actionable execution worktrees remain in the keep set above.
+  for (const [projectPath, project] of projects) {
+    try {
+      for (const workspace of await listExecutionWorkspaces(projectPath)) {
+        if (!project.keep.has(path.resolve(workspace.path))) await removeWorktree(projectPath, workspace.path, workspace.branch);
+      }
+      const blocks = (await listWorktrees(projectPath)).split(/\r?\n\r?\n/).filter(Boolean);
+      for (const block of blocks) {
+        const wtPath = block.match(/^worktree (.+)$/m)?.[1];
+        const branch = block.match(/^branch refs\/heads\/(agent\/.+)$/m)?.[1];
+        if (!wtPath || !branch || !path.resolve(wtPath).includes(`${path.sep}.agent-workspaces${path.sep}`)) continue;
+        if (!project.keep.has(path.resolve(wtPath))) await removeWorktree(projectPath, wtPath, branch);
+      }
+      for (const ref of await listAcceptedRefs(projectPath)) {
+        if (project.acceptedRefs.has(ref)) continue;
+        const commitSha = ref.split("/").pop();
+        await releaseAcceptedCommit(projectPath, ref, commitSha);
+      }
+    } catch (error) {
+      logError(`orphan worktree reconciliation skipped project ${projectPath}`, error.message);
+    }
+  }
 }
 
 function reviewPrompt(task, execResult) {
   return `You are the REVIEWER. Read only — do not modify anything, just review.\n\n` +
     `The task that was implemented:\n${task}\n\n` +
-    `The executor (${execResult.executor}) produced this diff:\n\n${execResult.diff.patch.slice(0, 120000)}\n\n` +
+    `The executor (${execResult.executor}) produced this diff summary:\n\n${execResult.diff.patch.slice(0, 120000)}\n\n` +
+    `You are reviewing the disposable execution clone. Inspect the complete changed files and ` +
+    `relevant surrounding code instead of relying only on this possibly truncated summary. ` +
     `Review it: is it correct and complete? List any bugs, risks, or missing pieces. ` +
     `End with a clear verdict: APPROVE or REQUEST_CHANGES, with a one-line reason.`;
 }
 
-// One run: exactly one executor writes in an isolated worktree, then one reviewer reads the diff.
+export function pullRequestContent(execution = {}) {
+  const task = redact(execution.task);
+  const review = redact(execution.review?.text || "—");
+  const titleTask = task.replace(/\s+/g, " ").trim() || "Accepted change";
+  return {
+    title: `Agent Room: ${titleTask.slice(0, 60)}`,
+    body: `### Task\n${task}\n\n### Review\n${review}`,
+  };
+}
+
+async function openPullRequest({ projectPath, branch, title, body, repository }) {
+  const safeTitle = redact(title).slice(0, 256);
+  const boundedBody = redact(body).slice(0, 100000);
+  try {
+    const created = await gh(["pr", "create", "--repo", repository, "--head", branch, "--title", safeTitle, "--body-file", "-"], projectPath, boundedBody);
+    return created.stdout.trim();
+  } catch (error) {
+    if (!/already exists/i.test(error.message)) throw error;
+    const existing = await gh(["pr", "view", branch, "--repo", repository, "--json", "url", "--jq", ".url"], projectPath);
+    return existing.stdout.trim();
+  }
+}
+
+// One run: exactly one executor writes in a disposable clone, then one reviewer reads the captured diff.
 // Never two writers. Result waits for the user's accept/reject decision.
-export async function runExecuteAndReview(sessionId, req, emit) {
-  if (activeExec.has(sessionId)) throw new Error("An execution is already running for this session");
+export function runExecuteAndReview(sessionId, req, emit) {
+  const releaseActivity = claimSessionActivity(sessionId, "execution");
+  return runExecuteAndReviewClaimed(sessionId, req, emit, releaseActivity);
+}
+
+async function runExecuteAndReviewClaimed(sessionId, req, emit, releaseActivity) {
   const state = { cancelled: false, children: new Set() };
+  let pendingWorktree = null;
+  let pendingWorktreeNeedsSecretPurge = false;
+  let projectPath = "";
   activeExec.set(sessionId, state);
   const registerChild = (c) => { state.children.add(c); c.once("close", () => state.children.delete(c)); };
 
@@ -61,8 +212,14 @@ export async function runExecuteAndReview(sessionId, req, emit) {
     const session = await getSession(sessionId);
     const project = session.project;
     if (!project?.path) throw new Error("اربط مجلد مشروع (git) أولاً");
-    const executor = req.executor, reviewer = req.reviewer, mode = req.mode || "edit";
-    if (!adapters[executor]) throw new Error("منفّذ غير معروف");
+    await assertTrustedProject(session);
+    if ((session.executions || []).filter((item) => !["merged", "pr_opened", "rejected", "blocked_secret"].includes(item.status)).length >= 20) {
+      throw new Error("Resolve existing execution decisions before starting more work");
+    }
+    projectPath = project.path;
+    const executor = req.executor, reviewer = req.reviewer, mode = req.mode || "run";
+    if (!provider(executor)) throw new Error("منفّذ غير معروف");
+    if (!provider(reviewer)) throw new Error("مراجع غير معروف");
     if (executor === reviewer) throw new Error("المنفّذ والمراجع لازم يكونوا مختلفين");
     const task = String(req.task || "").trim();
     if (!task) throw new Error("مهمة التنفيذ فارغة");
@@ -73,73 +230,121 @@ export async function runExecuteAndReview(sessionId, req, emit) {
     emit({ type: "exec_phase", phase: "executing", agent: executor });
     const execResult = await runExecution({
       projectPath: project.path, executor, mode, task,
-      config: req.agents?.[executor] || {},
-      onEvent: (e) => emit({ type: "exec_activity", agent: executor, event: e }),
+      config: { ...(req.agents?.[executor] || {}), connectorSessionId: provider(executor).capabilities?.connectors && Object.values(session.connectors || {}).some((item) => item.enabled) ? session.id : "" },
+      onEvent: (event) => emit({ type: "exec_activity", agent: executor, event: event?.text ? { ...event, text: redact(event.text) } : event }),
       registerChild,
     });
+    pendingWorktree = execResult.worktree;
+
+    const blockSecretExecution = async ({ diff, secretFindings }) => {
+      pendingWorktreeNeedsSecretPurge = true;
+      emit({ type: "exec_phase", phase: "blocked_secret", agent: executor });
+      await mutateSession(sessionId, (current) => {
+        current.executions ||= [];
+        current.executions.push({
+          taskId: execResult.taskId, executor, reviewer, mode, task,
+          projectPath: project.path, projectFingerprint: project.fingerprint,
+          worktree: execResult.worktree,
+          executorText: execResult.text, executorMeta: execResult.meta,
+          diff: { files: diff.files, stat: diff.stat, patch: "" },
+          secretFindings,
+          review: null, status: "blocked_secret", cleanupPending: true, cleanupErrors: [], createdAt: new Date().toISOString(),
+        });
+      });
+      const cleanup = await cleanupExecutionWorkspace(project.path, execResult.worktree, { purgeSecrets: true });
+      await mutateSession(sessionId, (current) => {
+        const record = findExecution(current, execResult.taskId);
+        record.cleanupPending = !cleanup.ok;
+        record.cleanupErrors = cleanup.errors.slice(0, 5);
+        if (cleanup.ok) record.cleanupCompletedAt = new Date().toISOString();
+      });
+      pendingWorktree = null;
+      pendingWorktreeNeedsSecretPurge = false;
+      emit({ type: "exec_secret_blocked", taskId: execResult.taskId, findings: secretFindings });
+      emit({ type: "exec_ready", taskId: execResult.taskId });
+    };
 
     // Secret gate: if the change carries secrets, stop before review/commit, discard
-    // the worktree, and surface the findings (path/rule/line only — never the value).
+    // the isolated clone, and surface the findings (path/rule/line only — never the value).
     if (hasBlockingSecrets(execResult.secretFindings)) {
-      emit({ type: "exec_phase", phase: "blocked_secret", agent: executor });
-      await removeWorktree(project.path, execResult.worktree.path, execResult.worktree.branch);
-      // If the executor committed the secret to its (now-deleted) branch itself, purge the
-      // orphaned objects so the value isn't recoverable from the repo.
-      await pruneObjects(project.path);
-      const sBlocked = await getSession(sessionId);
-      sBlocked.executions = sBlocked.executions || [];
-      sBlocked.executions.push({
-        taskId: execResult.taskId, executor, reviewer, mode, task,
-        executorText: execResult.text, executorMeta: execResult.meta,
-        diff: { files: execResult.diff.files, stat: execResult.diff.stat, patch: "" },
-        secretFindings: execResult.secretFindings,
-        review: null, status: "blocked_secret", createdAt: new Date().toISOString(),
-      });
-      await saveSession(sBlocked);
-      emit({ type: "exec_secret_blocked", taskId: execResult.taskId, findings: execResult.secretFindings });
-      emit({ type: "exec_ready", taskId: execResult.taskId });
+      await blockSecretExecution(execResult);
       return;
     }
 
+    if (state.cancelled) throw new Error("Execution stopped by user");
+
+    // Materialize and scan the exact immutable tree that the reviewer and user are asked
+    // to approve. Later filesystem changes are never substituted for this tree.
+    const reviewSnapshot = await prepareReviewSnapshot({ projectPath: project.path, worktree: execResult.worktree });
+    if (reviewSnapshot.blocked) {
+      await blockSecretExecution(reviewSnapshot);
+      return;
+    }
+    const reviewedResult = { ...execResult, diff: reviewSnapshot.diff };
+
     // 2) Reviewer reads the diff (read-only, no writing).
     let review = null;
-    if (reviewer && adapters[reviewer] && !state.cancelled) {
+    if (reviewer && provider(reviewer) && !state.cancelled) {
       emit({ type: "exec_phase", phase: "reviewing", agent: reviewer });
-      const r = await adapters[reviewer]({
-        prompt: reviewPrompt(task, execResult),
-        config: { ...(req.agents?.[reviewer] || {}), permission: "read" },
-        cwd: project.path,
-        onEvent: (e) => emit({ type: "exec_activity", agent: reviewer, event: e }),
-        registerChild,
-      });
-      review = { agent: reviewer, text: r.text, meta: { model: r.model ?? null, durationMs: r.durationMs ?? null } };
+      const reviewerProvider = provider(reviewer);
+      const mcpProject = reviewerProvider.capabilities?.projectTransport === "mcp";
+      const releaseScope = mcpProject ? await registerProjectScope(session.id, execResult.worktree.path) : null;
+      let r;
+      try {
+        r = await reviewerProvider.run({
+          prompt: reviewPrompt(task, reviewedResult),
+          config: { ...(req.agents?.[reviewer] || {}), permission: mcpProject ? "project" : "planread", mcpSessionId: mcpProject ? session.id : "" },
+          cwd: mcpProject ? await scratchWorkspacePath() : execResult.worktree.path,
+          onEvent: (event) => emit({ type: "exec_activity", agent: reviewer, event: event?.text ? { ...event, text: redact(event.text) } : event }),
+          registerChild,
+        });
+      } finally {
+        releaseScope?.();
+      }
+      review = { agent: reviewer, text: redact(r.text), meta: { model: r.model ?? null, durationMs: r.durationMs ?? null, outputTruncated: Boolean(r.outputTruncated) } };
+    }
+
+    if (state.cancelled) throw new Error("Execution stopped by user");
+    const postReviewSnapshot = await prepareReviewSnapshot({ projectPath: project.path, worktree: execResult.worktree });
+    if (postReviewSnapshot.treeSha !== reviewSnapshot.treeSha) {
+      pendingWorktreeNeedsSecretPurge = true;
+      throw new Error("Execution files changed while they were being reviewed; run the task again");
     }
 
     // 3) Store the execution record, awaiting the user's decision.
     const record = {
       taskId: execResult.taskId, executor, reviewer, mode, task,
+      projectPath: project.path, projectFingerprint: project.fingerprint,
       worktree: execResult.worktree,
+      reviewedTree: reviewSnapshot.treeSha,
       executorText: execResult.text, executorMeta: execResult.meta,
-      diff: { files: execResult.diff.files, stat: execResult.diff.stat, patch: String(execResult.diff.patch).slice(0, 200000) },
-      secretFindings: execResult.secretFindings, // non-blocking warnings (e.g. unscanned large files)
+      diff: { files: reviewSnapshot.diff.files, stat: reviewSnapshot.diff.stat, patch: String(reviewSnapshot.diff.patch).slice(0, 200000) },
+      secretFindings: reviewSnapshot.secretFindings,
       review, status: "awaiting_user", createdAt: new Date().toISOString(),
     };
-    const s2 = await getSession(sessionId);
-    s2.executions = s2.executions || [];
-    s2.executions.push(record);
-    await saveSession(s2);
+    await mutateSession(sessionId, (current) => {
+      current.executions ||= [];
+      current.executions.push(record);
+    });
+    pendingWorktree = null;
     emit({ type: "exec_ready", taskId: record.taskId });
   } catch (err) {
-    logError("execution failed", err?.message || String(err));
-    emit({ type: "exec_error", error: err.message });
+    if (pendingWorktree) await cleanupExecutionWorkspace(projectPath, pendingWorktree, { purgeSecrets: pendingWorktreeNeedsSecretPurge });
+    const safeMessage = redact(err?.message || String(err));
+    logError("execution failed", safeMessage);
+    emit({ type: "exec_error", error: safeMessage });
     try {
-      const s = await getSession(sessionId);
-      s.messages.push({ id: crypto.randomUUID(), createdAt: new Date().toISOString(), author: "system", content: `فشل التنفيذ: ${err.message}`, phase: "exec_error", mode: s.mode });
-      await saveSession(s);
+      await mutateSession(sessionId, (current) => {
+        current.messages.push({ id: crypto.randomUUID(), createdAt: new Date().toISOString(), author: "system", content: `فشل التنفيذ: ${safeMessage}`, phase: "exec_error", mode: current.mode });
+      });
     } catch {}
   } finally {
-    for (const c of state.children) terminateProcess(c);
-    activeExec.delete(sessionId);
+    try {
+      await Promise.all([...state.children].map((child) => terminateProcess(child)));
+    } finally {
+      activeExec.delete(sessionId);
+      releaseActivity();
+    }
   }
 }
 
@@ -149,42 +354,150 @@ function findExecution(session, taskId) {
 
 // Accept: "merge" keeps the change on the local branch; "pr" pushes + opens a GitHub PR.
 export async function acceptExecution(sessionId, taskId, action = "merge") {
-  const session = await getSession(sessionId);
-  const rec = findExecution(session, taskId);
-  if (!rec) throw new Error("Execution not found");
-  if (rec.status !== "awaiting_user") throw new Error(`Execution already ${rec.status}`);
-  const projectPath = session.project.path;
-  let result = {};
+  if (action !== "merge" && action !== "pr") throw new Error("Unsupported accept action");
+  return withDecisionLock(sessionId, taskId, async () => {
+    const retryableStatus = action === "pr" ? "accepted_pending_pr" : "accepted_pending_merge";
+    const acceptingStatus = action === "pr" ? "accepting_pr" : "accepting_merge";
+    const claim = await mutateSession(sessionId, async (session) => {
+      const rec = findExecution(session, taskId);
+      if (!rec) throw new Error("Execution not found");
+      if (!["awaiting_user", retryableStatus, acceptingStatus].includes(rec.status)) throw new Error(`Execution already ${rec.status}`);
+      if (rec.decision && rec.decision !== action) throw new Error(`Execution was already accepted for ${rec.decision}`);
+      if (!rec.worktree?.approval) throw new Error("This execution predates the secure acceptance format; run the task again");
+      if (!rec.projectPath || !rec.projectFingerprint) throw new Error("This execution predates project identity binding; run the task again");
+      if (!rec.reviewedTree) throw new Error("This execution predates reviewed-tree binding; run the task again");
+      if (action === "pr") {
+        const publication = await assertProjectReady(rec.projectPath, rec.worktree, { acceptedCommit: rec.acceptedCommit });
+        githubRepository(publication.remoteUrl);
+      }
+      if (!rec.acceptedAt) {
+        rec.acceptedAt = new Date().toISOString();
+        recordDecision(session, { type: "execution", outcome: "accepted", taskId, metadata: { action } });
+      }
+      rec.status = acceptingStatus;
+      rec.decision = action;
+      return { projectPath: rec.projectPath, projectFingerprint: rec.projectFingerprint, rec: structuredClone(rec) };
+    });
+    let rec = claim.rec;
+    const projectPath = claim.projectPath;
+    try {
+      const identity = await projectIdentity(projectPath);
+      if (identity.realPath !== projectPath || identity.fingerprint !== claim.projectFingerprint) {
+        throw new Error("Project identity or origin changed after this execution was reviewed; run it again");
+      }
+      if (!rec.acceptedCommit) {
+        const prepared = await prepareAcceptedChange({
+          projectPath,
+          worktree: rec.worktree,
+          reviewedTree: rec.reviewedTree,
+          message: `Agent Room: ${String(rec.task).slice(0, 60)}`,
+        });
+        if (prepared.blocked) {
+          await mutateSession(sessionId, (session) => {
+            const current = findExecution(session, taskId);
+            Object.assign(current, {
+              diff: { files: prepared.diff.files, stat: prepared.diff.stat, patch: "" },
+              secretFindings: prepared.secretFindings,
+              status: "blocked_secret",
+              decidedAt: new Date().toISOString(),
+              decision: "blocked_at_accept",
+              cleanupPending: true,
+              cleanupErrors: [],
+            });
+            recordDecision(session, { type: "execution", outcome: "blocked_secret", taskId, metadata: { requestedAction: action } });
+          });
+          const cleanup = await cleanupExecutionWorkspace(projectPath, rec.worktree, { purgeSecrets: true });
+          await mutateSession(sessionId, (session) => {
+            const current = findExecution(session, taskId);
+            current.cleanupPending = !cleanup.ok;
+            current.cleanupErrors = cleanup.errors.slice(0, 5);
+            if (cleanup.ok) current.cleanupCompletedAt = new Date().toISOString();
+          });
+          return { status: "blocked_secret", findings: prepared.secretFindings, cleanupPending: !cleanup.ok };
+        }
+        rec = await mutateSession(sessionId, (session) => {
+          const current = findExecution(session, taskId);
+          Object.assign(current, {
+            diff: { files: prepared.diff.files, stat: prepared.diff.stat, patch: String(prepared.diff.patch).slice(0, 200000) },
+            secretFindings: prepared.secretFindings,
+            acceptedCommit: prepared.commitSha,
+            acceptedTree: prepared.treeSha,
+            acceptedRef: prepared.acceptedRef,
+          });
+          return structuredClone(current);
+        });
+      }
 
-  if (action === "pr") {
-    if (!(await hasRemote(projectPath))) throw new Error("المشروع مالوش origin على GitHub — استخدم merge محلي");
-    await pushBranch(projectPath, rec.worktree.branch);
-    const title = `Agent Room: ${rec.task.slice(0, 60)}`;
-    const body = `Executed by **${rec.executor}** (mode: ${rec.mode}) in an isolated worktree.\n\n### Task\n${rec.task}\n\n### Reviewer (${rec.reviewer || "none"})\n${rec.review?.text || "—"}`;
-    const { stdout } = await gh(["pr", "create", "--head", rec.worktree.branch, "--title", title, "--body", body], projectPath);
-    result = { prUrl: stdout.trim() };
-    rec.status = "pr_opened";
-  } else {
-    await mergeBranch(projectPath, rec.worktree.branch);
-    await removeWorktree(projectPath, rec.worktree.path, rec.worktree.branch);
-    rec.status = "merged";
-  }
-  rec.decidedAt = new Date().toISOString();
-  rec.decision = action;
-  Object.assign(rec, result);
-  await saveSession(session);
-  return { status: rec.status, ...result };
+      let result = {};
+      if (action === "pr") {
+        const publication = await assertProjectReady(projectPath, rec.worktree);
+        const repository = githubRepository(publication.remoteUrl);
+        await pushBranch(projectPath, rec.worktree, rec.acceptedCommit, rec.acceptedRef);
+        const { title, body } = pullRequestContent(rec);
+        result = { prUrl: await openPullRequest({ projectPath, branch: rec.worktree.branch, title, body, repository }) };
+      } else {
+        await assertProjectReady(projectPath, rec.worktree, { acceptedCommit: rec.acceptedCommit });
+        await mergeBranch(projectPath, rec.worktree, rec.acceptedCommit, rec.acceptedRef);
+      }
+      // Persist the externally visible terminal result before cleanup. A crash
+      // after the PR/merge must not leave a retry state whose local branch is gone.
+      await mutateSession(sessionId, (session) => {
+        const current = findExecution(session, taskId);
+        Object.assign(current, {
+          status: action === "pr" ? "pr_opened" : "merged",
+          decidedAt: new Date().toISOString(),
+          decision: action,
+          cleanupPending: true,
+          cleanupErrors: [],
+          ...result,
+        });
+      });
+      const cleanup = await cleanupExecutionWorkspace(projectPath, rec.worktree, {
+        acceptedRef: rec.acceptedRef,
+        acceptedCommit: rec.acceptedCommit,
+      });
+      await mutateSession(sessionId, (session) => {
+        const current = findExecution(session, taskId);
+        current.cleanupPending = !cleanup.ok;
+        current.cleanupErrors = cleanup.errors.slice(0, 5);
+        if (cleanup.ok) current.cleanupCompletedAt = new Date().toISOString();
+      });
+      return { status: action === "pr" ? "pr_opened" : "merged", cleanupPending: !cleanup.ok, ...result };
+    } catch (error) {
+      await mutateSession(sessionId, (session) => {
+        const current = findExecution(session, taskId);
+        if (current?.status === acceptingStatus) current.status = retryableStatus;
+      }).catch(() => {});
+      throw error;
+    }
+  });
 }
 
 // Reject: discard the executor's worktree and branch entirely.
 export async function rejectExecution(sessionId, taskId) {
-  const session = await getSession(sessionId);
-  const rec = findExecution(session, taskId);
-  if (!rec) throw new Error("Execution not found");
-  // A blocked_secret record has no worktree (already discarded) — guard against it.
-  if (rec.worktree?.path) await removeWorktree(session.project.path, rec.worktree.path, rec.worktree.branch);
-  rec.status = "rejected";
-  rec.decidedAt = new Date().toISOString();
-  await saveSession(session);
-  return { status: "rejected" };
+  return withDecisionLock(sessionId, taskId, async () => {
+    const claim = await mutateSession(sessionId, (session) => {
+      const rec = findExecution(session, taskId);
+      if (!rec) throw new Error("Execution not found");
+      if (!["awaiting_user", "rejected_cleanup_pending"].includes(rec.status)) throw new Error(`Execution already ${rec.status}`);
+      rec.status = "rejecting";
+      rec.decision = "reject";
+      if (!rec.decidedAt) recordDecision(session, { type: "execution", outcome: "rejected", taskId });
+      return { projectPath: rec.projectPath || session.project.path, rec: structuredClone(rec) };
+    });
+    const cleanup = claim.rec.worktree?.path
+      ? await removeWorktree(claim.projectPath, claim.rec.worktree.path, claim.rec.worktree.branch)
+      : { ok: true, errors: [] };
+    await mutateSession(sessionId, (session) => {
+      const current = findExecution(session, taskId);
+      if (current?.status !== "rejecting") throw new Error("Execution decision changed while rejecting");
+      current.status = cleanup.ok ? "rejected" : "rejected_cleanup_pending";
+      current.decidedAt = new Date().toISOString();
+      current.cleanupPending = !cleanup.ok;
+      current.cleanupErrors = cleanup.errors.slice(0, 5);
+      if (cleanup.ok) current.cleanupCompletedAt = new Date().toISOString();
+    });
+    if (!cleanup.ok) throw new Error(`Change was rejected, but cleanup is still pending: ${cleanup.errors[0]}`);
+    return { status: "rejected" };
+  });
 }

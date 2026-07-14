@@ -1,18 +1,38 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, realpathSync, symlinkSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn } from "node:child_process";
-import { runProcess, terminateProcess } from "../../server/process.js";
+import { allowedCommand, approveProviderCommand, approvedProviderCommand, resolveAllowedCommand, runProcess, sanitizedAgentEnv, sanitizedGithubEnv, sanitizedPublicationEnv, terminateProcess } from "../../server/process.js";
 
-// Run node against a temp .js FILE (not `-e`) so the script's own characters never hit
-// cmd.exe under shell:true on Windows — keeps the test cross-platform.
+// Run node against a temp .js file so large scripts stay readable and cross-platform.
 function withScript(body, fn) {
   const dir = mkdtempSync(join(tmpdir(), "ar-proc-"));
   const file = join(dir, "s.js");
   writeFileSync(file, body);
   return Promise.resolve(fn(file)).finally(() => rmSync(dir, { recursive: true, force: true }));
+}
+
+function waitForClose(child, timeoutMs = 5000) {
+  if (!child || child.exitCode !== null || child.signalCode !== null) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => { cleanup(); reject(new Error("child did not close")); }, timeoutMs);
+    const onClose = () => { cleanup(); resolve(); };
+    const cleanup = () => { clearTimeout(timer); child.off("close", onClose); };
+    child.once("close", onClose);
+  });
+}
+
+async function stopChild(child) {
+  if (!child) return;
+  await terminateProcess(child, { immediate: true }).catch(() => false);
+  await waitForClose(child, 2000).catch(() => {});
+}
+
+function forceStopPid(pid) {
+  if (!Number.isSafeInteger(pid)) return;
+  try { process.kill(pid, "SIGKILL"); } catch {}
 }
 
 test("runProcess caps accumulated stdout so a runaway CLI can't blow up memory", async () => {
@@ -25,8 +45,7 @@ test("runProcess caps accumulated stdout so a runaway CLI can't blow up memory",
 });
 
 test("runProcess caps a single line larger than the buffer (not just many lines)", async () => {
-  // One ~6MB line with no newline: readline delivers it whole at EOF, so the cap must slice
-  // the line itself, not merely gate on the pre-append length.
+  // One ~6MB line with no newline must be sliced while streaming, not retained in full.
   await withScript("process.stdout.write('x'.repeat(6*1024*1024))\n", async (file) => {
     const r = await runProcess({ command: "node", args: [file] });
     assert.equal(r.code, 0);
@@ -35,18 +54,194 @@ test("runProcess caps a single line larger than the buffer (not just many lines)
   });
 });
 
-test("terminateProcess immediate kills a child that ignores SIGTERM (shutdown path)", async () => {
-  // Child traps SIGTERM and would otherwise linger; immediate SIGKILL/taskkill must end it
-  // well before the 2500ms SIGTERM→SIGKILL escalation the shutdown exit would race.
-  const child = spawn(process.execPath, ["-e", "process.on('SIGTERM',()=>{});setInterval(()=>{},1000)"], {
-    detached: process.platform !== "win32",
-    stdio: "ignore",
+test("runProcess preserves argument boundaries without a shell", async () => {
+  await withScript("console.log(JSON.stringify(process.argv.slice(2)))\n", async (file) => {
+    const value = "SAFE --injected FLAG";
+    const r = await runProcess({ command: process.execPath, args: [file, value] });
+    assert.deepEqual(JSON.parse(r.stdout), [value]);
   });
-  const closed = new Promise((res) => child.once("close", () => res(true)));
-  const start = Date.now();
-  terminateProcess(child, { immediate: true });
-  await closed;
-  assert.ok(Date.now() - start < 2000, "immediate terminate should not wait for the 2500ms escalation");
+});
+
+test("allowedCommand accepts an explicitly trusted absolute path with spaces and rejects relative paths", () => {
+  const absolute = process.platform === "win32" ? "C:\\Program Files\\Agent CLIs\\codex.exe" : "/opt/Agent CLIs/codex";
+  assert.equal(allowedCommand(absolute, new Set(["codex"]), { trustedPaths: [absolute] }), absolute);
+  assert.throws(() => allowedCommand(absolute, new Set(["codex"])), /not been trusted/);
+  const relative = `.${process.platform === "win32" ? "\\" : "/"}codex`;
+  assert.throws(() => allowedCommand(relative, new Set(["codex"])), /absolute/);
+});
+
+test("an explicitly approved CLI symlink resolves consistently on later launches", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "ar-cli-link-"));
+  const link = join(dir, process.platform === "win32" ? "codex.exe" : "codex");
+  try {
+    try { symlinkSync(process.execPath, link, "file"); }
+    catch (error) {
+      if (process.platform === "win32" && ["EPERM", "EACCES", "ENOTSUP"].includes(error.code)) {
+        t.skip(`symlink creation is unavailable: ${error.code}`);
+        return;
+      }
+      throw error;
+    }
+    const approved = await approveProviderCommand("symlink_test", link, new Set(["codex"]));
+    assert.equal(approved, realpathSync(process.execPath));
+    assert.equal(
+      await resolveAllowedCommand(link, new Set(["codex"]), { trustedPaths: [approvedProviderCommand("symlink_test")] }),
+      realpathSync(process.execPath),
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("agent environment is allowlisted and does not inherit credentials", async () => {
+  const previous = process.env.AGENT_ROOM_TEST_TOKEN;
+  process.env.AGENT_ROOM_TEST_TOKEN = "do-not-inherit";
+  try {
+    assert.equal(sanitizedAgentEnv().AGENT_ROOM_TEST_TOKEN, undefined);
+    await withScript("console.log(JSON.stringify({secret:process.env.AGENT_ROOM_TEST_TOKEN||null,path:Boolean(process.env.PATH)}))\n", async (file) => {
+      const r = await runProcess({ command: process.execPath, args: [file], envPolicy: "agent" });
+      assert.deepEqual(JSON.parse(r.stdout), { secret: null, path: true });
+    });
+  } finally {
+    if (previous === undefined) delete process.env.AGENT_ROOM_TEST_TOKEN;
+    else process.env.AGENT_ROOM_TEST_TOKEN = previous;
+  }
+});
+
+test("publication environment adds only the SSH agent socket", () => {
+  const source = { PATH: "safe-path", SSH_AUTH_SOCK: "/tmp/ssh-agent.sock", SECRET_TOKEN: "no" };
+  assert.deepEqual(sanitizedPublicationEnv(source), { PATH: "safe-path", SSH_AUTH_SOCK: "/tmp/ssh-agent.sock" });
+});
+
+test("GitHub environment excludes connector credentials", () => {
+  const source = { PATH: "safe-path", GH_TOKEN: "github", AGENT_ROOM_GMAIL_ACCESS_TOKEN: "gmail", AGENT_ROOM_SUPABASE_KEY: "database" };
+  assert.deepEqual(sanitizedGithubEnv(source), { PATH: "safe-path", GH_TOKEN: "github" });
+});
+
+test("terminateProcess immediate kills a child that ignores SIGTERM (shutdown path)", async () => {
+  let child;
+  try {
+    child = spawn(process.execPath, ["-e", "process.on('SIGTERM',()=>{});setInterval(()=>{},1000)"], {
+      detached: process.platform !== "win32",
+      stdio: "ignore",
+    });
+    const closed = waitForClose(child);
+    assert.equal(await terminateProcess(child, { immediate: true }), true);
+    await closed;
+  } finally {
+    await stopChild(child);
+  }
+});
+
+test("terminateProcess removes a Windows child process tree", async () => {
+  if (process.platform !== "win32") return;
+  await withScript(
+    "const{spawn}=require('child_process');const c=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'ignore'});console.log(c.pid);setInterval(()=>{},1000)\n",
+    async (file) => {
+      let child;
+      let grandchildPid;
+      try {
+        child = spawn(process.execPath, [file], { stdio: ["ignore", "pipe", "ignore"] });
+        grandchildPid = await new Promise((resolve, reject) => {
+          const timer = setTimeout(() => reject(new Error("grandchild PID was not reported")), 2000);
+          child.stdout.once("data", (chunk) => { clearTimeout(timer); resolve(Number(String(chunk).trim())); });
+        });
+        const closed = waitForClose(child);
+        assert.equal(await terminateProcess(child, { immediate: true }), true);
+        await closed;
+        assert.throws(() => process.kill(grandchildPid, 0), /ESRCH|not found|no such process/i);
+        grandchildPid = undefined;
+      } finally {
+        await stopChild(child);
+        forceStopPid(grandchildPid);
+      }
+    },
+  );
+});
+
+test("runProcess Job Object containment kills a detached Windows descendant", async () => {
+  if (process.platform !== "win32") return;
+  await withScript(
+    "const{spawn}=require('child_process');const c=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{detached:true,stdio:'ignore'});console.log(c.pid);setInterval(()=>{},1000)\n",
+    async (file) => {
+      let wrapper;
+      let descendantPid;
+      let running;
+      let reportPid;
+      const reported = new Promise((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error("contained descendant PID was not reported")), 5000);
+        reportPid = (line) => {
+          const pid = Number(String(line).trim());
+          if (!Number.isSafeInteger(pid)) return;
+          clearTimeout(timer);
+          resolve(pid);
+        };
+      });
+      try {
+        running = runProcess({
+          command: process.execPath,
+          args: [file],
+          containTree: true,
+          timeoutMs: 5000,
+          registerChild: (child) => { wrapper = child; },
+          onStdoutLine: (line) => reportPid(line),
+        });
+        descendantPid = await reported;
+        assert.ok(wrapper?.pid);
+        assert.equal(await terminateProcess(wrapper, { immediate: true }), true);
+        await running;
+        assert.throws(() => process.kill(descendantPid, 0), /ESRCH|not found|no such process/i);
+        descendantPid = undefined;
+      } finally {
+        await stopChild(wrapper);
+        await running?.catch(() => {});
+        forceStopPid(descendantPid);
+      }
+    },
+  );
+});
+
+test("runProcess containment kills a POSIX descendant after its parent exits normally", async () => {
+  if (process.platform === "win32") return;
+  await withScript(
+    "const{spawn}=require('node:child_process');const c=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'ignore'});console.log(c.pid);c.unref()\n",
+    async (file) => {
+      let wrapper;
+      let descendantPid;
+      let running;
+      try {
+        running = runProcess({
+          command: process.execPath,
+          args: [file],
+          containTree: true,
+          timeoutMs: 5000,
+          registerChild: (child) => { wrapper = child; },
+          onStdoutLine: (line) => {
+            const pid = Number(line.trim());
+            if (Number.isSafeInteger(pid)) descendantPid = pid;
+          },
+        });
+        const result = await running;
+        assert.equal(result.code, 0);
+        assert.ok(Number.isSafeInteger(descendantPid));
+        assert.throws(() => process.kill(descendantPid, 0), /ESRCH|not found|no such process/i);
+        descendantPid = undefined;
+      } finally {
+        await stopChild(wrapper);
+        await running?.catch(() => {});
+        forceStopPid(descendantPid);
+      }
+    },
+  );
+});
+
+test("Windows Job Object launcher preserves empty and spaced argument boundaries", async () => {
+  if (process.platform !== "win32") return;
+  await withScript("console.log(JSON.stringify(process.argv.slice(2)))\n", async (file) => {
+    const result = await runProcess({ command: process.execPath, args: [file, "", "value with spaces"], containTree: true });
+    assert.equal(result.code, 0);
+    assert.deepEqual(JSON.parse(result.stdout), ["", "value with spaces"]);
+  });
 });
 
 test("runProcess returns small output intact and streams every line", async () => {

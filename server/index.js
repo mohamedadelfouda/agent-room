@@ -4,35 +4,49 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import os from "node:os";
-import { listSessions, createSession, getSession, rootPath } from "./store.js";
-import { checkCommand, runProcess, allowedCommand } from "./process.js";
-import { discoverCodexModels } from "./adapters/codex.js";
+import { listSessions, createSession, getSession, mutateSession, rootPath } from "./store.js";
+import { approveProviderCommand, approvedProviderCommand, checkCommand, resolveAllowedCommand, runProcess } from "./process.js";
 import { runOrchestration, stopRun, isRunning, abortAllRuns } from "./orchestrator.js";
-import { runExecuteAndReview, acceptExecution, rejectExecution, isExecuting, stopExec, abortAllExecutions } from "./exec-orchestrator.js";
-import { isGitRepo, hasRemote } from "./worktree.js";
-import { logInfo, logError, logPath } from "./logger.js";
+import { runExecuteAndReview, acceptExecution, rejectExecution, isExecuting, stopExec, abortAllExecutions, reconcileExecutionWorktrees } from "./exec-orchestrator.js";
+import { isGitRepo, hasGitHubOrigin } from "./worktree.js";
+import { logError, redact } from "./logger.js";
 import { hostAllowed, checkApiAuth, issueCookieHeader, securityHeaders } from "./security.js";
+import { projectIdentity } from "./project.js";
+import { provider, providerCatalog, providerIds, discoverProviderModels } from "./providers/registry.js";
+import { preflightRoute } from "./capability-router.js";
+import { recordDecision } from "./decisions.js";
+import { connectorCatalog } from "./connectors/registry.js";
+import { setConnectorEnabled, requestConnectorAction, decideConnectorAction } from "./connectors/service.js";
+import { handleMcpRequest } from "./mcp-server.js";
+import { resolveMcpBridgeGrant, setMcpBridgeUrl } from "./mcp-config.js";
+export { configureConnectorSecretStore, hydrateConnectorSecrets } from "./connector-config.js";
+import { connectorConfigurationCatalog, saveConnectorConfiguration } from "./connector-config.js";
+import { apiErrorPayload, expectedApiError } from "./api-errors.js";
 
-// First-run detection: are the CLIs installed + is GitHub authed? Uses shell-aware runners
-// so Windows .cmd shims (like codex.cmd) resolve correctly.
+const configuredCommand = (definition) => process.env[definition.commandEnv] || definition.command;
+const trustedCliPaths = (definition) => [process.env[definition.commandEnv], approvedProviderCommand(definition.id)].filter(Boolean);
+
+// First-run detection resolves native executables before entering an attached project.
 async function detectAgents() {
-  const [claude, codex] = await Promise.all([checkCommand("claude"), checkCommand("codex")]);
+  const detected = await Promise.all(providerIds().map(async (id) => {
+    const definition = provider(id);
+    const status = await checkCommand(configuredCommand(definition), { allowedCommands: new Set([definition.command]), trustedPaths: trustedCliPaths(definition) });
+    return [id, { installed: status.ok, version: status.version, detail: status.detail }];
+  }));
   let github = { authed: false, detail: "" };
   try {
-    const r = await runProcess({ command: "gh", args: ["auth", "status"], timeoutMs: 9000 });
+    const command = await resolveAllowedCommand("gh", new Set(["gh"]));
+    const r = await runProcess({ command, args: ["auth", "status"], envPolicy: "github", timeoutMs: 9000 });
     const lines = `${r.stdout}\n${r.stderr}`.split(/\r?\n/);
-    github = { authed: r.code === 0, detail: (lines.find((l) => /Logged in|account/i.test(l)) || lines.find((l) => l.trim()) || "").trim().slice(0, 100) };
-  } catch (e) { github = { authed: false, detail: String(e.message).slice(0, 100) }; }
-  return {
-    claude: { installed: claude.ok, version: claude.version, detail: claude.detail },
-    codex: { installed: codex.ok, version: codex.version, detail: codex.detail },
-    github,
-  };
+    github = { authed: r.code === 0, detail: redact((lines.find((l) => /Logged in|account/i.test(l)) || lines.find((l) => l.trim()) || "").trim()).slice(0, 100) };
+  } catch (e) { github = { authed: false, detail: redact(e.message).slice(0, 100) }; }
+  return { providers: Object.fromEntries(detected), github };
 }
 
 // List the user's GitHub repos (so they pick instead of pasting a URL).
 async function ghRepos() {
-  const r = await runProcess({ command: "gh", args: ["repo", "list", "--limit", "100", "--json", "nameWithOwner,url,visibility,updatedAt"], timeoutMs: 15000 });
+  const command = await resolveAllowedCommand("gh", new Set(["gh"]));
+  const r = await runProcess({ command, args: ["repo", "list", "--limit", "100", "--json", "nameWithOwner,url,visibility,updatedAt"], envPolicy: "github", timeoutMs: 15000 });
   if (r.code !== 0) throw new Error((r.stderr || "gh repo list failed").split(/\r?\n/)[0]);
   return JSON.parse(r.stdout || "[]");
 }
@@ -40,20 +54,37 @@ async function ghRepos() {
 async function ghClone(repo) {
   if (!/^[\w.-]+\/[\w.-]+$/.test(repo)) throw new Error("Invalid repo name");
   const base = path.join(os.homedir(), "AgentRoomProjects");
-  await fs.mkdir(base, { recursive: true });
-  const name = repo.split("/").pop().replace(/\.git$/, "");
-  const dest = path.join(base, name);
-  try { await fs.access(dest); return { path: dest, existed: true }; } catch {}
-  const r = await runProcess({ command: "gh", args: ["repo", "clone", repo, dest], timeoutMs: 180000 });
+  const [owner, rawName] = repo.split("/");
+  const name = rawName.replace(/\.git$/, "");
+  const dest = path.join(base, owner, name);
+  await fs.mkdir(path.dirname(dest), { recursive: true });
+  try {
+    await fs.access(dest);
+    const command = await resolveAllowedCommand("git", new Set(["git"]));
+    const result = await runProcess({ command, args: ["remote", "get-url", "origin"], cwd: dest, envPolicy: "agent", timeoutMs: 8000 });
+    const remote = result.stdout.trim();
+    const match = remote.match(/github\.com[/:]([\w.-]+)\/([\w.-]+?)(?:\.git)?$/i);
+    if (result.code !== 0 || !match || `${match[1]}/${match[2]}`.toLowerCase() !== `${owner}/${name}`.toLowerCase()) {
+      throw new Error(`Existing destination does not match ${owner}/${name}: ${dest}`);
+    }
+    return { path: dest, existed: true };
+  } catch (error) {
+    if (error?.code !== "ENOENT") throw error;
+  }
+  const command = await resolveAllowedCommand("gh", new Set(["gh"]));
+  const r = await runProcess({ command, args: ["repo", "clone", repo, dest], envPolicy: "github", timeoutMs: 180000 });
   if (r.code !== 0) throw new Error((r.stderr || "clone failed").split(/\r?\n/).slice(-2).join(" "));
   return { path: dest, existed: false };
 }
 // Server-side folder browser (no manual path typing). Empty path => drives on Windows.
 async function listDirs(p) {
   if (!p) {
-    const drives = [];
-    for (const L of "CDEFGABHIJKLMNOPQRSTUVWXYZ") { try { await fs.access(`${L}:\\`); drives.push({ name: `${L}:\\`, path: `${L}:\\` }); } catch {} }
-    return { path: "", parent: null, dirs: drives, isGit: false };
+    if (process.platform === "win32") {
+      const drives = [];
+      for (const L of "CDEFGABHIJKLMNOPQRSTUVWXYZ") { try { await fs.access(`${L}:\\`); drives.push({ name: `${L}:\\`, path: `${L}:\\` }); } catch {} }
+      return { path: "", parent: null, dirs: drives, isGit: false };
+    }
+    p = os.homedir() || path.parse(process.cwd()).root;
   }
   const entries = await fs.readdir(p, { withFileTypes: true });
   const dirs = entries.filter((e) => e.isDirectory() && !e.name.startsWith(".")).map((e) => ({ name: e.name, path: path.join(p, e.name) })).sort((a, b) => a.name.localeCompare(b.name));
@@ -62,22 +93,35 @@ async function listDirs(p) {
 }
 // Update a CLI from inside the tool (claude update / codex update).
 async function updateAgent(agent) {
-  const cmd = agent === "claude" ? "claude" : agent === "codex" ? "codex" : null;
-  if (!cmd) throw new Error("Unknown agent");
-  const r = await runProcess({ command: cmd, args: ["update"], timeoutMs: 240000 });
+  const definition = provider(agent);
+  if (!definition) throw new Error("Unknown agent");
+  if (!Array.isArray(definition.updateArgs) || definition.updateArgs.length === 0) throw new Error("This provider does not expose an in-app update command");
+  const command = await resolveAllowedCommand(approvedProviderCommand(definition.id) || configuredCommand(definition), new Set([definition.command]), { trustedPaths: trustedCliPaths(definition) });
+  const r = await runProcess({ command, args: definition.updateArgs, timeoutMs: 240000, containTree: true });
   const out = `${r.stdout}\n${r.stderr}`.trim().split(/\r?\n/).filter(Boolean).slice(-6).join("\n");
   return { ok: r.code === 0, output: out.slice(0, 900) };
 }
 
 let shuttingDown = false;
-async function gracefulShutdown(reason, error) {
-  if (shuttingDown) return;
+let shutdownPromise = null;
+let startupReconciled = false;
+export function shutdownServer(reason = "requested") {
+  if (shutdownPromise) return shutdownPromise;
   shuttingDown = true;
+  shutdownPromise = (async () => {
+    try { await abortAllRuns(reason); } catch (e) { logError("abortAllRuns failed during shutdown", String(e)); }
+    try { await abortAllExecutions(reason); } catch (e) { logError("abortAllExecutions failed during shutdown", String(e)); }
+    await new Promise((resolve) => {
+      try { server.close(() => resolve()); } catch { resolve(); }
+      server.closeAllConnections?.();
+    });
+  })();
+  return shutdownPromise;
+}
+async function gracefulShutdown(reason, error) {
   logError(`graceful shutdown (${reason})`, error?.stack || (error ? String(error) : ""));
-  try { await abortAllRuns(reason); } catch (e) { logError("abortAllRuns failed during shutdown", String(e)); }
-  try { await abortAllExecutions(reason); } catch (e) { logError("abortAllExecutions failed during shutdown", String(e)); }
-  try { server.close(); } catch {}
-  setTimeout(() => process.exit(1), 1500).unref();
+  await shutdownServer(reason);
+  process.exitCode = 1;
 }
 
 // An uncaught exception leaves the process in an undefined state: log, stop accepting work,
@@ -89,8 +133,13 @@ process.on("SIGINT", () => gracefulShutdown("SIGINT"));
 process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const modulePath = fileURLToPath(import.meta.url);
+const directEntry = process.argv[1] && (process.platform === "win32"
+  ? path.resolve(process.argv[1]).toLowerCase() === path.resolve(modulePath).toLowerCase()
+  : path.resolve(process.argv[1]) === path.resolve(modulePath));
 const PUBLIC_DIR = path.resolve(__dirname, "../public");
 const PORT = Number(process.env.PORT || 3210);
+let activePort = PORT;
 const clients = new Map();
 
 function json(res, status, data) {
@@ -141,7 +190,8 @@ function mimeType(filePath) {
 async function serveStatic(urlPath, res) {
   const requested = urlPath === "/" ? "/index.html" : urlPath;
   const filePath = path.resolve(PUBLIC_DIR, `.${requested}`);
-  if (!filePath.startsWith(PUBLIC_DIR)) return false;
+  const relative = path.relative(PUBLIC_DIR, filePath);
+  if (relative.startsWith("..") || path.isAbsolute(relative)) return false;
   try {
     const data = await fs.readFile(filePath);
     const headers = { "Content-Type": `${mimeType(filePath)}; charset=utf-8`, "Cache-Control": "no-store", ...securityHeaders() };
@@ -158,7 +208,7 @@ async function serveStatic(urlPath, res) {
 function sessionMarkdown(session) {
   const out = [`# ${session.title}`, "", `- Status: ${session.status}`, `- Mode: ${session.mode}`, `- Updated: ${session.updatedAt}`, "", "---", ""];
   for (const message of session.messages ?? []) {
-    const who = message.author === "user" ? "User" : message.author === "system" ? "System" : `${message.agent === "codex" ? "Codex" : "Claude"}${message.role ? ` — ${message.role}` : ""}`;
+    const who = message.author === "user" ? "User" : message.author === "system" ? "System" : `${provider(message.agent)?.label || message.agent || "Agent"}${message.role ? ` — ${message.role}` : ""}`;
     out.push(`## ${who}`, "", message.content || "", "");
   }
   return out.join("\n");
@@ -169,16 +219,25 @@ const server = http.createServer(async (req, res) => {
   const parts = url.pathname.split("/").filter(Boolean);
   try {
     // Global host allowlist (DNS-rebinding defense) — reject before any routing or body read.
-    if (!hostAllowed(req.headers.host, PORT)) {
+    if (!hostAllowed(req.headers.host, activePort)) {
       res.writeHead(403, { "Content-Type": "text/plain; charset=utf-8", ...securityHeaders() });
       return res.end("Forbidden host");
+    }
+    if (req.method === "POST" && url.pathname === "/internal/mcp") {
+      const grant = resolveMcpBridgeGrant(req.headers["x-agent-room-mcp-token"]);
+      if (!grant) return json(res, 401, apiErrorPayload("unauthorized", "Unauthorized"));
+      const body = await readJson(req);
+      return json(res, 200, await handleMcpRequest(body.request || {}, grant.sessionId, grant.capability));
     }
     // Every /api/* route requires the per-run session token (cookie or header),
     // plus a matching Origin for state-changing methods. The page itself (served
     // statically) needs no token — it's what delivers the cookie.
     if (parts[0] === "api") {
-      const auth = checkApiAuth(req, PORT);
-      if (!auth.ok) return json(res, auth.status, { error: auth.error });
+      const auth = checkApiAuth(req, activePort);
+      if (!auth.ok) {
+        const code = auth.status === 403 ? "forbidden_origin" : "unauthorized";
+        return json(res, auth.status, apiErrorPayload(code, auth.error));
+      }
     }
     if (req.method === "GET" && url.pathname === "/api/health") {
       return json(res, 200, { ok: true, node: process.version, platform: process.platform });
@@ -194,74 +253,142 @@ const server = http.createServer(async (req, res) => {
       const session = await getSession(parts[2]);
       session.running = isRunning(parts[2]);
       session.executing = isExecuting(parts[2]);
+      delete session.connectorActions;
       return json(res, 200, session);
     }
     if (parts[0] === "api" && parts[1] === "sessions" && parts[2] && parts[3] === "events" && req.method === "GET") {
       return addSseClient(parts[2], req, res);
     }
-    if (parts[0] === "api" && parts[1] === "sessions" && parts[2] && parts[3] === "message" && req.method === "POST") {
-      if (shuttingDown) return json(res, 503, { error: "Server is shutting down" });
+    if (parts[0] === "api" && parts[1] === "sessions" && parts[2] && parts[3] === "connectors" && req.method === "GET") {
+      try {
+        const session = await getSession(parts[2]);
+        const allActions = session.connectorActions || [];
+        const activeActions = allActions.filter((item) => ["pending", "executing_unknown"].includes(item.status));
+        const recentTerminal = allActions.filter((item) => !["pending", "executing_unknown"].includes(item.status)).slice(-20);
+        return json(res, 200, { connectors: connectorCatalog(), enabled: session.connectors || {}, actions: [...activeActions, ...recentTerminal] });
+      } catch (error) {
+        return json(res, 500, apiErrorPayload("connector_catalog_failed", error));
+      }
+    }
+    if (parts[0] === "api" && parts[1] === "sessions" && parts[2] && parts[3] === "connectors" && parts[4] && req.method === "POST") {
       const body = await readJson(req);
-      if (isRunning(parts[2])) return json(res, 409, { error: "Session is already running" });
-      runOrchestration(parts[2], body, (event) => emit(parts[2], event));
+      try { return json(res, 200, await setConnectorEnabled(parts[2], parts[4], body.enabled === true)); }
+      catch (error) { return json(res, 500, apiErrorPayload("connector_toggle_failed", error)); }
+    }
+    if (parts[0] === "api" && parts[1] === "sessions" && parts[2] && parts[3] === "connector-actions" && parts.length === 4 && req.method === "POST") {
+      const body = await readJson(req);
+      try { return json(res, 200, await requestConnectorAction(parts[2], String(body.connector || ""), String(body.action || ""), body.input || {})); }
+      catch (error) { return json(res, 500, apiErrorPayload("connector_action_request_failed", error)); }
+    }
+    if (parts[0] === "api" && parts[1] === "sessions" && parts[2] && parts[3] === "connector-actions" && parts[4] && parts[5] === "decide" && req.method === "POST") {
+      const body = await readJson(req);
+      try { return json(res, 200, await decideConnectorAction(parts[2], parts[4], body.approve === true)); }
+      catch (error) { return json(res, 500, apiErrorPayload("connector_action_decision_failed", error)); }
+    }
+    if (parts[0] === "api" && parts[1] === "sessions" && parts[2] && parts[3] === "message" && req.method === "POST") {
+      if (shuttingDown) return json(res, 503, apiErrorPayload("server_shutting_down", "Server is shutting down"));
+      const body = await readJson(req);
+      if (isRunning(parts[2]) || isExecuting(parts[2])) return json(res, 409, apiErrorPayload("session_busy", "Session is already busy"));
+      const session = await getSession(parts[2]);
+      const route = preflightRoute(body.content, { projectTrusted: session.project?.trusted === true });
+      if (!route.allowed) return json(res, 409, apiErrorPayload(route.reasonCode, route.reason, { route }));
+      const backgroundRun = runOrchestration(parts[2], body, (event) => emit(parts[2], event));
+      void backgroundRun.catch((error) => logError("orchestration background task failed", error?.stack || String(error)));
       return json(res, 202, { ok: true });
     }
     if (parts[0] === "api" && parts[1] === "sessions" && parts[2] && parts[3] === "stop" && req.method === "POST") {
-      return json(res, 200, { stopped: stopRun(parts[2]) });
+      return json(res, 200, { stopped: await stopRun(parts[2]) });
     }
     // ---- Execution layer ----
     if (parts[0] === "api" && parts[1] === "sessions" && parts[2] && parts[3] === "project" && req.method === "POST") {
       const body = await readJson(req);
       const projectPath = String(body.path || "").trim();
-      if (!projectPath) return json(res, 400, { error: "Project path is required" });
-      let stat; try { stat = await fs.stat(projectPath); } catch { return json(res, 400, { error: "المسار غير موجود" }); }
-      if (!stat.isDirectory()) return json(res, 400, { error: "المسار مش مجلد" });
+      if (!projectPath) return json(res, 400, apiErrorPayload("project_path_required", "Project path is required"));
+      let stat; try { stat = await fs.stat(projectPath); } catch { return json(res, 400, apiErrorPayload("project_path_not_found", "المسار غير موجود")); }
+      if (!stat.isDirectory()) return json(res, 400, apiErrorPayload("project_path_not_directory", "المسار مش مجلد"));
       const git = await isGitRepo(projectPath);
-      const session = await getSession(parts[2]);
-      session.project = { path: projectPath, isGit: git, hasRemote: git ? await hasRemote(projectPath) : false };
-      const { saveSession } = await import("./store.js");
-      await saveSession(session);
-      return json(res, 200, { project: session.project });
+      const identity = await projectIdentity(projectPath);
+      const canOpenPr = git ? await hasGitHubOrigin(identity.realPath) : false;
+      const project = await mutateSession(parts[2], (session) => {
+        if ((session.executions || []).some((item) => !["merged", "pr_opened", "rejected", "blocked_secret"].includes(item.status))) {
+          throw expectedApiError("pending_execution_decisions", "Resolve pending execution decisions before changing the attached project");
+        }
+        session.project = { path: identity.realPath, fingerprint: identity.fingerprint, trusted: false, isGit: git, canOpenPr };
+        return structuredClone(session.project);
+      });
+      return json(res, 200, { project });
+    }
+    if (parts[0] === "api" && parts[1] === "sessions" && parts[2] && parts[3] === "project-trust" && req.method === "POST") {
+      const body = await readJson(req);
+      const claim = await getSession(parts[2]);
+      if (!claim.project?.path) return json(res, 400, apiErrorPayload("project_not_attached", "Attach a project first"));
+      const identity = await projectIdentity(claim.project.path);
+      if (body.fingerprint !== claim.project.fingerprint || identity.fingerprint !== claim.project.fingerprint) {
+        return json(res, 409, apiErrorPayload("project_identity_changed", "Project identity changed; attach it again before trusting"));
+      }
+      const project = await mutateSession(parts[2], (session) => {
+        if (session.project?.path !== claim.project.path || session.project?.fingerprint !== claim.project.fingerprint) {
+          throw expectedApiError("project_changed_before_trust", "Attached project changed before trust was recorded; review it again");
+        }
+        session.project.trusted = true;
+        session.project.trustedAt = new Date().toISOString();
+        recordDecision(session, { type: "project_trust", outcome: "trusted", metadata: { fingerprint: session.project.fingerprint } });
+        return structuredClone(session.project);
+      });
+      return json(res, 200, { project });
     }
     if (parts[0] === "api" && parts[1] === "sessions" && parts[2] && parts[3] === "execute" && req.method === "POST") {
-      if (shuttingDown) return json(res, 503, { error: "Server is shutting down" });
-      if (isExecuting(parts[2]) || isRunning(parts[2])) return json(res, 409, { error: "السيشن مشغولة بالفعل" });
+      if (shuttingDown) return json(res, 503, apiErrorPayload("server_shutting_down", "Server is shutting down"));
+      if (!startupReconciled) return json(res, 503, apiErrorPayload("startup_recovery_pending", "Startup recovery is still running; retry in a moment"));
+      if (isExecuting(parts[2]) || isRunning(parts[2])) return json(res, 409, apiErrorPayload("session_busy", "السيشن مشغولة بالفعل"));
       const body = await readJson(req);
-      runExecuteAndReview(parts[2], body, (event) => emit(parts[2], event));
+      const backgroundExecution = runExecuteAndReview(parts[2], body, (event) => emit(parts[2], event));
+      void backgroundExecution.catch((error) => logError("execution background task failed", error?.stack || String(error)));
       return json(res, 202, { ok: true });
     }
     if (parts[0] === "api" && parts[1] === "sessions" && parts[2] && parts[3] === "exec-stop" && req.method === "POST") {
-      return json(res, 200, { stopped: stopExec(parts[2]) });
+      return json(res, 200, { stopped: await stopExec(parts[2]) });
     }
     if (parts[0] === "api" && parts[1] === "sessions" && parts[2] && parts[3] === "execution" && parts[4] && parts[5] === "accept" && req.method === "POST") {
       const body = await readJson(req);
       try { return json(res, 200, await acceptExecution(parts[2], parts[4], body.action || "merge")); }
-      catch (e) { return json(res, 400, { error: e.message }); }
+      catch (e) { return json(res, 400, apiErrorPayload("execution_accept_failed", e)); }
     }
     if (parts[0] === "api" && parts[1] === "sessions" && parts[2] && parts[3] === "execution" && parts[4] && parts[5] === "reject" && req.method === "POST") {
       try { return json(res, 200, await rejectExecution(parts[2], parts[4])); }
-      catch (e) { return json(res, 400, { error: e.message }); }
+      catch (e) { return json(res, 400, apiErrorPayload("execution_reject_failed", e)); }
     }
     if (req.method === "GET" && url.pathname === "/api/agents/status") {
       return json(res, 200, await detectAgents());
     }
+    if (req.method === "GET" && url.pathname === "/api/providers") {
+      return json(res, 200, { providers: providerCatalog() });
+    }
+    if (req.method === "GET" && url.pathname === "/api/connector-config") {
+      return json(res, 200, { connectors: connectorConfigurationCatalog() });
+    }
+    if (req.method === "POST" && parts[0] === "api" && parts[1] === "connector-config" && parts[2]) {
+      const body = await readJson(req);
+      try { return json(res, 200, { connector: await saveConnectorConfiguration(parts[2], body) }); }
+      catch (e) { return json(res, 400, apiErrorPayload("connector_configuration_failed", e)); }
+    }
     if (req.method === "POST" && url.pathname === "/api/agents/update") {
       const body = await readJson(req);
       try { return json(res, 200, await updateAgent(String(body.agent || ""))); }
-      catch (e) { return json(res, 400, { error: e.message }); }
+      catch (e) { return json(res, 400, apiErrorPayload("provider_update_failed", e)); }
     }
     if (req.method === "GET" && url.pathname === "/api/github/repos") {
       try { return json(res, 200, { repos: await ghRepos() }); }
-      catch (e) { return json(res, 200, { repos: [], error: e.message }); }
+      catch (e) { return json(res, 200, apiErrorPayload("github_repositories_unavailable", e, { repos: [] })); }
     }
     if (req.method === "POST" && url.pathname === "/api/github/clone") {
       const body = await readJson(req);
       try { return json(res, 200, await ghClone(String(body.repo || ""))); }
-      catch (e) { return json(res, 400, { error: e.message }); }
+      catch (e) { return json(res, 400, apiErrorPayload("github_clone_failed", e)); }
     }
     if (req.method === "GET" && url.pathname === "/api/fs/list") {
       try { return json(res, 200, await listDirs(url.searchParams.get("path") || "")); }
-      catch (e) { return json(res, 400, { error: e.message }); }
+      catch (e) { return json(res, 400, apiErrorPayload("filesystem_list_failed", e)); }
     }
     if (parts[0] === "api" && parts[1] === "sessions" && parts[2] && parts[3] === "export" && req.method === "GET") {
       const session = await getSession(parts[2]);
@@ -275,30 +402,52 @@ const server = http.createServer(async (req, res) => {
     }
     if (req.method === "POST" && url.pathname === "/api/cli/check") {
       const body = await readJson(req);
-      try { return json(res, 200, await checkCommand(allowedCommand(body.command))); }
-      catch (e) { return json(res, 200, { ok: false, version: "", detail: e.message }); }
+      try {
+        const definition = provider(String(body.provider || ""));
+        if (!definition) throw new Error("Select a known provider before trusting its executable");
+        if (path.isAbsolute(String(body.command || ""))) await approveProviderCommand(definition.id, body.command, new Set([definition.command]));
+        const status = await checkCommand(body.command, { allowedCommands: new Set([definition.command]), trustedPaths: trustedCliPaths(definition) });
+        return json(res, 200, status.ok ? status : { ...status, code: "provider_check_failed" });
+      }
+      catch (e) { return json(res, 200, { ok: false, version: "", code: "provider_check_failed", detail: redact(e.message) }); }
     }
-    if (req.method === "POST" && url.pathname === "/api/codex/models") {
+    if (req.method === "POST" && parts[0] === "api" && parts[1] === "providers" && parts[2] && parts[3] === "models") {
       const body = await readJson(req);
       try {
-        return json(res, 200, { models: await discoverCodexModels({ command: allowedCommand(body.command || "codex", new Set(["codex"])) }) });
+        return json(res, 200, { models: await discoverProviderModels(parts[2], { command: body.command || provider(parts[2])?.command }) });
       } catch (error) {
-        return json(res, 200, { models: [], warning: error.message });
+        const detail = redact(error.message);
+        return json(res, 200, { models: [], code: "provider_model_discovery_failed", warning: detail, detail });
       }
     }
     if (await serveStatic(url.pathname, res)) return;
-    json(res, 404, { error: "Not found" });
+    json(res, 404, apiErrorPayload("not_found", "Not found"));
   } catch (error) {
-    json(res, 500, { error: error.message });
+    json(res, error.apiStatus || 500, apiErrorPayload(error.apiCode || "internal_error", error));
   }
 });
 
-server.listen(PORT, "127.0.0.1", () => {
-  const url = `http://127.0.0.1:${PORT}`;
-  console.log(`\nAgent Room MVP is running at ${url}\nData folder: ${path.join(rootPath(), "data")}\n`);
-  if (process.env.NO_OPEN !== "1") {
-    const command = process.platform === "win32" ? "cmd" : process.platform === "darwin" ? "open" : "xdg-open";
-    const args = process.platform === "win32" ? ["/c", "start", "", url] : [url];
-    try { spawn(command, args, { detached: true, stdio: "ignore" }).unref(); } catch {}
-  }
+export const serverReady = new Promise((resolve, reject) => {
+  server.once("error", reject);
+  server.listen(PORT, "127.0.0.1", () => {
+    const address = server.address();
+    const actualPort = typeof address === "object" && address ? address.port : PORT;
+    activePort = actualPort;
+    const url = `http://127.0.0.1:${actualPort}`;
+    setMcpBridgeUrl(url);
+    void reconcileExecutionWorktrees()
+      .catch((error) => logError("execution workspace reconciliation failed", error.message))
+      .finally(() => { startupReconciled = true; });
+    console.log(`\nAgent Room is running at ${url}\nData folder: ${path.join(rootPath(), "data")}\n`);
+    if (process.env.NO_OPEN !== "1") {
+      const command = process.platform === "win32" ? "cmd" : process.platform === "darwin" ? "open" : "xdg-open";
+      const args = process.platform === "win32" ? ["/c", "start", "", url] : [url];
+      try { spawn(command, args, { detached: true, stdio: "ignore" }).unref(); } catch {}
+    }
+    resolve({ port: actualPort, url });
+  });
 });
+
+if (directEntry) {
+  void serverReady.catch((error) => gracefulShutdown("startup", error));
+}
