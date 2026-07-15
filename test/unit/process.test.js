@@ -191,8 +191,10 @@ test("runProcess Job Object containment kills a detached Windows descendant", as
       let descendantPid;
       let running;
       let reportPid;
+      // Windows CI can take over 35s to cold-start PowerShell and compile the Job Object helper.
+      const reportTimeoutMs = 60_000;
       const reported = new Promise((resolve, reject) => {
-        const timer = setTimeout(() => reject(new Error("contained descendant PID was not reported")), 10000);
+        const timer = setTimeout(() => reject(new Error("contained descendant PID was not reported")), reportTimeoutMs);
         reportPid = (line) => {
           const pid = Number(String(line).trim());
           if (!Number.isSafeInteger(pid)) return;
@@ -205,7 +207,7 @@ test("runProcess Job Object containment kills a detached Windows descendant", as
           command: process.execPath,
           args: [file],
           containTree: true,
-          timeoutMs: 15000,
+          timeoutMs: reportTimeoutMs + 10_000,
           registerChild: (child) => { wrapper = child; },
           onStdoutLine: (line) => reportPid(line),
         });
