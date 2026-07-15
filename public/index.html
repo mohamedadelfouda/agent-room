@@ -65,6 +65,7 @@
             <p id="sessionMeta"></p>
           </div>
           <div class="topbar-actions">
+            <span class="pill" id="statusPill">—</span>
             <button id="setupToggle" class="btn-ghost setup-toggle" aria-expanded="false" aria-controls="setupDrawer">
               <span id="setupSummary" class="setup-summary"></span>
               <span class="chevron" aria-hidden="true">⌄</span>
@@ -72,6 +73,8 @@
             <button id="execToggle" class="btn-ghost" data-i18n="execute" aria-expanded="false" aria-controls="execDrawer">تنفيذ</button>
             <button id="exportBtn" class="btn-ghost" data-i18n="export" disabled>تصدير</button>
             <button id="stopBtn" class="btn-danger" data-i18n="stop" disabled>إيقاف</button>
+            <button id="themeBtn" type="button" class="icon-btn" title="Theme" aria-label="Theme" data-i18n-title="theme" data-i18n-aria-label="theme">☼</button>
+            <button id="presetsBtn" type="button" class="icon-btn" title="Customize" aria-label="Customize workspace" aria-haspopup="dialog" data-i18n-title="customize" data-i18n-aria-label="customize">▦</button>
           </div>
         </header>
 
@@ -133,8 +136,45 @@
           </div>
         </section>
 
-        <div class="session-body">
-          <div id="chat" class="conversation" role="log" aria-live="off" aria-label="Conversation" data-i18n-aria-label="conversation"></div>
+        <div class="workspace">
+          <aside class="workflow" id="workflow" aria-label="Room flow" data-i18n-aria-label="workflowNav">
+            <h2 data-i18n="workflow">مسار الغرفة</h2>
+            <div class="stage-list" id="stageList"></div>
+            <p class="soon-note" data-i18n="stageTimesSoon">أوقات المراحل قريباً</p>
+          </aside>
+
+          <div class="main-inner" id="mainInner">
+            <div class="decision-bar">
+              <div>
+                <h2 id="mainHeading">—</h2>
+                <p class="tiny" id="mainSub"></p>
+              </div>
+              <span class="gate-tag" id="gateTag" hidden data-i18n="gateTag">بوابة القرار</span>
+            </div>
+
+            <div class="view-tabs" role="tablist" aria-label="View" data-i18n-aria-label="viewTabs">
+              <button class="view-tab" id="tabDecision" type="button" data-view="decision" role="tab" aria-selected="true" aria-controls="decisionPanel" data-i18n="tabDecision">القرار</button>
+              <button class="view-tab" id="tabConversation" type="button" data-view="conversation" role="tab" aria-selected="false" aria-controls="conversationPanel" data-i18n="tabConversation">المحادثة</button>
+            </div>
+
+            <section id="decisionPanel" data-view-panel="decision" role="tabpanel" aria-labelledby="tabDecision">
+              <div class="live-strip" id="liveStrip" hidden></div>
+              <div class="agent-grid" id="agentGrid"></div>
+              <div id="approvalHost"></div>
+              <section class="panel soon-panel" id="evidenceSoon">
+                <header class="panel-head">
+                  <div class="panel-title" data-i18n="evidence">الأدلة</div>
+                  <span class="soon-badge" data-i18n="soon">قريباً</span>
+                </header>
+                <div class="panel-body"><p class="muted" data-i18n="evidenceSoon">جدول الأدلة المشتركة هيتوصّل بالـ backend في تحديث جاي.</p></div>
+              </section>
+            </section>
+
+            <section id="conversationPanel" data-view-panel="conversation" role="tabpanel" aria-labelledby="tabConversation">
+              <div id="chat" class="conversation" role="log" aria-live="off" aria-label="Conversation" data-i18n-aria-label="conversation"></div>
+            </section>
+          </div>
+
           <aside id="contextCol" class="context-col" aria-label="Context" data-i18n-aria-label="contextColumn"></aside>
         </div>
         <div id="conversationAnnouncements" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></div>
@@ -227,6 +267,22 @@
       </div>
     </div>
   </div>
+
+  <div class="backdrop" id="backdrop" hidden></div>
+  <aside class="drawer" id="presetsDrawer" aria-hidden="true" aria-label="Customize workspace" data-i18n-aria-label="customize">
+    <header class="drawer-head">
+      <div><strong data-i18n="customize">تخصيص مساحة العمل</strong><div class="tiny" data-i18n="customizeSub">٣ أوضاع جاهزة</div></div>
+      <button id="closePresets" type="button" class="icon-btn" aria-label="Close" data-i18n-aria-label="close">×</button>
+    </header>
+    <div class="drawer-body">
+      <div class="preset-grid">
+        <button class="preset" type="button" data-preset="simple" aria-pressed="false"><strong data-i18n="presetSimple">بسيط</strong><span data-i18n="presetSimpleDesc">القرار + الموافقة + الهدف</span></button>
+        <button class="preset" type="button" data-preset="builder" aria-pressed="false"><strong data-i18n="presetBuilder">مطوّر</strong><span data-i18n="presetBuilderDesc">+ مسار العمل والسياق</span></button>
+        <button class="preset is-active" type="button" data-preset="mission" aria-pressed="true"><strong data-i18n="presetMission">مركز التحكم</strong><span data-i18n="presetMissionDesc">الوضع الكامل + السجل</span></button>
+      </div>
+    </div>
+    <footer class="drawer-foot"><button id="closePresets2" type="button" class="btn btn-primary" data-i18n="done">تم</button></footer>
+  </aside>
 
   <script type="module" src="/app.js"></script>
 </body>

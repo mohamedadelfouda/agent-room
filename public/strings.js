@@ -1,5 +1,10 @@
 export const STRINGS = {
   ar: {
+    theme:"المظهر", customize:"تخصيص مساحة العمل", customizeSub:"٣ أوضاع جاهزة", close:"إغلاق", done:"تم",
+    workflowNav:"مسار الغرفة", workflow:"مسار الغرفة", stageTimesSoon:"أوقات المراحل قريباً", gateTag:"بوابة القرار",
+    viewTabs:"طريقة العرض", tabDecision:"القرار", tabConversation:"المحادثة",
+    evidence:"الأدلة", soon:"قريباً", evidenceSoon:"جدول الأدلة المشتركة هيتوصّل بالـbackend في تحديث جاي.",
+    presetSimple:"بسيط", presetSimpleDesc:"القرار + الموافقة + الهدف", presetBuilder:"مطوّر", presetBuilderDesc:"+ مسار العمل والسياق", presetMission:"مركز التحكم", presetMissionDesc:"الوضع الكامل + السجل",
     newSession:"جلسة جديدة", sessions:"الجلسات", brandSubtitle:"جلسة ذكاء اصطناعي مشتركة", connected:"متصل", disconnected:"غير متصل — اضغط لإعادة المحاولة",
     emptyTitle:"جلسة واحدة، أكثر من عقل", emptyBody:"أنشئ جلسة، اختر التعاون أو المناظرة، وحدّد الموديل ومستوى الجهد لكل وكيل. أنت صاحب القرار.",
     mode:"أسلوب الجولة", modeCollab:"تعاون", modeDebate:"مناظرة", modeChat:"شات", rounds:"عدد الجولات", roundsShort:"جولات", finalizer:"الخلاصة النهائية", none:"بدون",
@@ -40,6 +45,11 @@ export const STRINGS = {
     errorExecutionAcceptFailed:"تعذّر اعتماد التنفيذ.", errorExecutionRejectFailed:"تعذّر رفض التنفيذ أو تنظيفه.", errorConnectorCatalogFailed:"تعذّر تحميل الموصّلات.", errorConnectorToggleFailed:"تعذّر تغيير حالة الموصّل.", errorConnectorActionRequestFailed:"تعذّر إنشاء اقتراح الإجراء.", errorConnectorActionDecisionFailed:"تعذّر تسجيل قرار الإجراء.", errorConnectorConfigurationFailed:"تعذّر حفظ إعدادات الموصّل.", errorProviderUpdateFailed:"تعذّر تحديث المزوّد.", errorProviderCheckFailed:"تعذّر فحص المزوّد.", errorProviderModelDiscoveryFailed:"تعذّر تحميل الموديلات.", errorGithubRepositoriesUnavailable:"تعذّر تحميل مستودعات GitHub.", errorGithubCloneFailed:"تعذّر استنساخ مستودع GitHub.", errorFilesystemListFailed:"تعذّر عرض المجلدات.", errorNotFound:"العنصر غير موجود.", errorInternal:"حدث خطأ داخلي.", errorUnexpected:"تعذّر إكمال العملية.",
   },
   en: {
+    theme:"Theme", customize:"Customize workspace", customizeSub:"3 ready presets", close:"Close", done:"Done",
+    workflowNav:"Room flow", workflow:"Room flow", stageTimesSoon:"Stage times coming soon", gateTag:"Decision gate",
+    viewTabs:"View", tabDecision:"Decision", tabConversation:"Conversation",
+    evidence:"Evidence", soon:"Soon", evidenceSoon:"The shared evidence table will be wired to the backend in a coming update.",
+    presetSimple:"Simple", presetSimpleDesc:"Decision + approval + goal", presetBuilder:"Builder", presetBuilderDesc:"+ Workflow and context", presetMission:"Mission Control", presetMissionDesc:"Full layout + log",
     newSession:"New session", sessions:"Sessions", brandSubtitle:"Shared AI session", connected:"Connected", disconnected:"Disconnected — click to retry",
     emptyTitle:"One session, many minds", emptyBody:"Create a session, choose Collaboration or Debate, set model and effort per agent. You decide.",
     mode:"Mode", modeCollab:"Collaborate", modeDebate:"Debate", modeChat:"Chat", rounds:"Rounds", roundsShort:"rounds", finalizer:"Final synthesis", none:"None",
