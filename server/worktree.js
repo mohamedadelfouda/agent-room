@@ -179,6 +179,10 @@ export async function createWorktree(projectPath, agent, taskId) {
       fs.readFile(path.join(gitDir, "config")),
       readAlternateObjectStores(gitDir),
     ]);
+    // Best-effort integrity check, not a confidentiality boundary: a clone made with
+    // --no-local has no alternates file, so any alternate here signals misconfiguration.
+    // It cannot stop an untrusted executor that transiently adds and removes one mid-run
+    // (see SECURITY.md — the clone is not an OS sandbox); OS-level isolation owns that.
     if (alternates.length) throw new Error("Execution clone unexpectedly depends on an alternate object store");
     return {
       path: wtPath,
