@@ -59,6 +59,7 @@ const approvedProviderCommands = new Map();
 // Persisted approvals survive process restarts. Unconfigured (tests) stays
 // in-memory only so the suite never writes into the developer's data folder.
 let trustedCliStorePath = "";
+let persistApprovedChain = Promise.resolve();
 
 export function configureTrustedCliStore(filePath) {
   trustedCliStorePath = String(filePath || "");
@@ -70,15 +71,23 @@ export function approvedProviderCommand(providerId) {
 
 async function persistApprovedProviderCommands() {
   if (!trustedCliStorePath) return;
-  const payload = Object.fromEntries(approvedProviderCommands);
-  const tempPath = `${trustedCliStorePath}.${crypto.randomUUID()}.tmp`;
-  await fs.mkdir(path.dirname(trustedCliStorePath), { recursive: true });
-  try {
-    await fs.writeFile(tempPath, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
-    await fs.rename(tempPath, trustedCliStorePath);
-  } finally {
-    await fs.rm(tempPath, { force: true }).catch(() => {});
-  }
+  // Serialize writes so two concurrent approvals cannot rename a stale
+  // snapshot over a newer one. Each turn reads the Map after prior writes.
+  const storePath = trustedCliStorePath;
+  const run = persistApprovedChain.then(async () => {
+    if (!storePath) return;
+    const payload = Object.fromEntries(approvedProviderCommands);
+    const tempPath = `${storePath}.${crypto.randomUUID()}.tmp`;
+    await fs.mkdir(path.dirname(storePath), { recursive: true });
+    try {
+      await fs.writeFile(tempPath, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
+      await fs.rename(tempPath, storePath);
+    } finally {
+      await fs.rm(tempPath, { force: true }).catch(() => {});
+    }
+  });
+  persistApprovedChain = run.then(() => {}, () => {});
+  return run;
 }
 
 // Re-load prior Trust & check approvals. Each path is re-validated (exists,

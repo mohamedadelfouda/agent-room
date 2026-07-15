@@ -113,6 +113,7 @@ test("trusted CLI approvals persist to disk and reload in a fresh process", asyn
   const dir = mkdtempSync(join(tmpdir(), "ar-trusted-cli-"));
   const store = join(dir, "trusted-cli.json");
   const binary = join(dir, process.platform === "win32" ? "codex.exe" : "codex");
+  const providerId = "persist_test";
   writeFileSync(binary, "placeholder");
   if (process.platform !== "win32") {
     const { chmodSync } = await import("node:fs");
@@ -120,14 +121,14 @@ test("trusted CLI approvals persist to disk and reload in a fresh process", asyn
   }
   try {
     configureTrustedCliStore(store);
-    const approved = await approveProviderCommand("codex", binary, new Set(["codex"]));
-    assert.equal(approvedProviderCommand("codex"), approved);
+    const approved = await approveProviderCommand(providerId, binary, new Set(["codex"]));
+    assert.equal(approvedProviderCommand(providerId), approved);
     const processModule = new URL("../../server/process.js", import.meta.url).href;
     const script = `
       import { configureTrustedCliStore, hydrateTrustedProviderCommands, approvedProviderCommand } from ${JSON.stringify(processModule)};
       configureTrustedCliStore(${JSON.stringify(store)});
       await hydrateTrustedProviderCommands({ allowed: new Set(["codex"]) });
-      process.stdout.write(approvedProviderCommand("codex"));
+      process.stdout.write(approvedProviderCommand(${JSON.stringify(providerId)}));
     `;
     const reloaded = execFileSync(process.execPath, ["--input-type=module", "-e", script], { encoding: "utf8" });
     assert.equal(reloaded, approved);

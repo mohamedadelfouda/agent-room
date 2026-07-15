@@ -32,7 +32,10 @@ const providers = new Map([
     command: "codex",
     commandEnv: "AGENT_ROOM_CODEX_COMMAND",
     install: {
-      command: installHint({ default: "npm install -g @openai/codex" }),
+      command: installHint({
+        win32: `powershell -ExecutionPolicy ByPass -c "irm https://chatgpt.com/codex/install.ps1 | iex"`,
+        default: "curl -fsSL https://chatgpt.com/codex/install.sh | sh",
+      }),
       url: "https://github.com/openai/codex",
     },
     defaultModel: "",

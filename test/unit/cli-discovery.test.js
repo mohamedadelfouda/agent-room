@@ -85,6 +85,20 @@ test("discovers a POSIX npm prefix install through the bin directory on PATH", a
   });
 });
 
+test("discovers the fallback vendor layout inside the CLI package itself", async () => {
+  await withTempDir(async (tempDir) => {
+    const exe = path.join(
+      tempDir, "npm", "node_modules", "@openai", "codex",
+      "vendor", "x86_64-pc-windows-msvc", "bin", "codex.exe",
+    );
+    await makeExecutable(exe);
+    const env = { PATH: path.join(tempDir, "npm"), APPDATA: tempDir, USERPROFILE: tempDir };
+    const found = await discoverProviderCommands("codex", { platform: "win32", arch: "x64", env });
+    assert.equal(found.length, 1, `expected one candidate, got: ${found.join(", ")}`);
+    assert.equal(path.basename(found[0]).toLowerCase(), "codex.exe");
+  });
+});
+
 test("directories and shim scripts at the probe location are not offered", async () => {
   await withTempDir(async (tempDir) => {
     const binDir = path.join(

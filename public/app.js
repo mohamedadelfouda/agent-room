@@ -890,7 +890,8 @@ async function loadOnboard() {
 }
 function openCliSetupFromOnboard(agent) {
   // Keep the onboarding dialog open: closing it felt like Setup "broke" the
-  // screen. Discover + trust in place, then refresh the checklist.
+  // screen. Discover + trust in place when there is exactly one candidate
+  // (same rule as runCliSetup); multiple matches open the drawer chooser.
   void (async () => {
     const list = $("onboardList");
     const prior = list.innerHTML;
@@ -901,29 +902,14 @@ function openCliSetupFromOnboard(agent) {
         await loadOnboard();
         return;
       }
-      if (result.candidates?.length) {
+      if (result.candidates?.length === 1) {
         const ok = await applyDiscoveredCommand(agent, result.candidates[0]);
         await loadOnboard();
-        if (!ok) {
-          // Fall through to the drawer only when trust failed.
-          closeManagedModal($("onboardModal"), { restoreFocus: false });
-          localStorage.setItem("agent-room-onboarded", "1");
-          if ($("setupDrawer").hidden) toggleSetup();
-          const panel = $(`${agent}CliSetup`);
-          if (panel.hidden) toggleCliSetup(agent);
-          else runCliSetup(agent);
-        }
+        if (!ok) openCliSetupDrawer(agent);
         return;
       }
-      // Nothing on disk — close the dialog and open install guidance in Setup.
-      closeManagedModal($("onboardModal"), { restoreFocus: false });
-      localStorage.setItem("agent-room-onboarded", "1");
-      if ($("setupDrawer").hidden) toggleSetup();
-      const panel = $(`${agent}CliSetup`);
-      if (panel.hidden) toggleCliSetup(agent);
-      else runCliSetup(agent);
-      document.querySelector(`.agent-card[data-agent="${agent}"]`)?.scrollIntoView({ block: "nearest" });
-      requestAnimationFrame(() => document.querySelector(`.setup-cli[data-agent="${agent}"]`)?.focus());
+      // Zero or multiple candidates: drawer shows install hints or an explicit pick.
+      openCliSetupDrawer(agent);
     } catch (error) {
       list.innerHTML = prior;
       const note = document.createElement("p");
@@ -932,6 +918,17 @@ function openCliSetupFromOnboard(agent) {
       list.prepend(note);
     }
   })();
+}
+
+function openCliSetupDrawer(agent) {
+  closeManagedModal($("onboardModal"), { restoreFocus: false });
+  localStorage.setItem("agent-room-onboarded", "1");
+  if ($("setupDrawer").hidden) toggleSetup();
+  const panel = $(`${agent}CliSetup`);
+  if (panel.hidden) toggleCliSetup(agent);
+  else runCliSetup(agent);
+  document.querySelector(`.agent-card[data-agent="${agent}"]`)?.scrollIntoView({ block: "nearest" });
+  requestAnimationFrame(() => document.querySelector(`.setup-cli[data-agent="${agent}"]`)?.focus());
 }
 async function updateAgentCli(agent, btn) {
   btn.disabled = true; btn.textContent = t("updating");
