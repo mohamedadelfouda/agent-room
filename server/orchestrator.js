@@ -25,6 +25,78 @@ function makeMessage({ author, agent, role, content, round, phase, mode }) {
   };
 }
 
+function discussionOutcomePhase(assessment) {
+  if (!assessment.canStop) return "needs_more_rounds";
+  return {
+    satisfied: "converged",
+    needs_user: "needs_user",
+    blocked: "blocked_external",
+  }[assessment.completionState] || "needs_more_rounds";
+}
+
+export function buildDiscussionOutcome(assessment, requestedRounds, completedRounds) {
+  const phase = discussionOutcomePhase(assessment);
+  return {
+    outcomeVersion: 1,
+    phase,
+    agreementState: assessment.agreementState,
+    completionState: assessment.completionState,
+    stopReason: assessment.canStop
+      ? assessment.stopReason
+      : assessment.stopReason === "invalid_control" ? "invalid_control" : "round_limit",
+    requestedRounds,
+    completedRounds,
+    stoppedEarly: assessment.canStop && completedRounds < requestedRounds,
+    itemRegistry: structuredClone(assessment.itemRegistry),
+    pendingItems: structuredClone(assessment.pendingItems),
+    pendingKinds: [...assessment.pendingKinds],
+    nextSteps: structuredClone(assessment.nextSteps),
+    disagreements: [...assessment.disagreements],
+    unclassifiedPoints: [...assessment.unclassifiedPoints],
+    conflicts: structuredClone(assessment.conflicts),
+    controlValid: assessment.allValid,
+  };
+}
+
+function pendingItemList(outcome) {
+  return outcome.pendingItems.length
+    ? `\n${outcome.pendingItems.map((pendingItem) => `• ${pendingItem.text}`).join("\n")}`
+    : "";
+}
+
+function terminalOutcomeReport(outcome) {
+  const round = outcome.completedRounds;
+  if (outcome.phase === "converged") {
+    return outcome.stoppedEarly
+      ? `الوكلاء اتفقوا والمهمة اكتملت في الجولة ${round} — تم إيقاف الجولات المتبقية.`
+      : `الوكلاء اتفقوا والمهمة اكتملت في الجولة الأخيرة (${round}).`;
+  }
+  if (outcome.phase === "needs_user") {
+    return `الوكلاء متفقون، والنقاش توقف في الجولة ${round} لأن النتيجة تحتاج قرارك.${pendingItemList(outcome)}`;
+  }
+  if (outcome.phase === "blocked_external") {
+    return `الوكلاء متفقون، والنقاش توقف في الجولة ${round} لأن النتيجة تنتظر تحققًا أو خطوة خارجية.${pendingItemList(outcome)}`;
+  }
+  return null;
+}
+
+function unfinishedOutcomeReport(outcome) {
+  if (outcome.stopReason === "invalid_control") {
+    return `انتهت ${outcome.completedRounds} جولات، لكن تعذّر اعتماد حالة الاتفاق لأن بيانات التحكم كانت ناقصة أو غير صالحة.`;
+  }
+  if (outcome.disagreements.length) {
+    return `انتهت ${outcome.completedRounds} جولات وما زال هناك اختلاف جوهري بين الوكلاء:\n${outcome.disagreements.map((disagreement) => `• ${disagreement}`).join("\n")}`;
+  }
+  if (outcome.agreementState === "converged" && outcome.completionState === "incomplete") {
+    return `انتهت ${outcome.completedRounds} جولات. الوكلاء متفقون على الوضع الحالي، لكن المهمة ما زالت تحتاج شغلًا إضافيًا.${pendingItemList(outcome)}`;
+  }
+  return `انتهت ${outcome.completedRounds} جولات من غير اتفاق نهائي قابل للاعتماد.`;
+}
+
+export function discussionOutcomeReport(outcome) {
+  return terminalOutcomeReport(outcome) || unfinishedOutcomeReport(outcome);
+}
+
 export function mergeOrchestrationState(latest, session) {
   // Connector MCP calls and user approvals can update the same session while an
   // agent is running. Merge messages by id instead of replacing those concurrent
@@ -212,8 +284,10 @@ async function runOrchestrationClaimed(sessionId, request, emit, releaseActivity
       return message;
     };
 
-    let earlyConverged = 0;
-    let lastDisagreements = [];
+    let completedRounds = 0;
+    let itemRegistry = [];
+    let lastAssessment = null;
+    let officialOutcome = null;
     let proposalVersion = 1;
 
     if (mode === "chat") {
@@ -249,6 +323,7 @@ async function runOrchestrationClaimed(sessionId, request, emit, releaseActivity
             });
             await callAgent(agent, prompt, round, "collaboration");
           }
+          completedRounds = round;
           continue;
         }
         const snapshot = structuredClone(session);
@@ -263,13 +338,16 @@ async function runOrchestrationClaimed(sessionId, request, emit, releaseActivity
             userTask,
             projectSnapshot: projSnapshot,
             targetVersion,
+            itemRegistry,
           });
           return callAgent(agent, prompt, round, "collaboration");
         }));
-        const assessment = assessRound(roundMessages.map((message) => message.control), targetVersion);
-        lastDisagreements = assessment.disagreements;
+        const assessment = assessRound(roundMessages.map((message) => message.control), targetVersion, itemRegistry);
+        lastAssessment = assessment;
+        itemRegistry = assessment.itemRegistry;
+        completedRounds = round;
         if (assessment.proposalChanged) proposalVersion += 1;
-        else if (assessment.canStop) { earlyConverged = round; break; }
+        else if (assessment.canStop) break;
       }
     } else {
       const openingSession = structuredClone(session);
@@ -288,6 +366,7 @@ async function runOrchestrationClaimed(sessionId, request, emit, releaseActivity
         });
         return callAgent(agent, prompt, 1, "opening");
       }));
+      completedRounds = 1;
 
       for (let round = 2; round <= rounds; round += 1) {
         const snapshot = structuredClone(session);
@@ -305,31 +384,30 @@ async function runOrchestrationClaimed(sessionId, request, emit, releaseActivity
             independent: false,
             projectSnapshot: projSnapshot,
             targetVersion,
+            itemRegistry,
           });
           return callAgent(agent, prompt, round, "rebuttal");
         }));
-        const assessment = assessRound(roundMsgs.map((message) => message.control), targetVersion);
-        lastDisagreements = assessment.disagreements;
+        const assessment = assessRound(roundMsgs.map((message) => message.control), targetVersion, itemRegistry);
+        lastAssessment = assessment;
+        itemRegistry = assessment.itemRegistry;
+        completedRounds = round;
         if (assessment.proposalChanged) proposalVersion += 1;
-        else if (assessment.canStop) { earlyConverged = round; break; }
+        else if (assessment.canStop) break;
       }
     }
 
-    // Early-stop / disagreement report (multi-round collaboration & debate only).
-    if (!state.cancelled && mode !== "chat" && rounds >= 2) {
-      let report = null;
-      if (earlyConverged) {
-        report = earlyConverged < rounds
-          ? { content: `الوكلاء اتفقوا في الجولة ${earlyConverged} — تم إيقاف الجولات المتبقية.`, phase: "converged" }
-          : { content: `الوكلاء اتفقوا في الجولة الأخيرة (${earlyConverged}).`, phase: "converged" };
-      } else if (lastDisagreements.length) {
-        const list = lastDisagreements.map((d) => `• ${d}`).join("\n");
-        report = { content: `خلصت الـ${rounds} جولات والوكلاء لسه مش متفقين. نقاط الاختلاف:\n${list}\n\nمحتاجين جولات إضافية؟`, phase: "needs_more_rounds" };
-      } else {
-        // Finished all rounds without agreement and without articulated points (e.g. markers missing).
-        report = { content: `خلصت الـ${rounds} جولات من غير اتفاق واضح بين الوكلاء. تحب جولات إضافية؟`, phase: "needs_more_rounds" };
-      }
-      session.messages.push(makeMessage({ author: "system", content: report.content, phase: report.phase, mode }));
+    // Persist the deterministic outcome before asking the finalizer to explain it.
+    if (!state.cancelled && mode !== "chat" && rounds >= 2 && lastAssessment) {
+      officialOutcome = buildDiscussionOutcome(lastAssessment, rounds, completedRounds);
+      const outcomeMessage = makeMessage({
+        author: "system",
+        content: discussionOutcomeReport(officialOutcome),
+        phase: officialOutcome.phase,
+        mode,
+      });
+      outcomeMessage.meta = { outcome: officialOutcome };
+      session.messages.push(outcomeMessage);
       await persistAndEmit(session, emit);
     }
 
@@ -342,8 +420,9 @@ async function runOrchestrationClaimed(sessionId, request, emit, releaseActivity
         userTask,
         mode,
         projectSnapshot: projSnapshot,
+        outcome: officialOutcome,
       });
-      await callAgent(finalizer, prompt, rounds + 1, "synthesis");
+      await callAgent(finalizer, prompt, completedRounds + 1, "synthesis");
     }
 
     session.status = state.cancelled ? "stopped" : "completed";
