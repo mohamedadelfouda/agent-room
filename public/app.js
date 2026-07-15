@@ -1698,7 +1698,7 @@ function renderDecisionCards() {
         message.round ? `${esc(t("roundWord"))} ${bdi(formatLocaleNumber(lang, message.round))}` : "",
       ].filter(Boolean);
       const foot = footParts.length ? `<div class="dcard-foot">${footParts.join(" · ")}</div>` : "";
-      body = `<div class="dcard-body"><p dir="auto">${esc(String(message.content || "").slice(0, 600))}</p>${foot}</div>`;
+      body = `<div class="dcard-body md">${renderMarkdown(String(message.content || "").slice(0, 600))}${foot}</div>`;
     } else {
       body = `<div class="dcard-body"><p class="dcard-empty">${esc(t("dcardEmpty"))}</p></div>`;
     }
