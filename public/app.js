@@ -1415,12 +1415,13 @@ async function rejectExec(taskId) {
 
 /* ---------------- mission-control decision room ---------------- */
 const ROOM_PHASES = {
+  plan: { pill: "roomPhasePlan", heading: "roomHeadingPlan", sub: "roomSubPlan" },
   collaboration: { pill: "roomPhaseCollaboration", heading: "roomHeadingCollaboration", sub: "roomSubCollaboration" },
   decision: { pill: "roomPhaseDecision", heading: "roomHeadingDecision", sub: "roomSubDecision" },
   execute: { pill: "roomPhaseExecute", heading: "roomHeadingExecute", sub: "roomSubExecute" },
 };
 const STAGE_KEYS = ["stagePlan", "stageCollab", "stageDecision", "stageExecute", "stageReview", "stageAccept"];
-const STAGE_INDEX = { collaboration: 1, decision: 2, execute: 3 };
+const STAGE_INDEX = { plan: 0, collaboration: 1, decision: 2, execute: 3 };
 let liveAgents = {};
 
 function pendingExecution() {
@@ -1428,10 +1429,12 @@ function pendingExecution() {
 }
 // Read-only phase derived from real session state; the mockup's manual switch is never authoritative.
 function derivePhase() {
-  if (!currentSession) return "collaboration";
+  if (!currentSession) return "plan";
   if (currentSession.executing || pendingExecution()) return "execute";
   if (currentSession.running || currentSession.status === "running") return "collaboration";
-  return "decision";
+  // A fresh session with no agent replies yet hasn't reached a decision — keep it at Plan.
+  const hasAgentReply = (currentSession.messages ?? []).some((message) => message.author === "agent");
+  return hasAgentReply ? "decision" : "plan";
 }
 function applyPhase() {
   const phase = derivePhase();

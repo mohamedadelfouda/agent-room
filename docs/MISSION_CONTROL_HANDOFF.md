@@ -166,3 +166,24 @@ source), and the "coming soon" note is gone; (4) an empty-state for the context
 column when a session has no cards yet. Re-reviewed (code/a11y/i18n), findings
 fixed (active-stage time contrast, reflow safety, dedup helper). Evidence table
 (#5) intentionally deferred — it needs a backend data source, not just wiring.
+
+### Design polish (round 2)
+Second design-review pass: (1) **Plan phase** — `derivePhase()` now returns `plan`
+(new stage-0 phase + `roomPhasePlan/Heading/Sub` i18n + neutral pill dot) for a
+fresh session with no agent replies, instead of wrongly showing it stuck on
+Decision. (2) **Rail brand** — `.brand { min-width:0; overflow:hidden }` fixed the
+315px-over-272px overflow that pushed the language toggle outside the rail and
+made it unclickable. (3) **Topbar titles** — session title + meta now sit on one
+line (flex row, title ellipsis, meta truncates). (4) **Evidence panel REMOVED**
+from the UI (markup + `evidence/soon/evidenceSoon` keys + `.panel*`/`.soon-badge`
+CSS) — it is **deferred to a backend feature**, tracked as a follow-up task, since
+the earlier `#evidenceSoon`/"قريباً" placeholder (referenced in the binding map
+and "What THIS session added" sections above) has no real data source yet.
+Re-reviewed (code/a11y/i18n); fixed `#sessionMeta` overflow at narrow widths.
+
+### Follow-up features (deferred, tracked as tasks — not bugs)
+- **Evidence table** — needs a backend "evidence" concept in the orchestration
+  engine before it can be rendered honestly; removed from the UI for now.
+- **Session folders** — custom named groups for sessions (today grouping is only
+  by date/project).
+- Rename/delete session already exists (session ⋯ menu → `renameSession`/`deleteSession`).
