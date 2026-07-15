@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, unlinkSync, writeFileSync, rmSync } from "node:fs";
+import fsPromises from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { prepareAcceptedChange } from "../../server/acceptance.js";
@@ -599,6 +600,44 @@ test("merge refuses to overwrite an ignored user file added by the accepted comm
     await assert.rejects(() => mergeBranch(dir, wt, accepted.commitSha), /overwrite an untracked or ignored project file/);
     assert.equal(readFileSync(join(dir, "local.txt"), "utf8"), "user content\n");
     assert.equal(git(dir, "rev-parse", "HEAD").trim(), wt.baseSha);
+  } finally {
+    if (wt) await removeWorktree(dir, wt.path, wt.branch);
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("merge preserves an ignored file created after its collision preflight", async (t) => {
+  const dir = repository();
+  let wt;
+  try {
+    writeFileSync(join(dir, ".gitignore"), ".agent-workspaces/\nlate.txt\n");
+    git(dir, "add", ".gitignore");
+    git(dir, "commit", "-qm", "ignore late file");
+    wt = await createWorktree(dir, "codex", "t-late-ignored-collision");
+    writeFileSync(join(wt.path, ".gitignore"), ".agent-workspaces/\n");
+    writeFileSync(join(wt.path, "late.txt"), "accepted content\n");
+    const accepted = await prepareAcceptedChange({ projectPath: dir, worktree: wt, message: "accepted late collision" });
+    const intentPath = join(dir, ".git", "index.lock.agent-room-intent");
+    const rename = fsPromises.rename.bind(fsPromises);
+    let collisionCreated = false;
+    t.mock.method(fsPromises, "rename", async (source, destination) => {
+      const phase = destination === intentPath ? JSON.parse(readFileSync(source, "utf8")).phase : "";
+      await rename(source, destination);
+      if (phase === "refreshing" && !collisionCreated) {
+        writeFileSync(join(dir, "late.txt"), "late user content\n");
+        collisionCreated = true;
+      }
+    });
+
+    await assert.rejects(() => mergeBranch(dir, wt, accepted.commitSha), /overwrite an untracked or ignored project file/);
+    assert.equal(collisionCreated, true);
+    assert.equal(readFileSync(join(dir, "late.txt"), "utf8"), "late user content\n");
+    assert.equal(git(dir, "rev-parse", "HEAD").trim(), accepted.commitSha);
+
+    assert.equal(await recoverAgentRoomIndexLock(dir), true);
+    assert.equal(readFileSync(join(dir, "late.txt"), "utf8"), "late user content\n");
+    assert.equal(git(dir, "write-tree").trim(), git(dir, "rev-parse", `${accepted.commitSha}^{tree}`).trim());
+    assert.match(git(dir, "status", "--porcelain"), /late\.txt/);
   } finally {
     if (wt) await removeWorktree(dir, wt.path, wt.branch);
     rmSync(dir, { recursive: true, force: true });

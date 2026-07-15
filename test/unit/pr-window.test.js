@@ -43,3 +43,14 @@ test("PR window handling rejects non-canonical URLs and contains fallback launch
   assert.equal(openReservedPrWindow(hostWindow, null, "https://example.com/example/project/pull/3"), false);
   assert.equal(openReservedPrWindow(hostWindow, null, "https://github.com/example/project/pull/3"), false);
 });
+
+test("PR window handling rejects non-default GitHub ports before launching", () => {
+  let closed = false;
+  const reserved = { closed: false, close: () => { closed = true; } };
+  const calls = [];
+  const hostWindow = { open: (...args) => { calls.push(args); return null; } };
+
+  assert.equal(openReservedPrWindow(hostWindow, reserved, "https://github.com:444/example/project/pull/3"), false);
+  assert.equal(closed, true);
+  assert.deepEqual(calls, []);
+});

@@ -574,6 +574,12 @@ async function acceptedAdditionCollidesWithUntracked(projectPath, baseSha, commi
   return gitPathListsOverlap(additions, worktreeOnly, ignoreCase);
 }
 
+async function assertNoAcceptedAdditionCollision(projectPath, baseSha, commitSha) {
+  if (await acceptedAdditionCollidesWithUntracked(projectPath, baseSha, commitSha)) {
+    throw new Error("The accepted change would overwrite an untracked or ignored project file");
+  }
+}
+
 async function rebuildInterruptedRefresh(projectPath, indexPath, intent) {
   const lineage = (await git(["rev-list", "--parents", "-n", "1", intent.commitSha], projectPath)).stdout.trim().split(/\s+/);
   if (lineage.length !== 2 || lineage[0] !== intent.commitSha || lineage[1] !== intent.baseSha) {
@@ -764,9 +770,7 @@ export async function mergeBranch(projectPath, worktree, commitSha, ref = accept
     const targetAlreadyAdvanced = currentTarget === commitSha;
     if (!targetAlreadyAdvanced && currentTarget !== worktree.baseSha) throw new Error("Target branch moved before merge; run the task again");
     if (checkedOutRef !== targetRef) throw new Error("The checked-out branch changed before merge; run the task again");
-    if (await acceptedAdditionCollidesWithUntracked(projectPath, worktree.baseSha, commitSha)) {
-      throw new Error("The accepted change would overwrite an untracked or ignored project file");
-    }
+    await assertNoAcceptedAdditionCollision(projectPath, worktree.baseSha, commitSha);
 
     await git(["read-tree", worktree.baseSha], projectPath, { GIT_INDEX_FILE: temporaryIndex });
     await writeIntent(intentPath, {
@@ -791,6 +795,7 @@ export async function mergeBranch(projectPath, worktree, commitSha, ref = accept
     if (await optionalGitValue(["symbolic-ref", "-q", "HEAD"], projectPath) !== targetRef) {
       throw new Error("The checked-out branch changed during merge; the accepted branch was not applied to this worktree");
     }
+    await assertNoAcceptedAdditionCollision(projectPath, worktree.baseSha, commitSha);
     await git(["read-tree", "--reset", "-u", commitSha], projectPath, { GIT_INDEX_FILE: temporaryIndex });
     const [preparedHead, preparedRef] = await Promise.all([
       optionalGitValue(["rev-parse", "HEAD"], projectPath),

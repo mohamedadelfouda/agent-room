@@ -2,7 +2,8 @@ function httpsUrl(value) {
   try {
     const parsed = new URL(String(value));
     const pullRequestPath = /^\/[^/]+\/[^/]+\/pull\/\d+(?:\/.*)?$/;
-    return parsed.protocol === "https:" && parsed.hostname === "github.com" && !parsed.username && !parsed.password && pullRequestPath.test(parsed.pathname)
+    return parsed.protocol === "https:" && parsed.hostname === "github.com" && !parsed.port &&
+      !parsed.username && !parsed.password && pullRequestPath.test(parsed.pathname)
       ? parsed.href
       : "";
   } catch {
