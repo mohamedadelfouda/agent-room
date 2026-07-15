@@ -8,6 +8,18 @@ import { isGitHubRemote } from "./github-remote.js";
 const SAFE = /^[a-zA-Z0-9_.-]+$/;
 const EXECUTION_BRANCH = /^agent\/([a-zA-Z0-9_.-]+)\/([a-zA-Z0-9_.-]+)$/;
 
+function isSafeExecutionComponent(value) {
+  return typeof value === "string" && SAFE.test(value) && value !== "." && value !== "..";
+}
+
+function isPathInside(root, candidate) {
+  const relative = path.relative(root, candidate);
+  return relative !== ""
+    && relative !== ".."
+    && !relative.startsWith(`..${path.sep}`)
+    && !path.isAbsolute(relative);
+}
+
 function normalizedPath(value) {
   const resolved = path.normalize(path.resolve(value));
   return process.platform === "win32" ? resolved.toLowerCase() : resolved;
@@ -15,11 +27,11 @@ function normalizedPath(value) {
 
 async function executionLocation(projectPath, wtPath, branch) {
   const match = String(branch || "").match(EXECUTION_BRANCH);
-  if (!match || !SAFE.test(match[1]) || !SAFE.test(match[2])) return null;
+  if (!match || !isSafeExecutionComponent(match[1]) || !isSafeExecutionComponent(match[2])) return null;
   const canonicalProject = await fs.realpath(projectPath);
   const root = path.join(canonicalProject, ".agent-workspaces");
   const expected = path.join(root, match[1], match[2]);
-  if (normalizedPath(expected) !== normalizedPath(wtPath)) return null;
+  if (!isPathInside(root, expected) || normalizedPath(expected) !== normalizedPath(wtPath)) return null;
   return { root, agent: match[1], taskId: match[2], expected };
 }
 
@@ -131,7 +143,7 @@ export async function isGitRepo(projectPath) {
 // existing objects through Git alternates, but every new object/ref is written under the clone's
 // own .git directory. A blocked secret therefore never enters the user's object database.
 export async function createWorktree(projectPath, agent, taskId) {
-  if (!SAFE.test(agent) || !SAFE.test(taskId)) throw new Error("Invalid agent/taskId");
+  if (!isSafeExecutionComponent(agent) || !isSafeExecutionComponent(taskId)) throw new Error("Invalid agent/taskId");
   if (!(await isGitRepo(projectPath))) throw new Error("Project is not a git repository");
   const { stdout: sha } = await git(["rev-parse", "HEAD"], projectPath);
   const baseSha = sha.trim();
@@ -504,6 +516,15 @@ async function renameIndexLock(lockPath, indexPath) {
   }
 }
 
+async function writeCompleteFile(handle, contents) {
+  let offset = 0;
+  while (offset < contents.length) {
+    const { bytesWritten } = await handle.write(contents, offset, contents.length - offset, offset);
+    if (bytesWritten <= 0) throw new Error("Git index lock write made no progress");
+    offset += bytesWritten;
+  }
+}
+
 async function writeIntent(intentPath, value) {
   const temporary = `${intentPath}.${crypto.randomUUID()}.tmp`;
   try {
@@ -742,7 +763,7 @@ export async function mergeBranch(projectPath, worktree, commitSha, ref = accept
       lockIdentity,
     });
     await lockHandle.truncate(0);
-    await lockHandle.write(contents, 0, contents.length, 0);
+    await writeCompleteFile(lockHandle, contents);
     await lockHandle.sync();
     await lockHandle.close();
     lockHandle = null;
@@ -939,10 +960,10 @@ export async function listExecutionWorkspaces(projectPath) {
   }
   const found = [];
   for (const agentEntry of await fs.readdir(root, { withFileTypes: true })) {
-    if (!agentEntry.isDirectory() || agentEntry.isSymbolicLink() || !SAFE.test(agentEntry.name)) continue;
+    if (!agentEntry.isDirectory() || agentEntry.isSymbolicLink() || !isSafeExecutionComponent(agentEntry.name)) continue;
     const agentPath = path.join(root, agentEntry.name);
     for (const taskEntry of await fs.readdir(agentPath, { withFileTypes: true })) {
-      if (!taskEntry.isDirectory() || taskEntry.isSymbolicLink() || !SAFE.test(taskEntry.name)) continue;
+      if (!taskEntry.isDirectory() || taskEntry.isSymbolicLink() || !isSafeExecutionComponent(taskEntry.name)) continue;
       found.push({
         path: path.join(agentPath, taskEntry.name),
         branch: `agent/${agentEntry.name}/${taskEntry.name}`,

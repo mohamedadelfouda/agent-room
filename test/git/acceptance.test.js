@@ -258,6 +258,24 @@ test("cleanup refuses non-Agent-Room branches and preserves the user branch", as
   }
 });
 
+test("cleanup rejects dot-segment branches without deleting outside the execution root", async () => {
+  const dir = repository();
+  const projectPath = await fsPromises.realpath(dir);
+  const victim = join(projectPath, "victim");
+  const sentinel = join(victim, "keep.txt");
+  mkdirSync(join(projectPath, ".agent-workspaces"), { recursive: true });
+  mkdirSync(victim);
+  writeFileSync(sentinel, "keep\n");
+  try {
+    const cleanup = await removeWorktree(projectPath, victim, "agent/../victim", { isolation: "clone" });
+    assert.equal(cleanup.ok, false);
+    assert.match(cleanup.errors.join("\n"), /cleanup safety check/);
+    assert.equal(readFileSync(sentinel, "utf8"), "keep\n");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("cleanup refuses a redirected clone target without deleting its destination", async (t) => {
   const dir = repository();
   const outside = mkdtempSync(join(tmpdir(), "ar-cleanup-outside-"));
@@ -638,6 +656,40 @@ test("merge preserves an ignored file created after its collision preflight", as
     assert.equal(readFileSync(join(dir, "late.txt"), "utf8"), "late user content\n");
     assert.equal(git(dir, "write-tree").trim(), git(dir, "rev-parse", `${accepted.commitSha}^{tree}`).trim());
     assert.match(git(dir, "status", "--porcelain"), /late\.txt/);
+  } finally {
+    if (wt) await removeWorktree(dir, wt.path, wt.branch);
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("merge writes the complete index when the filesystem returns a short write", async (t) => {
+  const dir = repository();
+  let wt;
+  try {
+    wt = await createWorktree(dir, "codex", "t-short-index-write");
+    writeFileSync(join(wt.path, "complete.js"), "export const complete = true;\n");
+    const accepted = await prepareAcceptedChange({ projectPath: dir, worktree: wt, message: "complete index write" });
+    const lockPath = join(dir, ".git", "index.lock");
+    const open = fsPromises.open.bind(fsPromises);
+    let shortWriteInjected = false;
+    t.mock.method(fsPromises, "open", async (...args) => {
+      const handle = await open(...args);
+      if (String(args[0]) !== lockPath || args[1] !== "r+") return handle;
+      const write = handle.write.bind(handle);
+      handle.write = async (buffer, offset, length, position) => {
+        if (!shortWriteInjected && length > 1) {
+          shortWriteInjected = true;
+          return write(buffer, offset, Math.floor(length / 2), position);
+        }
+        return write(buffer, offset, length, position);
+      };
+      return handle;
+    });
+
+    await mergeBranch(dir, wt, accepted.commitSha);
+    assert.equal(shortWriteInjected, true);
+    assert.equal(git(dir, "write-tree").trim(), git(dir, "rev-parse", `${accepted.commitSha}^{tree}`).trim());
+    assert.equal(git(dir, "status", "--porcelain").trim(), "");
   } finally {
     if (wt) await removeWorktree(dir, wt.path, wt.branch);
     rmSync(dir, { recursive: true, force: true });
