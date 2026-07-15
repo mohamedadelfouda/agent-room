@@ -360,6 +360,8 @@ function phaseLabel(phase) {
     rebuttal: "phaseRebuttal",
     synthesis: "phaseSynthesis",
     converged: "phaseConverged",
+    needs_user: "phaseNeedsUser",
+    blocked_external: "phaseBlockedExternal",
     needs_more_rounds: "phaseNeedsMoreRounds",
   }[phase];
   return key ? t(key) : String(phase || "");
@@ -547,18 +549,108 @@ function renderMessages() {
   }
 }
 
+const OUTCOME_LABEL_KEYS = {
+  agreement: { converged: "agreementConverged", open: "agreementOpen", unknown: "agreementUnknown", fallback: "agreementUnknown" },
+  completion: { satisfied: "completionSatisfied", needs_user: "completionNeedsUser", blocked: "completionBlocked", incomplete: "completionIncomplete", fallback: "completionIncomplete" },
+  stopReason: { complete: "stopComplete", user_decision: "stopUserDecision", external_block: "stopExternalBlock", round_limit: "stopRoundLimit", invalid_control: "stopInvalidControl", cancelled: "stopCancelled", error: "stopError", fallback: "stopInvalidControl" },
+  kind: { disagreement: "pendingDisagreement", user_decision: "pendingUserDecision", external_validation: "pendingExternalValidation", remaining_work: "pendingRemainingWork", out_of_scope: "pendingOutOfScope", fallback: "pendingUnclassified" },
+  actor: { user: "actorUser", human_operator: "actorHumanOperator", orchestrator: "actorOrchestrator", agent: "actorAgent", fallback: "system" },
+  action: { provide_decision: "actionProvideDecision", run_external_check: "actionRunExternalCheck", resume_agent_round: "actionResumeAgentRound", fallback: "unresolved" },
+};
+
+function outcomeLabel(group, statusValue) {
+  const labels = OUTCOME_LABEL_KEYS[group];
+  return t(labels[statusValue] || labels.fallback);
+}
+
+function officialOutcomeFrom(message) {
+  const outcome = message?.meta?.outcome;
+  return outcome?.outcomeVersion === 1 && Array.isArray(outcome.pendingItems) && Array.isArray(outcome.nextSteps)
+    ? outcome
+    : null;
+}
+
+function latestRunMessages() {
+  const messages = currentSession?.messages || [];
+  let latestUserIndex = -1;
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (messages[index].author === "user") { latestUserIndex = index; break; }
+  }
+  return latestUserIndex >= 0 ? messages.slice(latestUserIndex) : messages;
+}
+
+function outcomeStatusMarkup(outcome) {
+  return `<p><b>${esc(t("agreementState"))}:</b> ${esc(outcomeLabel("agreement", outcome.agreementState))} · <b>${esc(t("completionState"))}:</b> ${esc(outcomeLabel("completion", outcome.completionState))} · <b>${esc(t("stopReason"))}:</b> ${esc(outcomeLabel("stopReason", outcome.stopReason))}</p>`;
+}
+
+function pendingItemsMarkup(outcome) {
+  const groupedItems = new Map();
+  for (const pendingItem of outcome.pendingItems || []) {
+    const group = groupedItems.get(pendingItem.kind) || [];
+    group.push(pendingItem.text);
+    groupedItems.set(pendingItem.kind, group);
+  }
+  return [...groupedItems].map(([kind, texts]) => `<p><b>${esc(outcomeLabel("kind", kind))}:</b> ${texts.map((text) => bdi(text)).join(" · ")}</p>`).join("");
+}
+
+function nextStepsMarkup(outcome) {
+  if (!outcome.nextSteps?.length) return "";
+  const pendingById = new Map((outcome.pendingItems || []).map((pendingItem) => [pendingItem.itemId, pendingItem.text]));
+  const steps = outcome.nextSteps.map((nextStep) => {
+    const relatedItems = (nextStep.itemIds || []).map((itemId) => pendingById.get(itemId)).filter(Boolean);
+    const context = relatedItems.length ? `: ${relatedItems.map((text) => bdi(text)).join("، ")}` : "";
+    return `${esc(outcomeLabel("actor", nextStep.actor))} — ${esc(outcomeLabel("action", nextStep.action))}${context}`;
+  });
+  return `<p><b>${esc(t("nextSteps"))}:</b> ${steps.join(" · ")}</p>`;
+}
+
+function correctionsMarkup(corrections) {
+  if (!corrections.length) return "";
+  const entries = corrections
+    .map((correction) => `${bdi(correction.agent, "ltr")}: <span dir="auto">${esc(correction.content)}</span>`)
+    .join(" · ");
+  return `<p><b>${esc(t("corrections"))}:</b> ${entries}</p>`;
+}
+
+function legacyOpenPointsMarkup(openPoints) {
+  if (!openPoints.length) return "";
+  const entries = openPoints.map((point) => `<span dir="auto">${esc(point)}</span>`).join(" · ");
+  return `<p><b>${esc(t("unresolved"))}:</b> ${entries}</p>`;
+}
+
+function roundMetricsMarkup(requested, completed) {
+  return `<div class="insight-metrics"><span>${esc(t("requested"))}: <b>${bdi(formatLocaleNumber(lang, requested))}</b></span><span>${esc(t("completed"))}: <b>${bdi(formatLocaleNumber(lang, completed))}</b></span></div>`;
+}
+
+function decisionCardMarkup({ requested, completed, outcome, finalReport, corrections, openPoints }) {
+  const officialOutcome = outcome
+    ? `${outcomeStatusMarkup(outcome)}${pendingItemsMarkup(outcome)}${nextStepsMarkup(outcome)}`
+    : "";
+  const legacyReport = !outcome && finalReport ? `<p dir="auto">${esc(finalReport.content)}</p>` : "";
+  return [
+    `<h2>${esc(t("roundTracker"))}</h2>`,
+    roundMetricsMarkup(requested, completed),
+    officialOutcome,
+    legacyReport,
+    correctionsMarkup(corrections),
+    legacyOpenPointsMarkup(openPoints),
+  ].join("");
+}
+
 function renderSessionInsights(chat) {
   if (!currentSession) return;
-  const discussion = (currentSession.messages || []).filter((message) => message.author === "agent" && ["collaboration", "opening", "rebuttal"].includes(message.phase));
-  const completed = Math.max(0, ...discussion.map((message) => Number(message.round) || 0));
-  const requested = Number(currentSession.settings?.rounds) || 0;
-  const finalReport = [...(currentSession.messages || [])].reverse().find((message) => ["converged", "needs_more_rounds"].includes(message.phase));
-  const openPoints = [...new Set(discussion.flatMap((message) => message.control?.openPoints || []).filter(Boolean))];
+  const runMessages = latestRunMessages();
+  const discussion = runMessages.filter((message) => message.author === "agent" && ["collaboration", "opening", "rebuttal"].includes(message.phase));
+  const finalReport = [...runMessages].reverse().find((message) => ["converged", "needs_user", "blocked_external", "needs_more_rounds"].includes(message.phase));
+  const outcome = officialOutcomeFrom(finalReport);
+  const completed = Number(outcome?.completedRounds) || Math.max(0, ...discussion.map((message) => Number(message.round) || 0));
+  const requested = Number(outcome?.requestedRounds) || Number(currentSession.settings?.rounds) || 0;
+  const openPoints = outcome ? [] : [...new Set(discussion.flatMap((message) => message.control?.openPoints || []).filter(Boolean))];
   const corrections = discussion.filter((message) => message.control?.substantiveDelta).map((message) => ({ agent: message.agent, content: String(message.content || "").slice(0, 140) }));
   if (requested || completed) {
     const card = document.createElement("section");
     card.className = "session-insight";
-    card.innerHTML = `<h2>${esc(t("roundTracker"))}</h2><div class="insight-metrics"><span>${esc(t("requested"))}: <b>${bdi(formatLocaleNumber(lang, requested))}</b></span><span>${esc(t("completed"))}: <b>${bdi(formatLocaleNumber(lang, completed))}</b></span></div>${finalReport ? `<p dir="auto">${esc(finalReport.content)}</p>` : ""}${corrections.length ? `<p><b>${esc(t("corrections"))}:</b> ${corrections.map((correction) => `${bdi(correction.agent, "ltr")}: <span dir="auto">${esc(correction.content)}</span>`).join(" · ")}</p>` : ""}${openPoints.length ? `<p><b>${esc(t("unresolved"))}:</b> ${openPoints.map((point) => `<span dir="auto">${esc(point)}</span>`).join(" · ")}</p>` : ""}`;
+    card.innerHTML = decisionCardMarkup({ requested, completed, outcome, finalReport, corrections, openPoints });
     chat.appendChild(card);
   }
   if (currentSession.decisions?.length) {
