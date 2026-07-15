@@ -40,9 +40,13 @@ module.exports = {
         } : {}),
       },
     },
+    // macOS ships a .zip (pure JS, no native toolchain). maker-dmg pulls the native
+    // appdmg/volume.node addon, which pnpm does not build by default; add it back once
+    // that build is wired up if a .dmg is wanted.
     { name: "@electron-forge/maker-zip", platforms: ["darwin"] },
-    { name: "@electron-forge/maker-dmg", platforms: ["darwin"], config: { name: "Agent Room" } },
-    { name: "@electron-forge/maker-deb", platforms: ["linux"], config: {} },
-    { name: "@electron-forge/maker-rpm", platforms: ["linux"], config: {} },
+    // bin must match packagerConfig.executableName ("AgentRoom"); otherwise the deb/rpm
+    // makers look for a binary named after the package ("agent-room") and fail.
+    { name: "@electron-forge/maker-deb", platforms: ["linux"], config: { options: { bin: "AgentRoom" } } },
+    { name: "@electron-forge/maker-rpm", platforms: ["linux"], config: { options: { bin: "AgentRoom" } } },
   ],
 };

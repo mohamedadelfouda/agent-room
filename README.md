@@ -20,7 +20,7 @@ Optional connector tools use the same rule. Read actions require per-session opt
 Tagged releases build native artifacts on all three platforms:
 
 - Windows: `Agent Room-<version> Setup.exe` (Squirrel installer)
-- macOS: `.dmg` and `.zip`
+- macOS: `.zip` (unzip and move Agent Room to Applications)
 - Linux: `.deb` and `.rpm`
 
 Download them from [GitHub Releases](https://github.com/mohamedadelfouda/agent-room/releases). Public builds need the maintainer's signing credentials to avoid Windows SmartScreen and macOS Gatekeeper warnings; see [desktop distribution](docs/DESKTOP.md).
