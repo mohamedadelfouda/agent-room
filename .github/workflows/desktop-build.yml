@@ -40,28 +40,46 @@ jobs:
         run: pnpm install --frozen-lockfile
       - name: Validate source
         run: pnpm run ci
-      - name: Require and prepare Windows signing for tagged releases
-        if: runner.os == 'Windows' && startsWith(github.ref, 'refs/tags/v')
-        shell: pwsh
+      # Signing engages per platform ONLY when that platform's full secret set is
+      # present. With no secrets (e.g. the first public release) the build is
+      # unsigned instead of failing — users then see SmartScreen / Gatekeeper
+      # warnings. Add the secrets later to get signed + notarized builds with no
+      # further workflow change.
+      - name: Detect signing availability
+        id: signing
+        shell: bash
         env:
           WINDOWS_CERTIFICATE_BASE64: ${{ secrets.WINDOWS_CERTIFICATE_BASE64 }}
           WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
-        run: |
-          if (-not $env:WINDOWS_CERTIFICATE_BASE64 -or -not $env:WINDOWS_CERTIFICATE_PASSWORD) { throw "Tagged Windows releases require signing secrets" }
-          $certificate = Join-Path $env:RUNNER_TEMP "agent-room-signing.pfx"
-          [IO.File]::WriteAllBytes($certificate, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE_BASE64))
-          "WINDOWS_CERTIFICATE_FILE=$certificate" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-      - name: Require and prepare macOS signing for tagged releases
-        if: runner.os == 'macOS' && startsWith(github.ref, 'refs/tags/v')
-        shell: bash
-        env:
           MAC_CERTIFICATE_BASE64: ${{ secrets.MAC_CERTIFICATE_BASE64 }}
           MAC_CERTIFICATE_PASSWORD: ${{ secrets.MAC_CERTIFICATE_PASSWORD }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
-          test -n "$MAC_CERTIFICATE_BASE64" && test -n "$MAC_CERTIFICATE_PASSWORD" && test -n "$APPLE_ID" && test -n "$APPLE_APP_SPECIFIC_PASSWORD" && test -n "$APPLE_TEAM_ID"
+          win=false
+          mac=false
+          if [ -n "$WINDOWS_CERTIFICATE_BASE64" ] && [ -n "$WINDOWS_CERTIFICATE_PASSWORD" ]; then win=true; fi
+          if [ -n "$MAC_CERTIFICATE_BASE64" ] && [ -n "$MAC_CERTIFICATE_PASSWORD" ] && [ -n "$APPLE_ID" ] && [ -n "$APPLE_APP_SPECIFIC_PASSWORD" ] && [ -n "$APPLE_TEAM_ID" ]; then mac=true; fi
+          echo "win=$win" >> "$GITHUB_OUTPUT"
+          echo "mac=$mac" >> "$GITHUB_OUTPUT"
+          echo "Windows signing: $win; macOS signing: $mac"
+      - name: Prepare Windows signing
+        if: runner.os == 'Windows' && steps.signing.outputs.win == 'true'
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE_BASE64: ${{ secrets.WINDOWS_CERTIFICATE_BASE64 }}
+        run: |
+          $certificate = Join-Path $env:RUNNER_TEMP "agent-room-signing.pfx"
+          [IO.File]::WriteAllBytes($certificate, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE_BASE64))
+          "WINDOWS_CERTIFICATE_FILE=$certificate" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: Prepare macOS signing
+        if: runner.os == 'macOS' && steps.signing.outputs.mac == 'true'
+        shell: bash
+        env:
+          MAC_CERTIFICATE_BASE64: ${{ secrets.MAC_CERTIFICATE_BASE64 }}
+          MAC_CERTIFICATE_PASSWORD: ${{ secrets.MAC_CERTIFICATE_PASSWORD }}
+        run: |
           certificate="$RUNNER_TEMP/agent-room-signing.p12"
           keychain="$RUNNER_TEMP/agent-room-signing.keychain-db"
           printf '%s' "$MAC_CERTIFICATE_BASE64" | base64 -D > "$certificate"
@@ -71,20 +89,12 @@ jobs:
           security import "$certificate" -P "$MAC_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$keychain"
           security set-key-partition-list -S apple-tool:,apple: -k "$GITHUB_RUN_ID" "$keychain"
           security list-keychains -d user -s "$keychain" login.keychain-db
-      - name: Build unsigned or Linux installer
-        if: ${{ !startsWith(github.ref, 'refs/tags/v') || runner.os == 'Linux' }}
-        run: pnpm make
-      - name: Build signed Windows installer
-        if: runner.os == 'Windows' && startsWith(github.ref, 'refs/tags/v')
+      - name: Build installer (signed when certificates are configured, unsigned otherwise)
         env:
-          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
-        run: pnpm make
-      - name: Build signed and notarized macOS installer
-        if: runner.os == 'macOS' && startsWith(github.ref, 'refs/tags/v')
-        env:
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ steps.signing.outputs.win == 'true' && secrets.WINDOWS_CERTIFICATE_PASSWORD || '' }}
+          APPLE_ID: ${{ steps.signing.outputs.mac == 'true' && secrets.APPLE_ID || '' }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ steps.signing.outputs.mac == 'true' && secrets.APPLE_APP_SPECIFIC_PASSWORD || '' }}
+          APPLE_TEAM_ID: ${{ steps.signing.outputs.mac == 'true' && secrets.APPLE_TEAM_ID || '' }}
         run: pnpm make
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
@@ -103,11 +113,37 @@ jobs:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           path: artifacts
+      # An unsigned build must never silently become an official signed release. When the
+      # full signing secret set is absent the installers are unsigned, so publish the tag as
+      # a pre-release (clearly labelled, not marked "Latest"). Add the secrets and it promotes
+      # to a normal release with no workflow change.
+      - name: Determine release channel
+        id: channel
+        env:
+          WINDOWS_CERTIFICATE_BASE64: ${{ secrets.WINDOWS_CERTIFICATE_BASE64 }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+          MAC_CERTIFICATE_BASE64: ${{ secrets.MAC_CERTIFICATE_BASE64 }}
+          MAC_CERTIFICATE_PASSWORD: ${{ secrets.MAC_CERTIFICATE_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          if [ -n "$WINDOWS_CERTIFICATE_BASE64" ] && [ -n "$WINDOWS_CERTIFICATE_PASSWORD" ] \
+             && [ -n "$MAC_CERTIFICATE_BASE64" ] && [ -n "$MAC_CERTIFICATE_PASSWORD" ] \
+             && [ -n "$APPLE_ID" ] && [ -n "$APPLE_APP_SPECIFIC_PASSWORD" ] && [ -n "$APPLE_TEAM_ID" ]; then
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::Signing secrets incomplete — publishing $GITHUB_REF_NAME as an unsigned pre-release."
+          fi
       - name: Create release and upload every native artifact
         env:
           GH_TOKEN: ${{ github.token }}
+          PRERELEASE: ${{ steps.channel.outputs.prerelease }}
         run: |
-          gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --generate-notes --title "Agent Room $GITHUB_REF_NAME"
+          if [ "$PRERELEASE" = "true" ]; then channel_flag="--prerelease"; else channel_flag=""; fi
+          gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 \
+            || gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" $channel_flag --generate-notes --title "Agent Room $GITHUB_REF_NAME"
           find artifacts -type f -print0 | while IFS= read -r -d '' file; do
             gh release upload "$GITHUB_REF_NAME" "$file" --repo "$GITHUB_REPOSITORY" --clobber
           done
