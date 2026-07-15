@@ -145,10 +145,13 @@ Added AR+EN (parity test green): `roomPhase*`, `roomHeading*`, `roomSub*`,
   + arrow-key nav, `#statusPill` got `aria-live="polite"`, light-theme `--faint`
   raised to AA contrast, and an `evidenceSoon` HTML/catalog text drift fixed.
 
+### Resolved by the convergence stabilization
+- `renderContextColumn()` now reads the persisted deterministic outcome and maps
+  agreement, completion, stop reason, pending categories, and next steps through
+  the Arabic and English catalogs. Legacy sessions keep their existing report
+  fallback, so raw new-state enums no longer appear in the Arabic card.
+
 ### Known pre-existing issues (NOT from this wiring — tracked separately)
-- `renderContextColumn()` prints the raw `goalStatus` enum (e.g. `needs_user`)
-  untranslated — Arabic users see English mid-sentence. Needs a `goalStatusKey()`
-  mapper + AR/EN keys.
 - `handleAttachFiles()` cumulative-size guard sums UTF-16 char length against a
   byte limit, so multibyte text can exceed the 300 KB cap.
 - `loadSession()` doesn't re-sync `#attachBtn` disabled state the way `setRunning`
