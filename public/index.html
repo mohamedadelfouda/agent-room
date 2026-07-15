@@ -7,36 +7,36 @@
   <link rel="stylesheet" href="/styles.css" />
 </head>
 <body>
-  <div class="shell">
-    <aside class="rail">
+  <div id="appShell" class="shell">
+    <aside class="rail" aria-label="Agent Room">
       <div class="brand">
-        <span class="brand-mark">AR</span>
+        <span class="brand-mark" aria-hidden="true">AR</span>
         <div class="brand-name">
           <strong>Agent Room</strong>
-          <small>Shared AI Session</small>
+          <small data-i18n="brandSubtitle">جلسة ذكاء اصطناعي مشتركة</small>
         </div>
-        <button id="openOnboard" class="icon-btn" title="Setup">⚙</button>
-        <div class="lang-toggle" role="group" aria-label="Language">
-          <button class="lang-btn is-active" data-lang="ar">ع</button>
-          <button class="lang-btn" data-lang="en">EN</button>
+        <button id="openOnboard" type="button" class="icon-btn" title="Setup" aria-label="Setup" data-i18n-title="setup" data-i18n-aria-label="setup">⚙</button>
+        <div class="lang-toggle" role="group" aria-label="Language" data-i18n-aria-label="language">
+          <button type="button" class="lang-btn is-active" data-lang="ar" aria-label="Arabic" data-i18n-aria-label="arabicLanguage" aria-pressed="true">ع</button>
+          <button type="button" class="lang-btn" data-lang="en" aria-label="English" data-i18n-aria-label="englishLanguage" aria-pressed="false">EN</button>
         </div>
       </div>
 
       <button id="newSessionBtn" class="btn-primary rail-new" data-i18n="newSession">جلسة جديدة</button>
 
       <div class="rail-label" data-i18n="sessions">الجلسات</div>
-      <nav id="sessionList" class="session-list" aria-label="Sessions"></nav>
+      <nav id="sessionList" class="session-list" aria-label="Sessions" data-i18n-aria-label="sessions"></nav>
 
       <button id="connFooter" class="conn" title="">
-        <span id="serverStatus" class="conn-dot"></span>
-        <span id="connText" data-i18n="connected">متصل</span>
+        <span id="serverStatus" class="conn-dot" aria-hidden="true"></span>
+        <span id="connText" role="status" aria-live="polite" data-i18n="connected">متصل</span>
       </button>
     </aside>
 
     <main class="main">
       <section id="emptyState" class="empty">
         <div class="empty-inner">
-          <div class="empty-mark">◒</div>
+          <div class="empty-mark" aria-hidden="true">◒</div>
           <h1 data-i18n="emptyTitle">جلسة واحدة، أكثر من عقل</h1>
           <p data-i18n="emptyBody">أنشئ جلسة، اختر التعاون أو المناظرة، وحدّد الموديل والـeffort لكل وكيل. أنت صاحب القرار.</p>
           <button id="emptyNewBtn" class="btn-primary" data-i18n="newSession">جلسة جديدة</button>
@@ -50,11 +50,11 @@
             <p id="sessionMeta"></p>
           </div>
           <div class="topbar-actions">
-            <button id="setupToggle" class="btn-ghost setup-toggle" aria-expanded="false">
+            <button id="setupToggle" class="btn-ghost setup-toggle" aria-expanded="false" aria-controls="setupDrawer">
               <span id="setupSummary" class="setup-summary"></span>
               <span class="chevron" aria-hidden="true">⌄</span>
             </button>
-            <button id="execToggle" class="btn-ghost" data-i18n="execute">تنفيذ</button>
+            <button id="execToggle" class="btn-ghost" data-i18n="execute" aria-expanded="false" aria-controls="execDrawer">تنفيذ</button>
             <button id="exportBtn" class="btn-ghost" data-i18n="export" disabled>تصدير</button>
             <button id="stopBtn" class="btn-danger" data-i18n="stop" disabled>إيقاف</button>
           </div>
@@ -63,11 +63,11 @@
         <section id="setupDrawer" class="setup-drawer" hidden>
           <div class="setup-row">
             <div class="field">
-              <label data-i18n="mode">أسلوب الجولة</label>
-              <div class="segmented">
-                <button class="mode-btn" data-mode="chat" data-i18n="modeChat">شات</button>
-                <button class="mode-btn is-active" data-mode="collaboration" data-i18n="modeCollab">تعاون</button>
-                <button class="mode-btn" data-mode="debate">Debate</button>
+              <span id="modeLabel" class="field-label" data-i18n="mode">أسلوب الجولة</span>
+              <div class="segmented" role="group" aria-labelledby="modeLabel">
+                <button class="mode-btn" data-mode="chat" data-i18n="modeChat" aria-pressed="false">شات</button>
+                <button class="mode-btn is-active" data-mode="collaboration" data-i18n="modeCollab" aria-pressed="true">تعاون</button>
+                <button class="mode-btn" data-mode="debate" data-i18n="modeDebate" aria-pressed="false">Debate</button>
               </div>
             </div>
             <div class="field field-sm">
@@ -77,102 +77,58 @@
             <div class="field field-sm">
               <label for="finalizer" data-i18n="finalizer">الخلاصة النهائية</label>
               <select id="finalizer">
-                <option value="claude">Claude</option>
-                <option value="codex">Codex</option>
                 <option value="none" data-i18n="none">بدون</option>
               </select>
             </div>
           </div>
 
-          <div class="agents-grid">
-            <article class="agent-card" data-agent="claude">
-              <div class="agent-head">
-                <span class="agent-avatar claude">A</span>
-                <div class="agent-id"><h3>Claude</h3><span id="claudeHealth" class="health" data-i18n="notChecked">لم يتم الفحص</span></div>
-                <label class="switch"><input id="claudeEnabled" type="checkbox" checked><span></span></label>
-              </div>
-              <div class="agent-fields">
-                <div class="field"><label data-i18n="command">Command</label>
-                  <div class="inline"><input id="claudeCommand" value="claude" /><button class="btn-mini check-cli" data-agent="claude" data-i18n="check">فحص</button></div>
-                </div>
-                <div class="field"><label>Model</label>
-                  <select id="claudeModel">
-                    <option value="default">default</option><option value="best">best</option>
-                    <option value="fable">fable</option><option value="sonnet" selected>sonnet</option>
-                    <option value="opus">opus</option><option value="haiku">haiku</option>
-                  </select>
-                </div>
-                <div class="field"><label>Effort</label>
-                  <select id="claudeEffort"><option>low</option><option>medium</option><option selected>high</option><option>xhigh</option><option>max</option><option>ultracode</option></select>
-                </div>
-                <div class="field"><label data-i18n="role">الدور</label><input id="claudeRole" value="شريك في الحل" /></div>
-              </div>
-              <div id="claudeRunState" class="run-state" data-i18n="ready">جاهز</div>
-            </article>
-
-            <article class="agent-card" data-agent="codex">
-              <div class="agent-head">
-                <span class="agent-avatar codex">C</span>
-                <div class="agent-id"><h3>Codex</h3><span id="codexHealth" class="health" data-i18n="notChecked">لم يتم الفحص</span></div>
-                <label class="switch"><input id="codexEnabled" type="checkbox" checked><span></span></label>
-              </div>
-              <div class="agent-fields">
-                <div class="field"><label data-i18n="command">Command</label>
-                  <div class="inline"><input id="codexCommand" value="codex" /><button class="btn-mini check-cli" data-agent="codex" data-i18n="check">فحص</button></div>
-                </div>
-                <div class="field"><label>Model</label>
-                  <div class="inline"><input id="codexModel" list="codexModels" placeholder="gpt-5.5" /><button id="loadCodexModels" class="btn-mini" data-i18n="load">تحميل</button></div>
-                  <datalist id="codexModels"></datalist>
-                </div>
-                <div class="field"><label>Effort</label>
-                  <select id="codexEffort"><option>minimal</option><option>low</option><option>medium</option><option selected>high</option><option>xhigh</option></select>
-                </div>
-                <div class="field"><label data-i18n="role">الدور</label><input id="codexRole" value="شريك في الحل" /></div>
-              </div>
-              <div id="codexRunState" class="run-state" data-i18n="ready">جاهز</div>
-            </article>
-          </div>
+          <div id="agentsGrid" class="agents-grid"></div>
         </section>
 
         <section id="execDrawer" class="setup-drawer" hidden>
           <div class="field">
-            <label data-i18n="projectLabel">مجلد المشروع (git)</label>
+            <label for="projectPath" data-i18n="projectLabel">مجلد المشروع (git)</label>
             <div class="inline">
               <input id="projectPath" placeholder="E:\\path\\to\\repo" />
               <button id="attachProject" class="btn-mini" data-i18n="attach">ربط</button>
             </div>
-            <div id="projectStatus" class="run-state"></div>
+            <div id="projectStatus" class="run-state" role="status" aria-live="polite"></div>
+            <button id="trustProject" class="btn-mini" hidden data-i18n="trustProject">الثقة في المشروع</button>
+          </div>
+          <div class="field">
+            <h2 class="field-label" data-i18n="connectors">موصّلات الأدوات (MCP)</h2>
+            <div id="connectorsList" class="connectors-list"></div>
           </div>
           <div class="setup-row">
-            <div class="field"><label data-i18n="executor">المنفّذ</label>
-              <select id="execExecutor"><option value="codex">Codex</option><option value="claude">Claude</option></select></div>
-            <div class="field"><label data-i18n="reviewer">المراجع</label>
-              <select id="execReviewer"><option value="claude">Claude</option><option value="codex">Codex</option></select></div>
-            <div class="field"><label data-i18n="permMode">وضع الصلاحية</label>
+            <div class="field"><label for="execExecutor" data-i18n="executor">المنفّذ</label>
+              <select id="execExecutor"></select></div>
+            <div class="field"><label for="execReviewer" data-i18n="reviewer">المراجع</label>
+              <select id="execReviewer"></select></div>
+            <div class="field"><label for="execMode" data-i18n="permMode">وضع الصلاحية</label>
               <select id="execMode">
-                <option value="edit" data-i18n="modeEdit">تعديل ملفات</option>
-                <option value="run" data-i18n="modeRun">تعديل + تشغيل أوامر</option>
-                <option value="full" data-i18n="modeFull">كامل + push/PR</option>
+                <option value="run" data-i18n="modeRun">تعديل + أوامر واختبارات محلية معزولة</option>
               </select></div>
           </div>
-          <div class="field"><label data-i18n="execTaskLabel">المهمة للمنفّذ</label>
+          <div class="field"><label for="execTask" data-i18n="execTaskLabel">المهمة للمنفّذ</label>
             <textarea id="execTask" rows="3" placeholder="اكتب المهمة اللي المنفّذ ينفّذها في المشروع..." data-i18n-ph="execTaskPh"></textarea></div>
           <div class="exec-actions">
-            <span id="execStatus" class="live-status"></span>
+            <span id="execStatus" class="live-status" role="status" aria-live="polite"></span>
             <button id="execStopBtn" class="btn-danger" data-i18n="stop" hidden>إيقاف</button>
             <button id="execRun" class="btn-primary" data-i18n="reviewRun">راجِع ونفّذ</button>
           </div>
         </section>
 
-        <div id="chat" class="conversation"></div>
+        <div id="chat" class="conversation" role="log" aria-live="off" aria-label="Conversation" data-i18n-aria-label="conversation"></div>
+        <div id="conversationAnnouncements" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></div>
 
         <footer class="composer">
           <div class="composer-box">
+            <label for="messageInput" class="sr-only" data-i18n="composerLabel">الرسالة</label>
             <textarea id="messageInput" rows="1" placeholder="اكتب الفكرة أو السؤال..." data-i18n-ph="composerPh"></textarea>
-            <button id="sendBtn" class="send-btn" title="ابدأ الجولة" data-i18n-title="send" disabled>↑</button>
+            <button id="sendBtn" class="send-btn" title="ابدأ الجولة" aria-label="ابدأ الجولة" data-i18n-title="send" data-i18n-aria-label="send" disabled>↑</button>
           </div>
           <div class="composer-hint">
-            <span id="liveStatus" class="live-status" data-i18n="ready">جاهز</span>
+            <span id="liveStatus" class="live-status" role="status" aria-live="polite" data-i18n="ready">جاهز</span>
             <span class="composer-kbd">Ctrl + Enter</span>
           </div>
         </footer>
@@ -180,11 +136,11 @@
     </main>
   </div>
 
-  <div id="onboardModal" class="modal-overlay hidden" role="dialog" aria-modal="true">
-    <div class="modal modal-lg">
-      <h2 data-i18n="onboardTitle">توصيل الوكلاء</h2>
-      <p class="modal-sub" data-i18n="onboardSub">دي حالة أدواتك المحلية. لو كلها خضراء إنت جاهز للتخطيط والتنفيذ.</p>
-      <div id="onboardList" class="onboard-list"></div>
+  <div id="onboardModal" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="onboardModalTitle" aria-describedby="onboardModalDescription">
+    <div class="modal modal-lg" tabindex="-1">
+      <h2 id="onboardModalTitle" data-i18n="onboardTitle">توصيل الوكلاء</h2>
+      <p id="onboardModalDescription" class="modal-sub" data-i18n="onboardSub">دي حالة أدواتك المحلية. لو كلها خضراء إنت جاهز للتخطيط والتنفيذ.</p>
+      <div id="onboardList" class="onboard-list" role="status" aria-live="polite"></div>
       <div class="modal-actions">
         <button id="onboardRefresh" class="btn-ghost" data-i18n="recheck">إعادة الفحص</button>
         <button id="onboardDone" class="btn-primary" data-i18n="start">ابدأ</button>
@@ -192,9 +148,9 @@
     </div>
   </div>
 
-  <div id="approveModal" class="modal-overlay hidden" role="dialog" aria-modal="true">
-    <div class="modal">
-      <h2 data-i18n="approveTitle">اعتماد التنفيذ</h2>
+  <div id="approveModal" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="approveModalTitle" aria-describedby="approveBody">
+    <div class="modal" tabindex="-1">
+      <h2 id="approveModalTitle" data-i18n="approveTitle">اعتماد التنفيذ</h2>
       <div id="approveBody" class="modal-sub"></div>
       <div class="modal-actions">
         <button id="approveCancel" class="btn-ghost" data-i18n="cancel">إلغاء</button>
@@ -204,32 +160,33 @@
   </div>
 
   <div id="newSessionModal" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="newSessionModalTitle">
-    <div class="modal modal-lg">
+    <div class="modal modal-lg" tabindex="-1">
       <h2 id="newSessionModalTitle" data-i18n="newSessionTitle">جلسة جديدة</h2>
       <div class="field"><label for="newSessionName" data-i18n="nameLabel">اسم الجلسة</label>
         <input id="newSessionName" type="text" placeholder="" data-i18n-ph="namePh" /></div>
 
-      <div class="field">
-        <label data-i18n="workLocation">مكان الشغل (اختياري)</label>
+      <div class="field" role="group" aria-labelledby="workLocationLabel">
+        <span id="workLocationLabel" class="field-label" data-i18n="workLocation">مكان الشغل (اختياري)</span>
         <div class="segmented" id="projPicker">
-          <button type="button" class="proj-tab is-active" data-proj="none" data-i18n="projNone">بدون</button>
-          <button type="button" class="proj-tab" data-proj="local" data-i18n="projLocal">فولدر لوكال</button>
-          <button type="button" class="proj-tab" data-proj="github" data-i18n="projGithub">GitHub</button>
+          <button type="button" class="proj-tab is-active" data-proj="none" data-i18n="projNone" aria-pressed="true">بدون</button>
+          <button type="button" class="proj-tab" data-proj="local" data-i18n="projLocal" aria-pressed="false">فولدر لوكال</button>
+          <button type="button" class="proj-tab" data-proj="github" data-i18n="projGithub" aria-pressed="false">GitHub</button>
         </div>
         <div id="projLocalPane" class="proj-pane" hidden>
-          <div class="fs-bar"><button type="button" id="fsUp" class="btn-mini">⬆</button><span id="fsPath" class="fs-path"></span></div>
+          <div class="fs-bar"><button type="button" id="fsUp" class="btn-mini" aria-label="Parent folder" data-i18n-aria-label="parentFolder">⬆</button><span id="fsPath" class="fs-path"></span></div>
           <div id="fsList" class="fs-list"></div>
         </div>
         <div id="projGithubPane" class="proj-pane" hidden>
+          <label for="repoSearch" class="sr-only" data-i18n="repoSearchLabel">البحث في مستودعات GitHub</label>
           <input id="repoSearch" type="text" placeholder="ابحث في ريبوهاتك..." data-i18n-ph="repoSearchPh" />
           <div id="repoList" class="fs-list"></div>
         </div>
-        <div id="projChosen" class="proj-chosen hidden"></div>
+        <div id="projChosen" class="proj-chosen hidden" role="status" aria-live="polite"></div>
       </div>
 
       <div class="field"><label for="newSessionFirst" data-i18n="firstLabel">الموضوع أو أول رسالة (اختياري)</label>
         <textarea id="newSessionFirst" rows="2" placeholder="" data-i18n-ph="composerPh"></textarea></div>
-      <div id="newSessionError" class="modal-error hidden"></div>
+      <div id="newSessionError" class="modal-error hidden" role="alert" aria-live="assertive"></div>
       <div class="modal-actions">
         <button id="newSessionCancel" class="btn-ghost" data-i18n="cancel">إلغاء</button>
         <button id="newSessionCreate" class="btn-primary" data-i18n="create">إنشاء</button>

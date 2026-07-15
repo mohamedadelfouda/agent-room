@@ -1,63 +1,93 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { parseConvergence, stripConvergence, assessRound } from "../../server/convergence.js";
+import { parseAgentControl, stripAgentControl, assessRound } from "../../server/convergence.js";
 
-test("parseConvergence reads converged (case-insensitive)", () => {
-  assert.deepEqual(parseConvergence("blah\nCONVERGENCE: converged"), { converged: true, open: "" });
-  assert.equal(parseConvergence("CONVERGENCE: CONVERGED").converged, true);
+function block(overrides = {}) {
+  return `<agent-control>${JSON.stringify({
+    convergence: "converged",
+    goalStatus: "satisfied",
+    substantiveDelta: false,
+    openPoints: [],
+    confidence: 0.9,
+    targetVersion: 2,
+    ...overrides,
+  })}</agent-control>`;
+}
+
+test("parseAgentControl accepts one valid final control block", () => {
+  const control = parseAgentControl(`reader-facing answer\n${block()}`);
+  assert.equal(control.valid, true);
+  assert.equal(control.converged, true);
+  assert.equal(control.goalStatus, "satisfied");
+  assert.equal(control.targetVersion, 2);
 });
 
-test("parseConvergence reads open with points", () => {
-  const r = parseConvergence("text\nCONVERGENCE: open — pricing and rollout");
-  assert.equal(r.converged, false);
-  assert.equal(r.open, "pricing and rollout");
+test("missing, malformed, embedded, and schema-invalid control fail closed", () => {
+  for (const text of [
+    "reader-facing answer only",
+    "<agent-control>{not json}</agent-control>",
+    `${block()}\nextra text`,
+    block({ confidence: 2 }),
+    block({ targetVersion: 0 }),
+    block({ openPoints: "scope" }),
+  ]) {
+    const control = parseAgentControl(text);
+    assert.equal(control.valid, false);
+    assert.equal(control.converged, false);
+    assert.equal(control.goalStatus, "incomplete");
+  }
 });
 
-test("parseConvergence treats a missing marker as open", () => {
-  assert.deepEqual(parseConvergence("just some text"), { converged: false, open: "" });
+test("the final control block is authoritative and all blocks are stripped", () => {
+  const text = `answer\n${block({ convergence: "open", goalStatus: "incomplete", openPoints: ["scope"] })}\ncorrection\n${block()}`;
+  assert.equal(parseAgentControl(text).convergence, "converged");
+  assert.equal(stripAgentControl(text), "answer\n\ncorrection");
 });
 
-test("parseConvergence tolerates markdown / leading chars", () => {
-  assert.equal(parseConvergence("**CONVERGENCE: converged**").converged, true);
-  assert.equal(parseConvergence("> CONVERGENCE: open — X").open, "X");
+test("assessRound stops only on aligned, complete, unchanged consensus", () => {
+  const controls = [parseAgentControl(block()), parseAgentControl(block())];
+  const result = assessRound(controls, 2);
+  assert.equal(result.canStop, true);
+  assert.equal(result.bothConverged, true);
+  assert.deepEqual(result.disagreements, []);
 });
 
-test("stripConvergence removes the marker line from the shown message", () => {
-  const out = stripConvergence("my answer\n\nCONVERGENCE: converged");
-  assert.equal(out.includes("CONVERGENCE"), false);
-  assert.equal(out, "my answer");
+test("assessRound does not stop while converged controls report open points", () => {
+  const control = parseAgentControl(block({ openPoints: ["still unresolved"] }));
+  const result = assessRound([control, control], 2);
+  assert.equal(result.canStop, false);
+  assert.deepEqual(result.disagreements, ["still unresolved"]);
 });
 
-test("assessRound: both converged -> stop early, no disagreements", () => {
-  const r = assessRound([{ converged: true, open: "" }, { converged: true, open: "" }]);
-  assert.equal(r.bothConverged, true);
-  assert.deepEqual(r.disagreements, []);
+test("assessRound never stops with missing, invalid, stale, incomplete, or changing input", () => {
+  const valid = parseAgentControl(block());
+  const cases = [
+    [valid],
+    [valid, null],
+    [valid, parseAgentControl("bad")],
+    [valid, parseAgentControl(block({ targetVersion: 1 }))],
+    [valid, parseAgentControl(block({ goalStatus: "incomplete" }))],
+    [valid, parseAgentControl(block({ substantiveDelta: true }))],
+    [valid, parseAgentControl(block({ convergence: "open", openPoints: ["budget"] }))],
+  ];
+  for (const controls of cases) assert.equal(assessRound(controls, 2).canStop, false);
 });
 
-test("assessRound: one open -> not converged, collects the open point", () => {
-  const r = assessRound([{ converged: true, open: "" }, { converged: false, open: "budget" }]);
-  assert.equal(r.bothConverged, false);
-  assert.deepEqual(r.disagreements, ["budget"]);
+test("a stale control cannot advance the current proposal version", () => {
+  const current = parseAgentControl(block({ targetVersion: 4, substantiveDelta: false }));
+  const stale = parseAgentControl(block({ targetVersion: 3, substantiveDelta: true }));
+  const assessment = assessRound([current, stale], 4);
+  assert.equal(assessment.versionAligned, false);
+  assert.equal(assessment.proposalChanged, false);
+  assert.equal(assessment.canStop, false);
 });
 
-test("assessRound: dedups disagreements and ignores empties / empty input", () => {
-  assert.deepEqual(assessRound([{ converged: false, open: "scope" }, { converged: false, open: "scope" }]).disagreements, ["scope"]);
-  assert.equal(assessRound([]).bothConverged, false);
-});
-
-test("parseConvergence takes the LAST marker, not the first (agent restating)", () => {
-  // A "converged ... but" then the real final verdict must not falsely stop early.
-  const r = parseConvergence("answer\nCONVERGENCE: converged\nactually:\nCONVERGENCE: open — pricing");
-  assert.equal(r.converged, false);
-  assert.equal(r.open, "pricing");
-});
-
-test("stripConvergence removes EVERY marker line (no leak)", () => {
-  const out = stripConvergence("answer\nCONVERGENCE: converged\nnote\nCONVERGENCE: open — pricing");
-  assert.equal(out.includes("CONVERGENCE"), false);
-});
-
-test("assessRound needs all agents present and >= 2 (never stop on one)", () => {
-  assert.equal(assessRound([{ converged: true, open: "" }]).bothConverged, false); // single agent
-  assert.equal(assessRound([{ converged: true, open: "" }, null]).bothConverged, false); // one missing
+test("assessRound deduplicates open points and identifies proposal changes", () => {
+  const result = assessRound([
+    parseAgentControl(block({ convergence: "open", goalStatus: "incomplete", openPoints: ["scope"], substantiveDelta: true })),
+    parseAgentControl(block({ convergence: "open", goalStatus: "incomplete", openPoints: ["scope", "budget"] })),
+  ], 2);
+  assert.deepEqual(result.disagreements, ["scope", "budget"]);
+  assert.equal(result.proposalChanged, true);
+  assert.equal(result.canStop, false);
 });

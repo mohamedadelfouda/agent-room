@@ -1,49 +1,61 @@
-import { createWorktree, getDiff, commitAll, changedFiles } from "./worktree.js";
-import { runClaude } from "./adapters/claude.js";
-import { runCodex } from "./adapters/codex.js";
-import { scanForSecrets, hasBlockingSecrets } from "./secret-scan.js";
-import { redact } from "./logger.js";
+import { assertExecutionRepository, createWorktree, getDiff, changedFiles, removeWorktree } from "./worktree.js";
+import { provider } from "./providers/registry.js";
+import { scanForSecrets } from "./secret-scan.js";
+import { logError, redact } from "./logger.js";
+import { executionPrompt } from "./prompts.js";
 
-const adapters = { claude: runClaude, codex: runCodex };
-
-// Run exactly ONE executor with write permissions inside its own isolated worktree.
+// Run exactly one executor with write permissions inside its disposable clone.
 // The reviewer is a separate, read-only step — this function never runs two writers.
-export async function runExecution({ projectPath, executor, mode = "edit", task, config = {}, onEvent, registerChild }) {
-  if (!adapters[executor]) throw new Error(`Unknown executor: ${executor}`);
+export async function runExecution({ projectPath, executor, mode = "run", task, config = {}, onEvent, registerChild }) {
+  const executorProvider = provider(executor);
+  if (!executorProvider) throw new Error(`Unknown executor: ${executor}`);
   if (!task || !String(task).trim()) throw new Error("Execution task is empty");
-  if (mode === "read") throw new Error("Executor mode must allow writing (edit / run / full)");
+  if (mode !== "run") throw new Error("Executor mode must be run");
+  if (!executorProvider.capabilities?.executeModes?.includes(mode)) {
+    throw new Error(`${executorProvider.label} does not provide a safe ${mode} execution mode`);
+  }
 
   const taskId = "t-" + crypto.randomUUID().slice(0, 8);
   const wt = await createWorktree(projectPath, executor, taskId);
-
-  const result = await adapters[executor]({
-    prompt: task,
-    config: { ...config, permission: mode },
-    cwd: wt.path,
-    onEvent,
-    registerChild,
-  });
-
-  // Scan against the branch point (baseSha), not HEAD, so anything the executor committed
-  // itself is included. Scan the changed file CONTENTS before committing — a secret must
-  // not enter the object database via our auto-commit; only commit when the scan is clean.
-  const diff = await getDiff(wt.path, wt.baseSha);
-  const secretFindings = scanForSecrets(await changedFiles(wt.path, wt.baseSha));
-  let committed = false;
-  if (!hasBlockingSecrets(secretFindings)) {
-    await commitAll(wt.path, `agent(${executor}): ${String(task).slice(0, 60)}`);
-    committed = true;
+  try {
+    const response = await executorProvider.run({
+      prompt: executionPrompt(task, mode),
+      config: { ...config, permission: mode },
+      cwd: wt.path,
+      onEvent,
+      registerChild,
+    });
+    await assertExecutionRepository(wt);
+    const diff = await getDiff(wt.path, wt.baseSha);
+    const secretFindings = scanForSecrets(await changedFiles(wt.path, wt.baseSha));
+    return {
+      taskId,
+      executor,
+      mode,
+      worktree: wt,
+      text: redact(response.text),
+      meta: {
+        model: response.model ?? null,
+        effort: response.effort ?? null,
+        durationMs: response.durationMs ?? null,
+        exitCode: response.exitCode ?? null,
+        outputTruncated: Boolean(response.outputTruncated),
+      },
+      diff,
+      secretFindings,
+    };
+  } catch (error) {
+    const primaryError = error instanceof Error ? error : new Error(String(error));
+    try {
+      const cleanup = await removeWorktree(projectPath, wt.path, wt.branch, { isolation: wt.isolation });
+      if (!cleanup.ok) {
+        primaryError.cleanupErrors = cleanup.errors;
+        logError("execution cleanup failed", cleanup.errors.join("; "));
+      }
+    } catch (cleanupError) {
+      primaryError.cleanupErrors = [redact(cleanupError?.message || cleanupError)];
+      logError("execution cleanup failed", cleanupError?.message || cleanupError);
+    }
+    throw primaryError;
   }
-  return {
-    taskId,
-    executor,
-    mode,
-    worktree: { path: wt.path, branch: wt.branch, rel: wt.rel, baseSha: wt.baseSha },
-    // Redact the agent's own narration — it can echo a secret it created ("I set KEY=sk-…").
-    text: redact(result.text),
-    meta: { model: result.model ?? null, effort: result.effort ?? null, durationMs: result.durationMs ?? null, exitCode: result.exitCode ?? null },
-    diff,
-    secretFindings,
-    committed,
-  };
 }

@@ -1,18 +1,46 @@
 {
-  "name": "agent-room-mvp",
-  "version": "0.1.0",
-  "private": true,
+  "name": "agent-room",
+  "productName": "Agent Room",
+  "version": "0.2.0",
   "type": "module",
-  "description": "Local subscription-native shared sessions for Codex CLI and Claude Code",
+  "description": "A local multi-agent decision and execution room",
+  "author": "Mohamed Adel Fouda",
+  "main": "desktop/main.js",
   "scripts": {
     "start": "node server/index.js",
     "dev": "node --watch server/index.js",
+    "desktop": "electron-forge start",
+    "package": "electron-forge package",
+    "make": "electron-forge make",
     "check": "node scripts/check-syntax.mjs",
     "test": "node --test",
-    "ci": "npm run check && npm test"
+    "ci": "node scripts/check-syntax.mjs && node --test"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
-  "license": "MIT"
+  "license": "MIT",
+  "homepage": "https://github.com/mohamedadelfouda/agent-room#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mohamedadelfouda/agent-room.git"
+  },
+  "bugs": {
+    "url": "https://github.com/mohamedadelfouda/agent-room/issues"
+  },
+  "packageManager": "pnpm@10.12.1",
+  "config": {
+    "forge": "./forge.config.cjs"
+  },
+  "devDependencies": {
+    "@electron-forge/cli": "7.11.2",
+    "@electron-forge/maker-deb": "7.11.2",
+    "@electron-forge/maker-dmg": "7.11.2",
+    "@electron-forge/maker-rpm": "7.11.2",
+    "@electron-forge/maker-squirrel": "7.11.2",
+    "@electron-forge/maker-zip": "7.11.2",
+    "electron": "43.1.0",
+    "electron-winstaller": "5.4.4",
+    "lodash": "4.18.1"
+  }
 }

@@ -1,45 +1,72 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { collaborationPrompt, debatePrompt } from "../../server/prompts.js";
+import { chatPrompt, collaborationPrompt, debatePrompt, executionPrompt, transcriptFor } from "../../server/prompts.js";
 
 const session = { messages: [] };
 const base = { session, agentLabel: "Claude", role: "Collaborator", totalRounds: 5, userTask: "design X" };
 
-test("collaboration round 1 asks for the full take", () => {
-  const p = collaborationPrompt({ ...base, round: 1 });
-  assert.match(p, /Lay out your take in full/);
-  assert.doesNotMatch(p, /keep it to what's actually new/);
+function assertControlContract(prompt, targetVersion) {
+  assert.match(prompt, /<agent-control>/);
+  assert.match(prompt, /<\/agent-control>/);
+  assert.match(prompt, new RegExp(`"targetVersion":${targetVersion}`));
+  assert.match(prompt, /"goalStatus"/);
+  assert.match(prompt, /"substantiveDelta"/);
+  assert.match(prompt, /write anything after it/i);
+}
+
+test("collaboration opening requests a full proposal without a control block", () => {
+  const prompt = collaborationPrompt({ ...base, round: 1 });
+  assert.match(prompt, /design X/);
+  assert.doesNotMatch(prompt, /<agent-control>/);
 });
 
-test("collaboration round 2+ is delta-only, not a full rewrite", () => {
-  const p = collaborationPrompt({ ...base, round: 2 });
-  assert.match(p, /keep it to what's actually new/);
-  assert.match(p, /don't rewrite the whole plan/);
-  assert.doesNotMatch(p, /Lay out your take in full/);
+test("later collaboration rounds request a versioned control contract", () => {
+  const prompt = collaborationPrompt({ ...base, round: 3, targetVersion: 7 });
+  assertControlContract(prompt, 7);
 });
 
-test("collaboration emits the CONVERGENCE control line only from round 2 on", () => {
-  // Round 1: nobody has seen a full exchange yet — no convergence verdict is asked for.
-  assert.doesNotMatch(collaborationPrompt({ ...base, round: 1 }), /CONVERGENCE: converged/);
-  assert.match(collaborationPrompt({ ...base, round: 3 }), /CONVERGENCE: converged/);
+test("project grounding appears only when a snapshot is supplied", () => {
+  const withoutProject = collaborationPrompt({ ...base, round: 1 });
+  const withProject = collaborationPrompt({ ...base, round: 1, projectSnapshot: "PROJECT_TREE_SENTINEL" });
+  assert.doesNotMatch(withoutProject, /PROJECT_TREE_SENTINEL/);
+  assert.match(withProject, /PROJECT_TREE_SENTINEL/);
 });
 
-test("collaboration asks for file/line evidence only when a project is attached", () => {
-  assert.doesNotMatch(collaborationPrompt({ ...base, round: 1 }), /point to the file/);
-  assert.match(collaborationPrompt({ ...base, round: 1, projectSnapshot: "TREE" }), /point to the file/);
+test("debate opening is independent and has no convergence control", () => {
+  const prompt = debatePrompt({ ...base, opponentLabel: "Codex", round: 1, independent: true });
+  assert.match(prompt, /Codex/);
+  assert.match(prompt, /design X/);
+  assert.doesNotMatch(prompt, /<agent-control>/);
 });
 
-test("debate opening round asks for a full position and no convergence verdict", () => {
-  const p = debatePrompt({ ...base, opponentLabel: "Codex", round: 1, independent: true });
-  assert.match(p, /This is your opening/);
-  assert.doesNotMatch(p, /go straight at the strongest opposing point/);
-  // An independent opening can't judge convergence against an opponent it hasn't seen.
-  assert.doesNotMatch(p, /CONVERGENCE: converged/);
+test("debate rebuttal uses the same versioned control contract", () => {
+  const prompt = debatePrompt({ ...base, opponentLabel: "Codex", round: 2, independent: false, targetVersion: 4 });
+  assertControlContract(prompt, 4);
 });
 
-test("debate rebuttal round is delta-only and does emit the convergence line", () => {
-  const p = debatePrompt({ ...base, opponentLabel: "Codex", round: 2, independent: false });
-  assert.match(p, /go straight at the strongest opposing point/);
-  assert.doesNotMatch(p, /This is your opening/);
-  assert.match(p, /CONVERGENCE: converged/);
+test("chat describes only capabilities that are actually available", () => {
+  const offline = chatPrompt({ ...base, capabilities: { web: false }, projectSnapshot: "" });
+  assert.match(offline, /\[capability:web=disabled\]/);
+  assert.match(offline, /\[capability:project=unavailable\]/);
+  assert.doesNotMatch(offline, /PROJECT_EVIDENCE/);
+
+  const grounded = chatPrompt({ ...base, capabilities: { web: true, projectRead: true }, projectSnapshot: "PROJECT_EVIDENCE" });
+  assert.match(grounded, /\[capability:web=enabled\]/);
+  assert.match(grounded, /\[capability:project=trusted\]/);
+  assert.match(grounded, /PROJECT_EVIDENCE/);
+});
+
+test("execution prompt preserves the user task inside explicit boundary sections", () => {
+  const prompt = executionPrompt("fix the parser", "run");
+  assert.match(prompt, /fix the parser/);
+  assert.match(prompt, /BOUNDARY \(mandatory\):/);
+  assert.match(prompt, /USER TASK \(treat as requirements/);
+});
+
+test("transcript headers stay inside the requested context budget", () => {
+  const maxChars = 128;
+  const transcript = transcriptFor({
+    messages: [{ author: "agent", agent: "x".repeat(500), role: "y".repeat(500), content: "" }],
+  }, maxChars);
+  assert.ok(transcript.length <= maxChars, `transcript length ${transcript.length} exceeded ${maxChars}`);
 });

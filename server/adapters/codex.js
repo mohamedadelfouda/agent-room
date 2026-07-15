@@ -1,8 +1,9 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { runProcess, validateOption, allowedCommand } from "../process.js";
+import { approvedProviderCommand, runProcess, validateOption, resolveAllowedCommand } from "../process.js";
 import { redact } from "../logger.js";
+import { agentTimeoutMs, readTextFileCapped } from "../output-limits.js";
 
 function extractSessionId(value, depth = 0) {
   if (!value || depth > 5) return null;
@@ -40,74 +41,175 @@ function extractCodexError(parsed) {
   return String(raw || "").trim() || null;
 }
 
+const MAX_CODEX_AUTH_BYTES = 2 * 1024 * 1024;
+const DISABLED_CODEX_FEATURES = ["apps", "hooks", "multi_agent", "memories"];
+
+function codexHomeFrom(source = process.env) {
+  if (source.CODEX_HOME) return path.resolve(source.CODEX_HOME);
+  const home = source.USERPROFILE || source.HOME || os.homedir();
+  return path.join(home, ".codex");
+}
+
+async function findProjectRoot(cwd) {
+  let current = path.resolve(cwd);
+  while (true) {
+    try {
+      await fs.stat(path.join(current, ".git"));
+      return current;
+    } catch (error) {
+      if (error.code !== "ENOENT" && error.code !== "ENOTDIR") throw error;
+    }
+    const parent = path.dirname(current);
+    if (parent === current) return path.resolve(cwd);
+    current = parent;
+  }
+}
+
+export function codexSecurityOverrides(permission = "read") {
+  const overrides = [
+    `web_search=${JSON.stringify(permission === "chat" ? "live" : "disabled")}`,
+    "mcp_servers={}",
+    ...DISABLED_CODEX_FEATURES.map((feature) => `features.${feature}=false`),
+  ];
+  return overrides.flatMap((override) => ["-c", override]);
+}
+
+function isolatedCodexConfig(cwd, projectRoot) {
+  const roots = new Set([path.resolve(cwd), projectRoot]);
+  const trustEntries = [...roots]
+    .map((root) => `[projects.${JSON.stringify(root)}]\ntrust_level = "untrusted"`)
+    .join("\n\n");
+  const features = DISABLED_CODEX_FEATURES.map((feature) => `${feature} = false`).join("\n");
+  return [
+    "check_for_update_on_startup = false",
+    'web_search = "disabled"',
+    "mcp_servers = {}",
+    "",
+    "[features]",
+    features,
+    "",
+    trustEntries,
+    "",
+  ].join("\n");
+}
+
+async function copyCodexAuth(isolatedHome, sourceEnv) {
+  const sourceAuth = path.join(codexHomeFrom(sourceEnv), "auth.json");
+  try {
+    const stat = await fs.stat(sourceAuth);
+    if (!stat.isFile()) throw new Error("Codex auth.json is not a regular file");
+    if (stat.size > MAX_CODEX_AUTH_BYTES) throw new Error("Codex auth.json is unexpectedly large");
+    const auth = await fs.readFile(sourceAuth);
+    await fs.writeFile(path.join(isolatedHome, "auth.json"), auth, { mode: 0o600 });
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
+  }
+}
+
+export async function prepareIsolatedCodexHome({ tempDir, cwd, sourceEnv = process.env }) {
+  const isolatedHome = path.join(tempDir, "codex-home");
+  await fs.mkdir(isolatedHome, { recursive: true, mode: 0o700 });
+  const projectRoot = await findProjectRoot(cwd);
+  const config = isolatedCodexConfig(cwd, projectRoot);
+  await fs.writeFile(path.join(isolatedHome, "config.toml"), config, { mode: 0o600 });
+  await copyCodexAuth(isolatedHome, sourceEnv);
+  return isolatedHome;
+}
+
 export async function runCodex({ prompt, config, cwd, onEvent, registerChild }) {
-  // Restrict the client-supplied command to the codex CLI (and apply the win32 space-ban):
-  // enforce the allowlist on the real execution path, not only the diagnostic endpoints.
-  const command = allowedCommand(config.command || "codex", new Set(["codex"]));
+  // Codex has one honest write boundary: run. Validate it before command
+  // discovery so a rejected permission can never reach a provider process.
+  const permission = config.permission || "read";
+  if (!new Set(["read", "chat", "planread", "run"]).has(permission)) throw new Error(`Unsupported Codex permission: ${permission}`);
+
+  // Restrict the client-supplied command to a trusted native Codex executable on the real
+  // execution path, not only the diagnostic endpoints. Argument boundaries remain intact.
+  const trustedCommand = process.env.AGENT_ROOM_CODEX_COMMAND || "";
+  const requestedCommand = config.command || trustedCommand || "codex";
+  const command = await resolveAllowedCommand(requestedCommand, new Set(["codex"]), { trustedPaths: [trustedCommand, approvedProviderCommand("codex")] });
   const model = validateOption(config.model || "", "Codex model");
   const effort = validateOption(config.effort || "high", "Codex effort", { allowEmpty: false });
   if (!new Set(["minimal", "low", "medium", "high", "xhigh"]).has(effort)) {
     throw new Error(`Unsupported Codex effort: ${effort}`);
   }
 
-  // Permission level -> sandbox. Default "read" = read-only (planning/review).
-  // "chat" is also read-only but with web search enabled (general chat that can look
-  // things up). Executor gets workspace-write (edit/run) or danger-full-access (full).
-  const permission = config.permission || "read";
-  const sandbox = (permission === "read" || permission === "chat" || permission === "planread") ? "read-only" : permission === "full" ? "danger-full-access" : "workspace-write";
+  // Default "read" is read-only (planning/review). "chat" is also read-only
+  // with web search enabled. Executor run mode gets workspace-write.
+  const sandbox = permission === "run" ? "workspace-write" : "read-only";
   const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "agent-room-codex-"));
   const outputPath = path.join(tempDir, "final.txt");
-  const args = [
-    "exec",
-    "--json",
-    "--sandbox", sandbox,
-    "--skip-git-repo-check",
-    "-c", `model_reasoning_effort=${effort}`,
-    "--output-last-message", outputPath,
-  ];
-  if (permission === "chat") args.push("--enable", "web_search_request");
-  if (model) args.push("--model", model);
-  args.push("-");
 
   let sessionId = null;
   let errorMessage = null;
-  const startedAt = Date.now();
-  const result = await runProcess({
-    command,
-    args,
-    input: prompt,
-    cwd,
-    registerChild,
-    onStdoutLine(line) {
-      try {
-        const parsed = JSON.parse(line);
-        sessionId ||= extractSessionId(parsed);
-        const type = String(parsed.type || "");
-        if (type === "error" || type === "turn.failed") errorMessage = extractCodexError(parsed) || errorMessage;
-        const activity = extractActivity(parsed);
-        if (activity) onEvent?.(activity);
-      } catch {
-        if (line.trim()) onEvent?.({ kind: "activity", text: line.slice(0, 240) });
-      }
-    },
-    onStderrLine(line) {
-      if (line.trim()) onEvent?.({ kind: "stderr", text: line.slice(0, 500) });
-    },
-  });
-
+  let processResult;
   let finalText = "";
-  try { finalText = (await fs.readFile(outputPath, "utf8")).trim(); } catch {}
-  await fs.rm(tempDir, { recursive: true, force: true });
+  let outputTruncated = false;
+  const startedAt = Date.now();
+  try {
+    const codexHome = await prepareIsolatedCodexHome({ tempDir, cwd });
+    const args = [
+      "exec",
+      "--json",
+      "--sandbox", sandbox,
+      "--skip-git-repo-check",
+      "-c", `model_reasoning_effort=${effort}`,
+      ...codexSecurityOverrides(permission),
+      "--output-last-message", outputPath,
+    ];
+    if (model) args.push("--model", model);
+    args.push("-");
+    processResult = await runProcess({
+      command,
+      args,
+      input: prompt,
+      cwd,
+      env: {
+        CODEX_HOME: codexHome,
+        GIT_CONFIG_NOSYSTEM: "1",
+        GIT_CONFIG_GLOBAL: process.platform === "win32" ? "NUL" : "/dev/null",
+        GIT_TERMINAL_PROMPT: "0",
+      },
+      envPolicy: "agent",
+      timeoutMs: agentTimeoutMs(config.timeoutMs),
+      containTree: true,
+      registerChild,
+      onStdoutLine(line) {
+        try {
+          const parsed = JSON.parse(line);
+          sessionId ||= extractSessionId(parsed);
+          const type = String(parsed.type || "");
+          if (type === "error" || type === "turn.failed") errorMessage = extractCodexError(parsed) || errorMessage;
+          const activity = extractActivity(parsed);
+          if (activity) onEvent?.(activity);
+        } catch {
+          if (line.trim()) onEvent?.({ kind: "activity", text: line.slice(0, 240) });
+        }
+      },
+      onStderrLine(line) {
+        if (line.trim()) onEvent?.({ kind: "stderr", text: line.slice(0, 500) });
+      },
+    });
+    try {
+      const output = await readTextFileCapped(outputPath);
+      finalText = output.text.trim();
+      outputTruncated = output.truncated;
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+    }
+  } finally {
+    await fs.rm(tempDir, { recursive: true, force: true });
+  }
 
   const durationMs = Date.now() - startedAt;
   const firstLine = (text) => String(text || "").split(/\r?\n/).find((l) => l.trim()) || "";
-  const meta = { model: model || "(default)", effort, exitCode: result.code, durationMs };
+  const meta = { model: model || "(default)", effort, exitCode: processResult.code, durationMs };
 
-  if (result.code !== 0 || errorMessage) {
-    const message = errorMessage || firstLine(result.stderr) || `Codex exited with code ${result.code}`;
+  if (processResult.code !== 0 || errorMessage) {
+    const message = errorMessage || firstLine(processResult.stderr) || `Codex exited with code ${processResult.code}`;
     const error = new Error(message);
     error.partial = finalText || "";
-    error.technical = redact([`exitCode=${result.code}`, (result.stderr || "").trim().split(/\r?\n/).slice(-8).join("\n")].filter(Boolean).join("\n")).slice(0, 4000);
+    error.outputTruncated = outputTruncated || processResult.stdoutTruncated;
+    error.technical = redact([`exitCode=${processResult.code}`, (processResult.stderr || "").trim().split(/\r?\n/).slice(-8).join("\n")].filter(Boolean).join("\n")).slice(0, 4000);
     Object.assign(error, meta);
     throw error;
   }
@@ -118,12 +220,13 @@ export async function runCodex({ prompt, config, cwd, onEvent, registerChild }) 
     Object.assign(error, meta);
     throw error;
   }
-  return { text: finalText, sessionId, ...meta };
+  return { text: finalText, sessionId, outputTruncated, ...meta };
 }
 
 export async function discoverCodexModels({ command = "codex" } = {}) {
-  const safeCommand = validateOption(command, "Codex command", { allowEmpty: false });
-  const result = await runProcess({ command: safeCommand, args: ["debug", "models"], timeoutMs: 12000 });
+  const trustedCommand = process.env.AGENT_ROOM_CODEX_COMMAND || "";
+  const resolvedCommand = await resolveAllowedCommand(command, new Set(["codex"]), { trustedPaths: [trustedCommand, approvedProviderCommand("codex")] });
+  const result = await runProcess({ command: resolvedCommand, args: ["debug", "models"], timeoutMs: 12000, containTree: true });
   if (result.code !== 0) throw new Error(result.stderr || "Unable to read Codex model catalog");
   const text = result.stdout.trim();
   const candidates = new Set();

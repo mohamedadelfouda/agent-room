@@ -8,6 +8,8 @@ import { getDiff, changedFiles } from "../../server/worktree.js";
 import { scanForSecrets, hasBlockingSecrets } from "../../server/secret-scan.js";
 
 const git = (cwd, ...args) => execFileSync("git", args, { cwd, stdio: ["ignore", "pipe", "pipe"] }).toString();
+const openAiFixture = ["sk", "-abcdefghij1234567890xyz"].join("");
+const awsAccessKeyFixture = ["AK", "IAIOSFODNN7EXAMPLE"].join("");
 
 test("changed files are scanned; a secret is caught and getDiff writes no commit", async () => {
   const dir = mkdtempSync(join(tmpdir(), "ar-secret-"));
@@ -21,7 +23,7 @@ test("changed files are scanned; a secret is caught and getDiff writes no commit
 
     // Simulate an executor's changes: one clean file + one secret-bearing file.
     writeFileSync(join(dir, "app.js"), "export const x = 1;\n");
-    writeFileSync(join(dir, ".env"), "OPENAI_API_KEY=sk-abcdefghij1234567890xyz\n");
+    writeFileSync(join(dir, ".env"), `OPENAI_API_KEY=${openAiFixture}\n`);
 
     const diff = await getDiff(dir);
     assert.match(diff.files, /app\.js/);
@@ -99,7 +101,7 @@ test("a secret the executor commits ITSELF is still caught (scan vs base SHA)", 
 
     // The executor writes a secret and commits it itself — HEAD moves past it, so a
     // HEAD-based scan would see nothing. The base-SHA scan must still catch it.
-    writeFileSync(join(dir, "deploy.sh"), "AWS_KEY=AKIAIOSFODNN7EXAMPLE\n");
+    writeFileSync(join(dir, "deploy.sh"), `AWS_KEY=${awsAccessKeyFixture}\n`);
     git(dir, "add", "-A");
     git(dir, "commit", "-qm", "wip");
 
@@ -123,11 +125,11 @@ test("a secret in a non-ASCII filename is read and scanned", async () => {
     git(dir, "commit", "-qm", "init");
     const baseSha = git(dir, "rev-parse", "HEAD").trim();
 
-    writeFileSync(join(dir, "café.js"), "const k = 'sk-abcdefghij1234567890xyz';\n");
+    writeFileSync(join(dir, "café.js"), `const k = '${openAiFixture}';\n`);
     const files = await changedFiles(dir, baseSha);
     const hit = files.find((f) => f.path.includes("caf"));
     assert.ok(hit, "non-ASCII filename must be listed");
-    assert.ok(hit.content.includes("sk-"), "its content must actually be read");
+    assert.ok(hit.content.includes(openAiFixture), "its content must actually be read");
     assert.ok(hasBlockingSecrets(scanForSecrets(files)));
   } finally {
     rmSync(dir, { recursive: true, force: true });

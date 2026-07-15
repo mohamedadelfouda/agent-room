@@ -3,7 +3,8 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const LOG_DIR = path.resolve(__dirname, "..", "logs");
+const RUNTIME_ROOT = process.env.AGENT_ROOM_RUNTIME_DIR ? path.resolve(process.env.AGENT_ROOM_RUNTIME_DIR) : path.resolve(__dirname, "..");
+const LOG_DIR = path.join(RUNTIME_ROOT, "logs");
 try { fs.mkdirSync(LOG_DIR, { recursive: true }); } catch {}
 const LOG_FILE = path.join(LOG_DIR, "server.log");
 
@@ -16,7 +17,13 @@ export function redact(input) {
   let text = String(input ?? "");
   if (CURRENT_USER) text = text.split(CURRENT_USER).join("<user>");
   return text
+    .replace(/(https?:\/\/)[^\s/@:]+:[^\s/@]+@/gi, "$1<redacted>@")
     .replace(/sk-[A-Za-z0-9_\-]{10,}/g, "<redacted-key>")
+    .replace(/\bgh[pousr]_[A-Za-z0-9]{20,}\b/g, "<redacted-key>")
+    .replace(/\bgithub_pat_[A-Za-z0-9_]{20,}\b/g, "<redacted-key>")
+    .replace(/\bAKIA[0-9A-Z]{16}\b/g, "<redacted-key>")
+    .replace(/\bxox[baprs]-[A-Za-z0-9-]{10,}\b/g, "<redacted-key>")
+    .replace(/\bAIza[0-9A-Za-z_-]{35}\b/g, "<redacted-key>")
     .replace(/(Bearer\s+)[A-Za-z0-9._\-]+/gi, "$1<redacted>")
     .replace(/([A-Za-z0-9_]*(?:TOKEN|APIKEY|API_KEY|KEY|SECRET|PASSWORD|AUTH)[A-Za-z0-9_]*\s*[=:]\s*)("?)[^"\s]+\2/gi, "$1<redacted>")
     .replace(/([A-Za-z]:\\Users\\)[^\\\/\s"]+/g, "$1<user>")
@@ -39,7 +46,4 @@ export function log(level, msg, extra) {
   try { stream.write(text); } catch {}
 }
 
-export const logInfo = (msg, extra) => log("INFO", msg, extra);
-export const logWarn = (msg, extra) => log("WARN", msg, extra);
 export const logError = (msg, extra) => log("ERROR", msg, extra);
-export function logPath() { return LOG_FILE; }

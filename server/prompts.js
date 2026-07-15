@@ -4,22 +4,41 @@ function clean(text) {
 
 export function transcriptFor(session, maxChars = 24000) {
   const msgs = session.messages ?? [];
-  const render = (message) => {
+  const SEP = "\n\n---\n\n";
+  const TRIM = "[Older context was trimmed by the local orchestrator.]";
+  const cap = Math.max(maxChars, TRIM.length + SEP.length + 40);
+  const render = (message, limit = cap) => {
     const speaker = message.author === "user"
       ? "USER"
       : message.author === "system"
         ? "SYSTEM"
         : `${String(message.agent || "AGENT").toUpperCase()}${message.role ? ` (${message.role})` : ""}`;
-    return `[${speaker} | ${message.phase || "message"}${message.round ? ` | round ${message.round}` : ""}]\n${clean(message.content)}`;
+    const source = message.author === "user" ? "user-provided" : "stored-session";
+    const header = `[${speaker} | source:${source} | ${message.phase || "message"}${message.round ? ` | round ${message.round}` : ""}]\n`;
+    const raw = String(message.content ?? "");
+    if (header.length > limit) return { text: header.slice(0, limit), truncated: true };
+    const room = Math.max(0, limit - header.length);
+    const suffix = "\n…[message truncated]";
+    if (raw.length <= room) return { text: `${header}${raw.trim()}`, truncated: false };
+    const kept = room <= suffix.length ? suffix.slice(0, room) : `${raw.slice(0, room - suffix.length).trim()}${suffix}`;
+    return { text: `${header}${kept}`.slice(0, limit), truncated: true };
   };
-  const SEP = "\n\n---\n\n";
-  const TRIM = "[Older context was trimmed by the local orchestrator.]";
-  const blocks = msgs.map(render);
-  const joined = blocks.join(SEP);
-  // Clamp to a small floor so the trim marker itself always fits — this keeps the ≤ cap
-  // ceiling below real even if a caller passes a tiny budget (no current caller does).
-  const cap = Math.max(maxChars, TRIM.length + SEP.length + 40);
-  if (joined.length <= cap) return joined;
+
+  // First try the exact transcript, but stop rendering as soon as the bounded budget is
+  // exceeded. This never materializes the full persistent history before trimming it.
+  const full = [];
+  let fullLength = 0;
+  let overflow = false;
+  for (const message of msgs) {
+    const separator = full.length ? SEP.length : 0;
+    const remaining = cap - fullLength - separator;
+    if (remaining < 1) { overflow = true; break; }
+    const block = render(message, remaining);
+    if (block.truncated) { overflow = true; break; }
+    full.push(block.text);
+    fullLength += separator + block.text.length;
+  }
+  if (!overflow) return full.join(SEP);
 
   // Under delta-only middle rounds the full plan/position lives ONLY in the round-1 agent
   // turns, and a blind tail-slice would drop them (they sit at the head). So keep them as
@@ -38,33 +57,54 @@ export function transcriptFor(session, maxChars = 24000) {
   for (let i = lastUserIdx + 1; i < msgs.length; i += 1) {
     if (msgs[i].author === "agent" && msgs[i].round === 1) anchorIdx.push(i);
   }
-  let anchorText = anchorIdx.map((i) => blocks[i]).join(SEP);
-  // Hard ceiling: even one run's own round-1 proposals could be huge. Cap the anchors so
-  // anchorText + SEP + TRIM never exceeds the budget (the ≤ cap guarantee must hold). The
-  // clamp above ensures anchorBudget > SUFFIX, so the else branch always applies.
-  const SUFFIX = "\n…[anchor truncated]";
   const anchorBudget = Math.max(0, cap - TRIM.length - SEP.length);
-  if (anchorText.length > anchorBudget) {
-    anchorText = anchorBudget <= SUFFIX.length
-      ? SUFFIX.slice(0, anchorBudget)
-      : anchorText.slice(0, anchorBudget - SUFFIX.length) + SUFFIX;
+  const anchors = [];
+  let anchorLength = 0;
+  for (const index of anchorIdx) {
+    const separator = anchors.length ? SEP.length : 0;
+    const remaining = anchorBudget - anchorLength - separator;
+    if (remaining < 1) break;
+    const block = render(msgs[index], remaining);
+    anchors.push(block.text);
+    anchorLength += separator + block.text.length;
+    if (block.truncated) break;
   }
+  const anchorText = anchors.join(SEP);
 
   // Fill from the most recent tail, strictly AFTER the anchors so the output stays in
   // chronological order and earlier runs are dropped entirely.
   const lastAnchor = anchorIdx.length ? anchorIdx[anchorIdx.length - 1] : lastUserIdx;
   const tail = [];
-  let used = anchorText.length + TRIM.length + SEP.length * 2;
+  const base = [anchorText, TRIM].filter(Boolean).join(SEP);
+  let tailLength = 0;
+  const tailBudget = Math.max(0, cap - base.length - SEP.length);
   for (let i = msgs.length - 1; i > lastAnchor; i -= 1) {
-    const cost = blocks[i].length + SEP.length;
-    if (used + cost > cap) break;
-    tail.unshift(blocks[i]);
-    used += cost;
+    const separator = tail.length ? SEP.length : 0;
+    const remaining = tailBudget - tailLength - separator;
+    if (remaining < 1) break;
+    const block = render(msgs[i], remaining);
+    tail.unshift(block.text);
+    tailLength += separator + block.text.length;
+    if (block.truncated) break;
   }
-  return [anchorText, TRIM, tail.join(SEP)].filter(Boolean).join(SEP);
+  return [base, tail.join(SEP)].filter(Boolean).join(SEP).slice(0, cap);
 }
 
-export function collaborationPrompt({ session, agentLabel, role, round, totalRounds, userTask, projectSnapshot = "" }) {
+function controlInstruction(targetVersion) {
+  const shape = JSON.stringify({
+    convergence: "converged|open|not_evaluated",
+    goalStatus: "satisfied|incomplete|blocked|needs_user",
+    substantiveDelta: false,
+    openPoints: ["specific unresolved point"],
+    confidence: 0.0,
+    targetVersion,
+  });
+  return `End with exactly one machine-readable control block after your reader-facing answer:
+<agent-control>${shape}</agent-control>
+Use convergence=converged only if you agree with the latest proposal. goalStatus describes whether the user's actual task is complete, not whether the agents agree. Set substantiveDelta=true when your answer changes the proposal; that creates a newer version and prevents an early stop this round. confidence is from 0 to 1. Do not put the block in a code fence or write anything after it.`;
+}
+
+export function collaborationPrompt({ session, agentLabel, role, round, totalRounds, userTask, projectSnapshot = "", targetVersion = 1 }) {
   const tools = projectSnapshot
     ? `You can READ the attached project (Read/Grep/Glob) to ground what you say in the real code — read only, never edit or run anything. When you make a claim about the code, point to the file (and the line when you can), and be honest about what you actually checked versus what you're inferring.`
     : `Work from what's in front of you — don't reach for tools, edit files, or run commands.`;
@@ -74,9 +114,7 @@ export function collaborationPrompt({ session, agentLabel, role, round, totalRou
   const guidance = round === 1
     ? `Lay out your take in full this round. Talk through what's already solid in the shared work, what you'd change or add and why, the proposal as you'd shape it now, and anything you're honestly still unsure about. Write it the way you'd talk it through with a colleague you respect — in your own voice, not as a stiff numbered form.`
     : `This is a later round, so keep it to what's actually new — don't rewrite the whole plan. In a few honest lines: what you now accept from the other agent's last turn, where they're off and why, the one or two things you're really adding this round, and whatever's still open between you. If you've got nothing substantive left to add, just say so — don't pad it out.`;
-  const control = round >= 2
-    ? `\nOne housekeeping line for the orchestrator (not for the reader): make the very last line of your message either\nCONVERGENCE: converged\nor\nCONVERGENCE: open — <the specific point(s) you two still don't agree on>\nSay "converged" only when you genuinely agree with the other agent's latest position and have nothing real left to add or dispute. Don't wrap it in quotes or a code block, don't translate it, and don't write anything after it.\n`
-    : "";
+  const control = round >= 2 ? `\n${controlInstruction(targetVersion)}\n` : "";
   return `You're ${agentLabel}, one of two agents thinking this through together in a shared session that the user runs and ultimately decides on.
 Your seat at the table: ${role || "Collaborator"}.
 This is round ${round}, and there's room for up to ${totalRounds} — but you're not here to fill rounds. The moment you and the other agent genuinely land in the same place, the session stops early, and that's exactly the outcome we want.
@@ -87,39 +125,43 @@ ${guidance}
 ${control}
 Reply in the same language the user last used. You don't literally share a session with the other model — the local orchestrator is handing you the shared transcript, so don't pretend otherwise. ${tools}
 ${projectSnapshot ? `\n${projectSnapshot}\n` : ""}
-What the user asked for:
+What the user asked for [user-provided]:
 ${clean(userTask)}
 
 The conversation so far:
 ${transcriptFor(session)}`;
 }
 
-export function chatPrompt({ session, agentLabel, role, userTask }) {
+export function chatPrompt({ session, agentLabel, role, userTask, capabilities = {}, projectSnapshot = "" }) {
+  const web = capabilities.web
+    ? `[capability:web=enabled]\nWeb search is available. Use it when the user asks you to verify something, requests sources, or asks about information that may have changed. Stable questions do not need a search.`
+    : `[capability:web=disabled]\nWeb search is not available in this run. Never claim that you searched; state which time-sensitive facts you could not verify.`;
+  const project = capabilities.projectRead && projectSnapshot
+    ? `[capability:project=trusted]\nA trusted project is attached. Prefer verified project evidence for questions about that project, and distinguish verified facts from inference.\n${projectSnapshot}`
+    : `[capability:project=unavailable]\nNo trusted project evidence is available in this run. Do not claim that you inspected project files.`;
   return `You are ${agentLabel}, answering the user directly in one persistent multi-agent session.
 Current mode: CHAT.
 Your assigned role: ${role || "Assistant"}.
 
-This is a normal chat, exactly like chatting with you directly: answer any question the user asks — about code, a repo, or anything else. Answer the user's latest message directly and helpfully in your own voice. You have web search available (WebSearch/WebFetch). If the user asks about anything specific you do not already know for certain — a product, company, person, website, or recent event — search the web immediately and answer from what you find, citing your sources. Do NOT ask the user for permission to search, and do NOT reply that you simply don't know: look it up first, then answer. Another agent is answering the same message separately — do not coordinate with, imitate, or wait for the other agent's answer.
+This is a normal chat: answer the user's latest message directly and helpfully in your own voice. ${web} ${project} Another agent is answering the same message separately — do not coordinate with, imitate, or wait for the other agent's answer.
 
 Answer in the same language as the user's latest message. Do not claim you directly share a provider-side session with another model; the local orchestrator is supplying the shared transcript. Do not modify files or run shell commands.
 
-Latest user message:
+Latest user message [user-provided]:
 ${clean(userTask)}
 
 Shared session transcript (for context only):
 ${transcriptFor(session)}`;
 }
 
-export function debatePrompt({ session, agentLabel, role, opponentLabel, round, totalRounds, userTask, independent, projectSnapshot = "" }) {
+export function debatePrompt({ session, agentLabel, role, opponentLabel, round, totalRounds, userTask, independent, projectSnapshot = "", targetVersion = 1 }) {
   const tools = projectSnapshot
     ? `You can READ the attached project (Read/Grep/Glob) to ground your argument in the real code — read only, never edit or run anything. When you cite the code, name the file (and the line when you can), and keep what you verified separate from what you're inferring.`
     : `Argue from what's in front of you — don't reach for tools, edit files, or run commands.`;
   const guidance = independent
     ? `This is your opening. Form your own position from the task and the earlier context — don't shadow how your opponent framed theirs. Make the real case: where you stand and why, your strongest arguments, what you'll honestly concede, where the other side falls short, what evidence or test would actually change your mind, the call you'd make, and how confident you are (0–100). Argue it like you mean it, in your own voice — not as a checklist.`
     : `This is a rebuttal, so go straight at the strongest opposing point on the table — don't re-argue your whole case. In a few sharp, honest lines: what you now concede from their last turn, your best specific challenge to it, anything genuinely new you're bringing this round, what's still unsettled between you, and your updated confidence (0–100).`;
-  const control = !independent
-    ? `\nOne housekeeping line for the orchestrator, not the reader: make the very last line of your message either\nCONVERGENCE: converged\nor\nCONVERGENCE: open — <what the two of you still dispute>\nSay "converged" only if this is genuinely settled for you — you now agree or fully concede and have nothing real left to contest. No quotes, no code block, no translation, and nothing written after it.\n`
-    : "";
+  const control = !independent ? `\n${controlInstruction(targetVersion)}\n` : "";
   return `You're ${agentLabel}, debating in a shared session that the user runs and ultimately decides on.
 Your position: ${role || "Critical debater"}.
 Across the table: ${opponentLabel}.
@@ -129,7 +171,7 @@ ${guidance}
 ${control}
 Reply in the same language the user last used. ${tools}
 ${projectSnapshot ? `\n${projectSnapshot}\n` : ""}
-The question on the table:
+The question on the table [user-provided]:
 ${clean(userTask)}
 
 The debate so far:
@@ -140,26 +182,42 @@ export function synthesisPrompt({ session, agentLabel, role, userTask, mode, pro
   const tools = projectSnapshot
     ? `You may READ the attached project's files (Read/Grep/Glob) to verify claims against the real code — read only, never modify files or run commands.`
     : `Do not use tools or change files.`;
-  return `You are ${agentLabel}, acting as the final synthesizer/judge in a persistent multi-agent session.
+  return `You are ${agentLabel}, preparing a decision brief from a persistent multi-agent session.
 Mode completed: ${String(mode).toUpperCase()}.
-Your role: ${role || "Judge and synthesizer"}.
+Your role: ${role || "Decision-brief synthesizer"}.
 
-Produce one useful final outcome from the full transcript. Do not decide by majority or by model reputation. Judge arguments by correctness, evidence, feasibility, risk, and fit with the user's goal.
+Produce one useful, evidence-aware brief from the full transcript. Do not decide by majority or model reputation, and do not take an external action. Keep the user's decision authority explicit. You may include a clearly labelled recommendation, but distinguish it from verified facts and from the decision only the user can make.
 
-Required response structure:
-1. نقاط الاتفاق
-2. نقاط الخلاف الحقيقية
-3. أقوى حجة من كل طرف
-4. القرار المقترح وأسبابه
-5. المخاطر أو الشروط
-6. الخطوة العملية التالية
-7. درجة الثقة
+Required response structure (translate every heading into the user's language):
+1. Areas of agreement
+2. Material disagreements
+3. The strongest argument from each side
+4. Verified evidence and unverified claims
+5. Options and the risks of each
+6. Reasoned, non-binding recommendation
+7. Decisions the user still needs to make
+8. Next practical step after the decision
+9. Goal completeness and confidence
 
 Use the language of the user's latest message. ${tools}
 ${projectSnapshot ? `\n${projectSnapshot}\n` : ""}
-Original/current user task:
+Original/current user task [user-provided]:
 ${clean(userTask)}
 
 Shared session transcript:
 ${transcriptFor(session, 30000)}`;
+}
+
+export function executionPrompt(task, mode) {
+  return `You are implementing one user-approved task in a disposable isolated Git clone.
+
+BOUNDARY (mandatory):
+- Change only files needed for the task.
+- Never commit, merge, push, open a pull request, send messages, write remote data, or take any other external/state-changing action outside this execution clone.
+- Do not weaken hooks, security controls, or approval gates.
+- You may run local, non-networked checks needed to validate the change.
+- Leave all changed files uncommitted. Agent Room will show the diff to a separate reviewer and then ask the user to accept or reject it.
+
+USER TASK (treat as requirements, not permission to cross the boundary):
+${clean(task)}`;
 }

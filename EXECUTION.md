@@ -1,51 +1,31 @@
-# طبقة التنفيذ — Execute & Review (منفّذ واحد)
+# Execute → Review → Decide
 
-> **للاستخدام الشخصي الآن بكامل الصلاحيات.** التدرّج بالصلاحيات (Read Only إلخ) نؤجّله لنسخة الناس.
+Agent Room permits one writer per execution. The executor and reviewer must be different enabled providers.
 
-## القاعدة الذهبية (غير قابلة للكسر)
-الوكيلان **يخطّطان معاً**. عند التنفيذ **المستخدم يختار وكيلاً واحداً يُنفّذ + وكيلاً واحداً يراجع**.
-**لا يملك اثنان صلاحية الكتابة/التشغيل في نفس اللحظة تحت أي وضع.** المحرّك يفرض هذا تقنياً، لا بالاتفاق.
+## Lifecycle
 
-## قرارات المستخدم (مثبّتة)
-1. **التنفيذ في git worktree داخل مجلد المشروع**، والمنفّذ يملك صلاحية **رفع PR على GitHub** (gh authenticated).
-2. **شاشة موافقة قبل التنفيذ** (الخطة + الأوامر/التغييرات المتوقعة → اعتمد).
-3. **أوضاع تشغيل متعددة مثل تطبيق Claude** (يختار المستخدم مستوى حرية المنفّذ).
-4. **المستخدم يختار المنفّذ صراحةً** كل مرة ("فلان ينفّذ").
+1. The user attaches and explicitly trusts a Git project.
+2. Agent Room captures the target branch, base SHA, Git identity, remote fingerprint, and publication-related Git configuration.
+3. Agent Room creates a disposable local clone with separate Git objects, refs, and configuration. The executor changes that clone and is instructed not to commit; any executor commits are collapsed back to the captured base before acceptance.
+4. Agent Room captures an immutable Git tree, builds a bounded diff, and scans that exact tree for secrets.
+5. The reviewer receives bounded read-only access to the execution clone and may inspect complete files. Claude uses Agent Room's host-brokered project tools; providers with a native sandbox use their read-only project mode.
+6. The UI shows the executor output, diff, review, scan findings, and Accept/Reject controls.
+7. On acceptance, Agent Room revalidates the project and clone, scans the previously reviewed tree again, creates a commit from that exact tree with the captured project-owner identity, and imports it under a private accepted ref in the project repository.
+8. Local acceptance uses compare-and-swap ref updates plus a locked index/working-tree refresh, so a moved branch or user edit fails closed. Pull-request publication is offered only for a canonical GitHub origin, pushes the exact accepted ref, and opens or finds the matching GitHub PR.
 
-## المرحلتان
-```text
-1) التخطيط (الاثنان، قراءة فقط) — تعاون/ديبيت، يقرآن المشروع، مخرج: خطة + موافقة المستخدم.
-2) التنفيذ:
-   المستخدم يختار: المنفّذ + المراجع + وضع الصلاحية.
-   → شاشة موافقة (الخطة + النطاق المتوقع).
-   → المنفّذ يعمل في worktree معزول بالصلاحيات المختارة (كتابة/أوامر/push/PR).
-   → المراجع (قراءة فقط) يراجع الـdiff.
-   → المستخدم: اعتمد (merge/PR) أو ارفض (احذف الـworktree).
-```
+Rejection deletes the disposable clone. A blocking secret deletes the same clone, including loose or packed secret objects, without writing them into the project repository.
 
-## أوضاع الصلاحية (Permission modes — مثل Claude app)
-| الوضع | ملفات | أوامر | شبكة/Push/PR | Claude | Codex |
-|---|---|---|---|---|---|
-| **قراءة** (Reviewer دائماً) | ❌ | ❌ | ❌ | `--disallowedTools "*"` أو Read/Grep/Glob فقط | `--sandbox read-only` |
-| **تعديل** | ✅ | ❌ | ❌ | أدوات تحرير فقط، بلا Bash | workspace-write (بلا شبكة) |
-| **تنفيذ** | ✅ | ✅ | ❌ | كل الأدوات، معزولة في الـworktree | `--sandbox workspace-write --ask-for-approval never` |
-| **كامل** | ✅ | ✅ | ✅ (push/PR) | bypass permissions داخل الـworktree | `--sandbox danger-full-access --ask-for-approval never` |
+## Permission modes
 
-*(الأعلام تُتحقّق فعلياً وقت البناء لكل إصدار CLI.)*
+| Mode | Local file edits | Local commands | Network publication |
+| --- | --- | --- | --- |
+| Reviewer/planning | No | Read-only commands when enforced by the provider sandbox; otherwise bounded broker reads only | No |
+| `run` | Yes | Yes, in the provider's isolated workspace mode | No |
 
-## فرض القاعدة (Single-writer)
-- في مرحلة التنفيذ يعمل **المنفّذ فقط** بصلاحيات الكتابة. المراجع لا يبدأ إلا **بعد** انتهاء المنفّذ، وبصلاحية قراءة فقط.
-- المحرّك يرفض أي محاولة لتشغيل وكيلين بصلاحية كتابة في نفس السيشن/الوقت.
-- كل منفّذ له **worktree خاص** تحت `.agent-workspaces/<agent>/<taskId>` — لا تصادم.
+The provider registry controls which execution modes a provider may expose. Codex currently exposes one honest `run` boundary because its workspace sandbox permits both edits and local commands; Agent Room does not present prompt-only "edit without commands" as a security mode. Claude currently exposes no execution mode and remains available for collaboration and read-only review. There is no `full` mode. Merge and PR actions are acceptance actions owned by Agent Room, not executor permissions.
 
-## تسلسل البناء (كل جزء يُختبر فعلياً قبل التالي)
-1. **Worktree Manager:** create/remove/list + `git diff` — يُختبر على repo تجريبي. ← *نبدأ هنا*
-2. **Project attachment:** ربط السيشن بمجلد مشروع (git repo) + endpoint + UI.
-3. **Permission modes:** خريطة الأعلام لكل CLI، متحقَّق منها فعلياً.
-4. **Execute flow (backend):** اختيار منفّذ/مراجع/وضع → worktree → تشغيل المنفّذ بالصلاحيات → التقاط diff.
-5. **Approval + Diff UI:** شاشة موافقة + عارض diff + اعتماد/رفض.
-6. **Reviewer pass:** المراجع (قراءة فقط) على الـdiff.
-7. **Accept:** merge/push/PR (وضع كامل) عبر gh.
-8. **دمج الصلابة:** timeout classification + retry داخل التنفيذ (جولات طويلة).
+## Acceptance failures and retries
 
-**تُختبر فعلياً:** تنفيذ ناجح، منع تشغيل منفّذين، PR ينجح، رفض يحذف الـworktree، والمراجع قراءة فقط.
+If a merge or pull-request side effect fails after the accepted commit is stored, the execution enters `accepted_pending_merge` or `accepted_pending_pr`. Retrying reuses the same accepted commit; it does not re-run the executor or create a different change.
+
+Acceptance is rejected when the base branch, HEAD, Git author identity, remote, hooks/signing configuration, or main working-tree cleanliness has drifted. Run the execution again from the new base instead of silently merging stale work.

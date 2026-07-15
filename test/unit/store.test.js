@@ -1,12 +1,15 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { rm } from "node:fs/promises";
+import { readFile, rm, stat, writeFile, utimes } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { createSession, saveSession, getSession, addMessage } from "../../server/store.js";
+import { createSession, saveSession, getSession, addMessage, listSessions } from "../../server/store.js";
 
 const sessionsDir = join(dirname(fileURLToPath(import.meta.url)), "../../data/sessions");
-const cleanup = (id) => rm(join(sessionsDir, `${id}.json`), { force: true }).catch(() => {});
+const cleanup = (id) => Promise.all([
+  rm(join(sessionsDir, `${id}.json`), { force: true }),
+  rm(join(sessionsDir, `${id}.summary.json`), { force: true }),
+]).catch(() => {});
 
 test("concurrent saves of one session store one complete payload — never torn or mixed", async () => {
   const s = await createSession("concurrency-test");
@@ -37,4 +40,58 @@ test("concurrent addMessage calls on one session don't drop appends", async () =
   } finally {
     await cleanup(s.id);
   }
+});
+
+test("session listing reads compact summaries instead of full transcript payloads", async () => {
+  const session = await createSession("summary-index-test");
+  try {
+    const mainPath = join(sessionsDir, `${session.id}.json`);
+    await writeFile(mainPath, "not valid JSON", "utf8");
+    // Keep the cached summary newer than the deliberately damaged transcript.
+    // A newer transcript must be parsed instead, so stale summaries cannot hide data.
+    await utimes(mainPath, new Date(0), new Date(0));
+    const summaries = await listSessions();
+    assert.equal(summaries.find((item) => item.id === session.id)?.title, "summary-index-test");
+  } finally { await cleanup(session.id); }
+});
+
+test("session listing treats equal summary and transcript mtimes as stale", async () => {
+  const session = await createSession("equal-mtime-before");
+  try {
+    const mainPath = join(sessionsDir, `${session.id}.json`);
+    const summaryPath = join(sessionsDir, `${session.id}.summary.json`);
+    const stored = JSON.parse(await readFile(mainPath, "utf8"));
+    stored.title = "equal-mtime-after";
+    await writeFile(mainPath, JSON.stringify(stored, null, 2), "utf8");
+    const sameTime = new Date("2020-01-01T00:00:00.000Z");
+    await Promise.all([utimes(mainPath, sameTime, sameTime), utimes(summaryPath, sameTime, sameTime)]);
+
+    const summaries = await listSessions();
+    assert.equal(summaries.find((item) => item.id === session.id)?.title, "equal-mtime-after");
+  } finally { await cleanup(session.id); }
+});
+
+test("session persistence enforces the 24 MiB UTF-8 hard limit", async () => {
+  const session = await createSession("byte-budget-test");
+  try {
+    session.messages = Array.from({ length: 200 }, (_, index) => ({ id: String(index), content: "😀".repeat(50000) }));
+    await saveSession(session);
+    const info = await stat(join(sessionsDir, `${session.id}.json`));
+    assert.ok(info.size <= 24 * 1024 * 1024, `stored session was ${info.size} bytes`);
+  } finally { await cleanup(session.id); }
+});
+
+test("history retention never drops a terminal execution whose cleanup is pending", async () => {
+  const session = await createSession("cleanup-retention-test");
+  try {
+    const completedAt = new Date().toISOString();
+    session.executions = [
+      { taskId: "pending-cleanup", status: "merged", cleanupPending: true, worktree: { path: "pending", branch: "agent/codex/pending" } },
+      ...Array.from({ length: 60 }, (_, index) => ({ taskId: `clean-${index}`, status: "merged", cleanupPending: false, cleanupCompletedAt: completedAt })),
+    ];
+    await saveSession(session);
+    const saved = await getSession(session.id);
+    assert.ok(saved.executions.some((record) => record.taskId === "pending-cleanup"));
+    assert.equal(saved.executions.filter((record) => record.taskId.startsWith("clean-")).length, 50);
+  } finally { await cleanup(session.id); }
 });

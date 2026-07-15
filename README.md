@@ -1,88 +1,95 @@
 # Agent Room
 
-A local, private workspace where two AI coding agents (**Claude Code** + **Codex CLI**)
-work in **one persistent session** — using *your own subscriptions* — and **you stay the
-decision‑maker**.
+Agent Room is a local desktop workspace where multiple coding-agent CLIs share evidence, challenge one proposal, and leave the final decision to the user. It currently ships provider adapters for Claude Code and Codex CLI.
 
-They plan together (collaborate or debate). When it's time to act, **you pick one executor
-and one reviewer**. Only the executor writes; the reviewer reads. Never two writers.
+The product is built around four contracts:
 
-Runs on `127.0.0.1` with **no cloud backend of its own** and **no API keys** — it uses your
-Claude and Codex subscriptions. It does **not** send your data to any Agent Room server.
-It **does** send your prompts and project context to Anthropic and OpenAI through their
-official `claude` / `codex` CLIs — exactly as if you ran those tools yourself. Sessions are
-stored locally as plain‑text JSON.
+- Both agents receive the same bounded evidence pack from a trusted project.
+- Early stopping requires agreement on the latest proposal version **and** a satisfied user goal.
+- One executor changes a disposable local Git clone; a separate agent reviews the captured tree read-only.
+- The accepted project commit, merge, pull request, email, issue, or database write happens only after an explicit user decision. Disposable executor commits, if any, are collapsed before acceptance.
 
----
+## What is different
 
-## Why
+Agent Room is not a side-by-side chat wrapper. It records proposal versions and machine-readable goal status, shows why rounds stopped, preserves unresolved points, and keeps a decision log. Its Execute → Review → Decide path creates the accepted Git commit only after approval and rechecks the immutable Git tree for secrets immediately before that commit.
 
-Juggling two AI agents means copy‑pasting a plan back and forth between tools. Agent Room
-puts them in one shared session, keeps the context when you switch how they collaborate,
-and gives you a safe way to let one of them actually do the work.
+Optional connector tools use the same rule. Read actions require per-session opt-in. State-changing GitHub, Gmail, and Supabase tools create a pending proposal; they do not perform the action until the user approves it in Agent Room. Installed desktop builds can configure Gmail and Supabase through OS-backed encrypted storage; source deployments can use documented environment variables.
 
-## Features
+## Install the desktop app
 
-**Plan together**
-- One session, switchable modes: **Collaboration** and **Debate**, context kept across switches
-- Each agent's model and effort are configurable per round
-- Clean errors, run metadata (model / effort / duration), connection status
-- Bidirectional UI: Arabic (RTL) and English (LTR), agent output stays in your language
+Tagged releases build native artifacts on all three platforms:
 
-**Execute & Review (single writer)**
-- You choose **one executor** and **one reviewer** — two agents never write at once
-- The executor works in an isolated **git worktree** with a permission mode you pick:
-  `edit` (files) · `run` (files + commands) · `full` (+ push / PR)
-- **Approval before any write**, then a diff you review
-- Accept = merge locally, or **open a GitHub Pull Request** (via `gh`); reject = discard the worktree
-- The reviewer is always read‑only
+- Windows: `Agent Room-<version> Setup.exe` (Squirrel installer)
+- macOS: `.dmg` and `.zip`
+- Linux: `.deb` and `.rpm`
 
-**Setup**
-- First‑run onboarding auto‑detects the Claude / Codex CLIs and your GitHub auth
+Download them from [GitHub Releases](https://github.com/mohamedadelfouda/agent-room/releases). Public builds need the maintainer's signing credentials to avoid Windows SmartScreen and macOS Gatekeeper warnings; see [desktop distribution](docs/DESKTOP.md).
 
-## Requirements
+The installed app is one click: it starts its private loopback server on a free port, opens one secured Electron window, and stores sessions/logs under the operating system's application-data directory.
 
-- **Node.js 20+**
-- **Claude Code** — installed and logged in (`claude`)
-- **Codex CLI** — installed and logged in (`codex login`)
-- **GitHub CLI** (`gh`) — logged in, only if you want to open PRs
+## Required agent CLIs
 
-No npm dependencies. Nothing to install beyond the CLIs above.
+Agent Room uses your existing CLI subscriptions; it does not proxy them through an Agent Room cloud backend.
 
-## Run
+- Claude Code, installed and signed in
+- Codex CLI, installed and signed in
+- Git, with a user name and email configured for projects you want to execute against
+- GitHub CLI (`gh`), signed in only for GitHub browsing, issues, or pull requests
+
+Windows command discovery accepts native `.exe`/`.com` binaries. Arbitrary `.cmd`, `.bat`, and PowerShell shims are not executed through a shell.
+
+Prompts and project excerpts are sent to the selected model providers through their official CLIs. Session JSON is stored locally and can contain the user's text and agent output.
+
+## Run from source
+
+Node.js 22 or newer is required.
 
 ```bash
-npm start
+corepack enable
+pnpm install --frozen-lockfile
+pnpm desktop
 ```
 
-Then open http://127.0.0.1:3210
+For the browser-only local server:
 
-On Windows you can also double‑click `start-windows.bat`; on macOS, `start-macos.command`.
+```bash
+pnpm start
+```
 
-## How it works
+Source checkouts also include `start-windows.bat`, `start-macos.command`, and `start-linux.sh`. These launch the browser-only server and require Node.js 22+.
 
-- A small local Node server (`server/`) drives the official CLIs as child processes, streams
-  their output, and stores each session as JSON under `data/sessions/` (git‑ignored).
-- The UI (`public/`) is plain HTML / CSS / JS — no build step.
-- Execution runs in a git **worktree** under `.agent-workspaces/<agent>/<task>`, so the
-  executor's **code changes** are kept off your working tree until you accept. A worktree
-  isolates Git changes — it is **not** a security sandbox (the process can still read other
-  files, the network, and env); read‑only planning and per‑run permissions are what limit
-  what an agent can do.
+## Validate
 
-See [DESIGN.md](DESIGN.md) for the design system and [EXECUTION.md](EXECUTION.md) for the
-execute‑and‑review model.
+```bash
+pnpm check
+pnpm test
+pnpm make
+```
 
-## Safety
+`pnpm make` creates artifacts only for the current operating system. The GitHub workflow [desktop-build.yml](.github/workflows/desktop-build.yml) builds Windows, macOS, and Linux artifacts on their native runners.
 
-- Agents default to **read‑only** for planning; write access is granted only to the one
-  executor you pick, for one run, inside an isolated worktree.
-- Secrets and personal paths are redacted from **logs and error details**. **Session files are
-  not redacted:** an agent's final answer — and, if a run fails after it has already streamed
-  some output, its visible partial text (clearly labeled as partial) — is saved verbatim to
-  `data/sessions/*.json` (which also holds `session.messages`), so those files can contain
-  whatever the agents wrote, including sensitive text. Agents' step‑by‑step reasoning is never
-  persisted.
+## Safety boundaries
+
+- Project files are unavailable to agents until the user explicitly trusts the project fingerprint.
+- Planning and review are read-only. Agent process environments use an allowlist and do not inherit arbitrary token/key variables.
+- Output, line size, final-response files, and each agent call are bounded.
+- Execution is offered only by providers that can enforce the requested local boundary. The current registry exposes one `run` mode for Codex because its workspace sandbox permits both edits and local commands; it does not advertise a prompt-only edit mode. Claude is collaboration/review-only until its CLI can enforce an equivalent write boundary.
+- There is no executor `full` or pre-approved publish mode. Pull requests are created only from the acceptance endpoint.
+- Connector credentials remain in the host and are excluded from agent, GitHub, and publication subprocess environments and prompts.
+- Claude project reads use Agent Room's bounded host broker; Claude cannot combine project files with web or connector tools in the same call. Codex project calls run without web or connectors.
+- Stored sessions retain up to 200 messages and decisions, 50 terminal executions, and 100 terminal connector actions while preserving pending records. Nested metadata and total session size are bounded.
+- Each execution uses a disposable clone with its own Git objects, refs, and configuration, so rejected or secret-bearing objects never enter the project repository. The clone is still not a general operating-system sandbox or a limit on every possible filesystem read. See [SECURITY.md](SECURITY.md) for the threat model and reporting instructions.
+
+## Extend Agent Room
+
+- [Product principles](PRODUCT.md)
+- [Architecture](docs/ARCHITECTURE.md)
+- [Add a provider or model](docs/PROVIDERS.md)
+- [Connector and MCP approval contract](docs/CONNECTORS.md)
+- [Execute → Review → Decide](EXECUTION.md)
+- [Contributing](CONTRIBUTING.md)
+- [Code of Conduct](CODE_OF_CONDUCT.md)
+- [Security Policy](SECURITY.md)
 
 ## License
 

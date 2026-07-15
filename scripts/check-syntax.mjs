@@ -1,6 +1,6 @@
-// Syntax-check every JS file under server/ and public/ (replaces the old 3-file check).
+// Syntax-check every runtime JS file under server/, public/, and desktop/.
 // Runs `node --check` on each file; exits non-zero if any fails.
-// Uses a manual recursive walk (no fs.globSync) so it works on Node 20+.
+// Uses a manual recursive walk to keep the check independent of package dependencies.
 import { readdirSync } from "node:fs";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
@@ -21,7 +21,7 @@ function walk(dir) {
   return out;
 }
 
-const files = [...walk("server"), ...walk("public")].sort();
+const files = [...walk("server"), ...walk("public"), ...walk("desktop"), "forge.config.cjs"].sort();
 
 let failed = 0;
 for (const file of files) {
