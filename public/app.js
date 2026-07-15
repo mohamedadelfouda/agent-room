@@ -1711,7 +1711,12 @@ function renderApprovalGate() {
   if (!host) return;
   host.innerHTML = "";
   const execution = pendingExecution();
-  if (!execution) return;
+  if (!execution) {
+    // No execution awaiting a decision: once the room reaches the decision phase,
+    // offer a one-click bridge into the Execute drawer, prefilled with the outcome.
+    if (derivePhase() === "decision") renderProceedToExecute(host);
+    return;
+  }
   const executor = bdi(providerInfo(execution.executor).label, "ltr");
   const card = document.createElement("div");
   card.className = "approval";
@@ -1728,6 +1733,30 @@ function renderApprovalGate() {
   if (currentSession.project?.canOpenPr) addButton("btn-ghost", t("openPr"), () => acceptExec(execution.taskId, "pr"));
   addButton("btn-danger", t("reject"), () => rejectExec(execution.taskId));
   host.appendChild(card);
+}
+function renderProceedToExecute(host) {
+  const card = document.createElement("div");
+  card.className = "proceed";
+  card.innerHTML = `<div><strong>${esc(t("proceedTitle"))}</strong><p>${esc(t("proceedSub"))}</p></div><div class="proceed-actions"></div>`;
+  const button = document.createElement("button");
+  button.className = "btn-primary";
+  button.textContent = t("proceedExecute");
+  button.onclick = proceedToExecute;
+  card.querySelector(".proceed-actions").appendChild(button);
+  host.appendChild(card);
+}
+// Bridge from a converged discussion into execution: open the Execute drawer and
+// seed the task with the agreed outcome. The user still reviews and runs it, then
+// the normal execution approval gate (merge / PR / reject) follows.
+function proceedToExecute() {
+  const report = latestFinalReport();
+  const conclusion = report ? String(report.content || "").trim() : "";
+  $("execDrawer").hidden = false;
+  $("execToggle").setAttribute("aria-expanded", "true");
+  $("setupDrawer").hidden = true;
+  $("setupToggle").setAttribute("aria-expanded", "false");
+  if (conclusion && !$("execTask").value.trim()) $("execTask").value = `${t("proceedTaskPrefix")}\n\n${conclusion}`;
+  $("execTask").focus();
 }
 function renderLiveStrip() {
   const strip = $("liveStrip");

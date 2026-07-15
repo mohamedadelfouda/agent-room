@@ -303,6 +303,11 @@ textarea { resize: none; line-height: 1.55; }
 .approval p { color: var(--muted); font-size: 12px; margin-top: 2px; }
 .approval-actions { display: flex; gap: 8px; flex-wrap: wrap; }
 
+.proceed { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 14px; border: 1px solid var(--accent-line); border-radius: var(--radius); background: linear-gradient(180deg, var(--accent-soft), transparent 70%), var(--surface); }
+.proceed strong { display: block; font-size: 13px; }
+.proceed p { color: var(--muted); font-size: 12px; margin-top: 2px; }
+.proceed-actions { flex: none; }
+
 /* ============ Conversation ============ */
 .conversation { overflow-y: auto; overflow-x: hidden; padding: 8px 4px 20px; display: flex; flex-direction: column; gap: 16px; }
 .msg { width: 100%; min-width: 0; text-align: start; }
