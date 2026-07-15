@@ -27,7 +27,6 @@
   --rail-w: 272px;
   --workflow-w: 200px;
   --context-w: 300px;
-  --measure: 130ch;
   --radius: 10px;
   --shadow: 0 14px 40px rgba(0, 0, 0, 0.4);
   --ease: cubic-bezier(0.16, 1, 0.3, 1);
@@ -305,7 +304,7 @@ textarea { resize: none; line-height: 1.55; }
 .approval-actions { display: flex; gap: 8px; flex-wrap: wrap; }
 
 /* ============ Conversation ============ */
-.conversation { overflow-y: auto; overflow-x: hidden; padding: 8px 4px 20px; display: flex; flex-direction: column; gap: 16px; max-width: var(--measure); }
+.conversation { overflow-y: auto; overflow-x: hidden; padding: 8px 4px 20px; display: flex; flex-direction: column; gap: 16px; }
 .msg { width: 100%; min-width: 0; text-align: start; }
 .msg-user { align-self: stretch; }
 .msg-user .msg-body { background: color-mix(in srgb, var(--accent) 12%, var(--surface)); border: 1px solid color-mix(in srgb, var(--accent) 30%, var(--line-soft)); border-radius: 12px; padding: 13px 16px; }
@@ -386,7 +385,7 @@ details.tech pre { margin-top: 8px; background: var(--bg); border: 1px solid var
 .context-empty { margin: auto; padding: 24px 12px; display: grid; gap: 8px; place-items: center; text-align: center; color: var(--faint); }
 .context-empty-mark { font-size: 28px; opacity: .55; }
 .context-empty p { font-size: 12px; max-width: 24ch; line-height: 1.5; }
-.context-card { background: var(--surface); border: 1px solid var(--line-soft); border-radius: 10px; overflow: hidden; }
+.context-card { flex: none; background: var(--surface); border: 1px solid var(--line-soft); border-radius: 10px; overflow: hidden; }
 .context-card summary { list-style: none; cursor: pointer; padding: 10px 12px; font-size: 12px; font-weight: 700; display: flex; align-items: center; gap: 8px; color: var(--text); }
 .context-card summary::-webkit-details-marker { display: none; }
 .context-card summary::after { content: "▾"; margin-inline-start: auto; color: var(--faint); font-size: 11px; transition: transform .15s var(--ease); }
