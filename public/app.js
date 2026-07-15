@@ -895,7 +895,7 @@ function renderContextColumn() {
 
   const runMessages = latestRunMessages();
   const discussion = runMessages.filter((message) => message.author === "agent" && ["collaboration", "opening", "rebuttal"].includes(message.phase));
-  const finalReport = [...runMessages].reverse().find((message) => ["converged", "needs_user", "blocked_external", "needs_more_rounds"].includes(message.phase));
+  const finalReport = latestRunFinalReport();
   const outcome = officialOutcomeFrom(finalReport);
   const completed = Number(outcome?.completedRounds) || Math.max(0, ...discussion.map((message) => Number(message.round) || 0));
   const requested = Number(outcome?.requestedRounds) || Number(currentSession.settings?.rounds) || 0;
@@ -1746,7 +1746,7 @@ function furthestStageReached() {
   // "active" stage past the last one, so Accept stops showing as still in-progress).
   if (executions.some((item) => ["merged", "pr_opened"].includes(item.status))) return STAGE_KEYS.length;
   if (executions.length) return 3;
-  if (latestFinalReport()) return 2;
+  if (latestHistoricalFinalReport()) return 2;
   if ((currentSession?.messages ?? []).some((message) => message.author === "agent")) return 1;
   return 0;
 }
@@ -1764,14 +1764,20 @@ function formatClock(iso) {
   const date = new Date(iso);
   return Number.isNaN(date.getTime()) ? "" : date.toLocaleTimeString(localeId(lang), { hour: "2-digit", minute: "2-digit" });
 }
-function latestFinalReport() {
-  return [...latestRunMessages()].reverse().find((message) => ["converged", "needs_user", "blocked_external", "needs_more_rounds"].includes(message.phase));
+function finalReportFrom(messages) {
+  return [...messages].reverse().find((message) => ["converged", "needs_user", "blocked_external", "needs_more_rounds"].includes(message.phase));
+}
+function latestRunFinalReport() {
+  return finalReportFrom(latestRunMessages());
+}
+function latestHistoricalFinalReport() {
+  return finalReportFrom(currentSession?.messages ?? []);
 }
 // Stage timestamps derived from real events only; stages with no honest source (Plan, Review) stay blank.
 function stageTimes() {
   const executions = currentSession?.executions ?? [];
   const firstAgent = (currentSession?.messages ?? []).find((message) => message.author === "agent");
-  const finalReport = latestFinalReport();
+  const finalReport = latestHistoricalFinalReport();
   const firstExec = executions.find((execution) => execution.createdAt);
   const accepted = [...executions].reverse().find((execution) => ["merged", "pr_opened"].includes(execution.status) && execution.decidedAt);
   return {
@@ -1855,7 +1861,7 @@ function renderApprovalGate() {
     // Otherwise, once the room actually converged on an outcome, offer a one-click bridge
     // into the Execute drawer. "needs_more_rounds" means the discussion did NOT reach
     // agreement — don't offer to execute an unresolved report.
-    if (derivePhase() === "decision" && latestFinalReport()?.phase === "converged") renderProceedToExecute(host);
+    if (derivePhase() === "decision" && latestRunFinalReport()?.phase === "converged") renderProceedToExecute(host);
     return;
   }
   const executor = bdi(providerInfo(execution.executor).label, "ltr");
@@ -1911,7 +1917,7 @@ function renderProceedToExecute(host) {
 // seed the task with the agreed outcome. The user still reviews and runs it, then
 // the normal execution approval gate (merge / PR / reject) follows.
 function proceedToExecute() {
-  const report = latestFinalReport();
+  const report = latestRunFinalReport();
   const conclusion = report ? String(report.content || "").trim() : "";
   $("execDrawer").hidden = false;
   $("execToggle").setAttribute("aria-expanded", "true");

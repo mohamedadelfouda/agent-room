@@ -1,0 +1,245 @@
+# Session Convergence and Decision Experience Stabilization
+
+Status: implemented on `codex/session-convergence-main-compatible`, based on `origin/main` at `6781be0`; validated and ready for review.
+
+This stabilization is the prerequisite for the provider and protocol work proposed in `docs/MULTI_AGENT_SESSION_MODES_PLAN.md`.
+
+## 1. Objective
+
+Make collaboration outcomes trustworthy and stop unproductive rounds before adding a third provider or new three-participant protocols.
+
+The implementation:
+
+- stores agent agreement separately from task completion;
+- distinguishes genuine disagreement, user decisions, external validation, remaining work, and out-of-scope items;
+- stops after a valid, delta-free agreement when the result is complete, waiting for the user, or externally blocked;
+- fails closed on missing, invalid, stale, or contradictory controls;
+- makes deterministic assessment the only authority that changes official pending-item state;
+- keeps the finalizer explanatory rather than authoritative; and
+- shows one localized decision card for the latest run without changing the card layout or hiding the transcript.
+
+## 2. Non-goals
+
+This change does not:
+
+- add Cursor or another provider;
+- add three-peer, judge, or critic protocols;
+- change execution, review, connector, or approval permissions;
+- infer agreement from prose;
+- use majority voting or semantic similarity;
+- build a workflow engine; or
+- redesign the decision card, transcript, or responsive layout.
+
+## 3. State model
+
+Agreement and completion are orthogonal.
+
+### Agreement state
+
+| Value | Meaning |
+| --- | --- |
+| `converged` | Every participant supplied a compatible current control and no genuine disagreement remains. |
+| `open` | At least one participant reports an open position or an official disagreement remains. |
+| `unknown` | Required state cannot be trusted because control data is invalid, stale, contradictory, or unclassified legacy data remains. |
+
+### Completion state
+
+| Value | Meaning | Discussion terminal? |
+| --- | --- | --- |
+| `satisfied` | The requested thinking task is complete. | Yes |
+| `needs_user` | The proposal is settled but requires an explicit user choice. | Yes |
+| `blocked` | The proposal is settled but requires external validation or another outside step. | Yes |
+| `incomplete` | More agent work may still materially improve the answer. | No |
+
+Completion is aggregated conservatively in this order:
+
+```text
+incomplete > blocked > needs_user > satisfied
+```
+
+The outcome persists one of these stop reasons:
+
+- `complete`
+- `user_decision`
+- `external_block`
+- `round_limit`
+- `invalid_control`
+
+The UI also has localized fallback labels for cancelled and failed runs, although normal discussion outcomes are currently produced by the five reasons above.
+
+## 4. Version 2 control contract
+
+Later collaboration and debate rounds end with a bounded `<agent-control>` JSON block containing:
+
+| Field | Contract |
+| --- | --- |
+| `controlVersion` | Must equal `2`. |
+| `convergence` | `converged`, `open`, or `not_evaluated`. |
+| `goalStatus` | `satisfied`, `incomplete`, `blocked`, or `needs_user`. |
+| `substantiveDelta` | Boolean indicating whether the proposal materially changed in this round. |
+| `itemProposals` | Bounded actions proposed against pending items. |
+| `targetVersion` | Positive proposal version required to match the current round. |
+
+Version 2 deliberately omits confidence. Confidence from stored legacy controls remains readable for compatibility but does not influence stopping or appear in the new decision card.
+
+### Item proposals
+
+Agents can propose these actions:
+
+| Action | Meaning |
+| --- | --- |
+| `create` | Propose a new categorized pending item and its required step. |
+| `keep_open` | Explicitly preserve an existing official item. |
+| `resolve` | Propose closing an existing official item. |
+| `merge_into` | Propose superseding an item into another existing open item. |
+
+A create proposal includes:
+
+- `kind`: `disagreement`, `user_decision`, `external_validation`, `remaining_work`, or `out_of_scope`;
+- bounded reader-facing `text`; and
+- `requiredStep` containing an allowed `actor` and `action` pair.
+
+Allowed required actions are:
+
+| Action | Allowed actor |
+| --- | --- |
+| `provide_decision` | `user` |
+| `run_external_check` | `user`, `human_operator`, or `orchestrator` |
+| `resume_agent_round` | `agent` |
+
+The item kind constrains which action is valid. For example, a user decision requires `provide_decision`, while disagreement and remaining work require another agent round.
+
+## 5. Official item registry
+
+Agent output is a proposal, not persisted truth. The data flow is:
+
+```text
+agent itemProposals
+→ deterministic assessment
+→ approved itemRegistry
+→ derived nextSteps
+→ persisted outcome
+→ finalizer explanation
+```
+
+Official items contain a system-generated stable `itemId`, kind, status, text, and `requiredStep`. Persisted statuses are `open`, `resolved`, and `superseded`.
+
+Registry rules:
+
+- omission never closes an item;
+- resolving or merging an existing item requires the same explicit proposal from every participant;
+- merge targets must exist and remain open;
+- an item cannot merge into itself, a merge target that is also changing, or a closed item;
+- invalid references and invalid merges fail the round closed;
+- new items deduplicate only when kind, punctuation/case/whitespace-normalized text, actor, and action all match; and
+- matching normalized text with different kinds or required steps remains visible as a conflict.
+
+No semantic or fuzzy merge occurs merely because two sentences appear similar.
+
+## 6. Consistency and early stopping
+
+Every assessed round requires controls from all active participants, valid contract fields, and the current target version.
+
+Additional consistency rules include:
+
+- `convergence: converged` cannot create a disagreement item;
+- `goalStatus: satisfied` cannot create remaining work;
+- `needs_user` requires an official open `user_decision` item after proposals are applied;
+- `blocked` requires an official open `external_validation` item after proposals are applied;
+- classification, required-step, or item-action conflicts prevent a trusted terminal outcome; and
+- any substantive delta prevents early stopping in that round.
+
+Early stop occurs only when the round is valid, delta-free, agreement is `converged`, and completion is `satisfied`, `needs_user`, or `blocked`. Incomplete work and genuine disagreement continue until a later terminal round or the configured round limit.
+
+## 7. Orchestration and finalization
+
+`server/orchestrator.js` carries the approved registry into each later round and records the completed round count. At the end it persists an `outcomeVersion: 1` snapshot on the system outcome message with:
+
+- phase;
+- agreement and completion states;
+- stop reason;
+- requested and completed rounds;
+- approved registry and pending items;
+- derived next steps;
+- disagreements, conflicts, and unclassified legacy points; and
+- control validity.
+
+Normal reader-facing phases are:
+
+| Phase | Meaning |
+| --- | --- |
+| `converged` | Agreed and complete. |
+| `needs_user` | Agreed and waiting for the user. |
+| `blocked_external` | Agreed and waiting for an outside check or dependency. |
+| `needs_more_rounds` | The round limit ended with disagreement, incomplete work, or invalid controls. |
+
+The finalizer still runs once after the discussion ends. Its prompt receives the official outcome as immutable context and may explain it, but its wording cannot change the persisted status.
+
+## 8. Decision card
+
+The existing round-summary card remains one card per user run, not one card per round. It updates as rounds arrive and becomes the final decision card when an official outcome is persisted.
+
+For the latest run it displays:
+
+- requested and completed rounds;
+- localized agreement state;
+- localized completion state;
+- localized stop reason;
+- pending items grouped by category;
+- derived next steps with the responsible actor; and
+- substantive changes collected from that run.
+
+The card does not scan earlier runs when a session contains multiple user requests. Stored sessions without an official outcome retain the legacy report and `openPoints` fallback. The transcript and synthesis remain visible in their existing layout.
+
+## 9. Compatibility
+
+- Stored controls without `controlVersion` remain parseable.
+- Legacy `openPoints` remain unclassified and cannot be reinterpreted as genuine disagreement.
+- Historical session files are not rewritten.
+- Mixed sessions can display their legacy messages while new runs use version 2.
+- Chat, execution, review, connectors, and approvals keep their existing behavior.
+
+## 10. Verification coverage
+
+Focused tests cover:
+
+- strict version 2 parsing and legacy reads;
+- malformed, embedded, stale, and contradictory controls;
+- agreement, completion, and stop-reason combinations;
+- user decisions, external validation, remaining work, and genuine disagreement;
+- official registry creation, unanimous resolution, and unanimous merge;
+- invalid references, merge targets, and classification conflicts;
+- arbitrary accepted participant counts, including three controls;
+- prompt contracts and immutable finalizer outcomes;
+- a five-round collaboration that stops after round two and finalizes once;
+- Arabic and English catalog parity; and
+- existing static accessibility checks.
+
+Required final verification before a commit or push:
+
+```bash
+npm run check
+npm test
+```
+
+The repository review gate must then review and attest the exact diff before Git accepts a commit or push.
+
+## 11. Acceptance criteria
+
+This stabilization is ready when:
+
+- agreement and completion are stored and displayed separately;
+- agreed `needs_user` and externally blocked outcomes stop unnecessary rounds;
+- incomplete work and genuine disagreement do not stop early;
+- invalid and stale controls fail closed;
+- agents cannot silently close official items;
+- user decisions and external checks are not described as agent disagreement;
+- the captured five-round case is covered by a regression test;
+- the latest-run decision card is concise and localized;
+- raw enum values do not leak into the Arabic interface;
+- existing sessions remain readable; and
+- the complete verification suite passes.
+
+## 12. Relationship to multi-agent modes
+
+The stabilized outcome model can be reused by three peers without changing its authority rules: every active participant must contribute a valid control, and no majority can close official items. Judge and critic protocols can consume categorized pending items without turning the registry into a general workflow engine. Cursor feasibility and containment remain separate gates.
