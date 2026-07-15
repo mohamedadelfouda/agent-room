@@ -125,6 +125,7 @@ function applyLang(next) {
   });
   document.querySelectorAll("[data-provider-toggle]").forEach((input) => input.setAttribute("aria-label", t("providerEnabled")(providerInfo(input.dataset.providerToggle).label)));
   document.querySelectorAll(".check-cli").forEach((button) => button.setAttribute("aria-label", t("checkProvider")(providerInfo(button.dataset.agent).label)));
+  document.querySelectorAll(".setup-cli").forEach((button) => button.setAttribute("aria-label", t("setupProviderCli")(providerInfo(button.dataset.agent).label)));
   document.querySelectorAll(".load-models").forEach((button) => button.setAttribute("aria-label", t("loadProviderModels")(providerInfo(button.dataset.agent).label)));
   document.querySelectorAll("[data-effort-value]").forEach((option) => {
     const key = effortMessageKey(option.dataset.effortValue);
@@ -266,10 +267,11 @@ async function loadProviderCatalog() {
       `<div class="agent-head"><span class="agent-avatar ${esc(item.id)}" aria-hidden="true">${esc(item.label.slice(0, 1))}</span>`,
       `<div class="agent-id"><h3 id="${esc(titleId)}">${esc(item.label)}</h3><span id="${esc(item.id)}Health" class="health" role="status" aria-live="polite" data-i18n="notChecked">${esc(t("notChecked"))}</span></div>`,
       `<label class="switch" for="${esc(enabledId)}"><input id="${esc(enabledId)}" type="checkbox" checked data-provider-toggle="${esc(item.id)}" aria-label="${esc(t("providerEnabled")(item.label))}"><span aria-hidden="true"></span></label></div>`,
-      `<div class="agent-fields"><div class="field"><label for="${esc(commandId)}" data-i18n="command">${esc(t("command"))}</label><div class="inline"><input id="${esc(commandId)}" value="${esc(item.command)}"><button class="btn-mini check-cli" data-agent="${esc(item.id)}" data-i18n="check" aria-label="${esc(t("checkProvider")(item.label))}">${esc(t("check"))}</button></div></div>`,
+      `<div class="agent-fields"><div class="field"><label for="${esc(commandId)}" data-i18n="command">${esc(t("command"))}</label><div class="inline"><input id="${esc(commandId)}" value="${esc(item.command)}"><button class="btn-mini check-cli" data-agent="${esc(item.id)}" data-i18n="check" aria-label="${esc(t("checkProvider")(item.label))}">${esc(t("check"))}</button><button class="btn-mini setup-cli" data-agent="${esc(item.id)}" data-i18n="setupCli" aria-label="${esc(t("setupProviderCli")(item.label))}" aria-expanded="false" aria-controls="${esc(item.id)}CliSetup">${esc(t("setupCli"))}</button></div></div>`,
       `<div class="field"><label for="${esc(modelId)}" data-i18n="model">${esc(t("model"))}</label><div class="inline"><input id="${esc(modelId)}" list="${esc(modelList)}" value="${esc(item.defaultModel || "")}">${item.dynamicModels ? `<button class="btn-mini load-models" data-agent="${esc(item.id)}" data-i18n="load" aria-label="${esc(t("loadProviderModels")(item.label))}">${esc(t("load"))}</button>` : ""}</div><datalist id="${esc(modelList)}">${modelOptions}</datalist></div>`,
       `<div class="field"><label for="${esc(effortId)}" data-i18n="effort">${esc(t("effort"))}</label><select id="${esc(effortId)}">${effortOptions}</select></div>`,
       `<div class="field"><label for="${esc(roleId)}" data-i18n="role">${esc(t("role"))}</label><input id="${esc(roleId)}" value="${esc(t("defaultRole"))}" data-role-preset="defaultRole" data-role-edited="false"></div></div>`,
+      `<div id="${esc(item.id)}CliSetup" class="cli-setup" aria-live="polite" hidden></div>`,
       `<div id="${esc(item.id)}RunState" class="run-state" role="status" aria-live="polite" data-i18n="ready">${esc(t("ready"))}</div>`,
     ].join("");
     grid.appendChild(card);
@@ -299,6 +301,7 @@ async function loadProviderCatalog() {
   if (alternate) $("execReviewer").value = alternate.id;
 
   document.querySelectorAll(".check-cli").forEach((button) => { button.onclick = () => checkCli(button.dataset.agent); });
+  document.querySelectorAll(".setup-cli").forEach((button) => { button.onclick = () => toggleCliSetup(button.dataset.agent); });
   document.querySelectorAll(".load-models").forEach((button) => { button.onclick = () => loadModels(button.dataset.agent, button); });
   settingsIds().forEach((id) => { const element = $(id); if (element) element.addEventListener("change", () => { saveSettings(); updateSetupSummary(); }); });
 }
@@ -987,8 +990,133 @@ async function checkCli(agent) {
     const result = await api("/api/cli/check", { method: "POST", body: JSON.stringify({ provider: agent, command }) });
     health.textContent = result.ok ? result.version : localizedFailure(result);
     health.className = `health ${result.ok ? "ok" : "bad"}`;
-  } catch (error) { health.textContent = localizedFailure(error); health.className = "health bad"; }
+    return result.ok === true;
+  } catch (error) { health.textContent = localizedFailure(error); health.className = "health bad"; return false; }
 }
+function toggleCliSetup(agent) {
+  const panel = $(`${agent}CliSetup`);
+  const button = document.querySelector(`.setup-cli[data-agent="${agent}"]`);
+  if (!panel.hidden) {
+    // Ignore clicks while discovery is in flight — closing mid-search made
+    // users hammer Setup until a later click happened to land after results.
+    if (cliSetupInFlight.has(agent)) return;
+    panel.hidden = true;
+    button?.setAttribute("aria-expanded", "false");
+    return;
+  }
+  panel.hidden = false;
+  button?.setAttribute("aria-expanded", "true");
+  runCliSetup(agent);
+}
+
+const cliSetupInFlight = new Set();
+
+async function applyDiscoveredCommand(agent, candidate) {
+  $(`${agent}Command`).value = candidate;
+  saveSettings();
+  return checkCli(agent);
+}
+
+async function runCliSetup(agent) {
+  if (cliSetupInFlight.has(agent)) return;
+  cliSetupInFlight.add(agent);
+  const panel = $(`${agent}CliSetup`);
+  panel.textContent = t("setupSearching");
+  let result;
+  try {
+    result = await api("/api/cli/discover", { method: "POST", body: JSON.stringify({ provider: agent }) });
+  } catch (error) {
+    panel.textContent = localizedFailure(error);
+    return;
+  } finally {
+    cliSetupInFlight.delete(agent);
+  }
+  // One clear native binary: trust it immediately so Setup is one click, not
+  // discover → choose → trust. Multiple candidates still need an explicit pick.
+  if (!result.resolved && result.candidates?.length === 1) {
+    const ok = await applyDiscoveredCommand(agent, result.candidates[0]);
+    if (ok) {
+      result = await api("/api/cli/discover", { method: "POST", body: JSON.stringify({ provider: agent }) }).catch(() => result);
+    }
+  }
+  // Built offline and inserted in one mutation so the polite live region
+  // announces the result as one coherent message, not fragment by fragment.
+  const fragment = document.createDocumentFragment();
+  if (result.resolved) {
+    const ok = document.createElement("p");
+    ok.className = "cli-setup-ok";
+    ok.textContent = t("setupCommandOk");
+    fragment.appendChild(ok);
+    const resolvedPath = document.createElement("div");
+    resolvedPath.className = "cli-setup-path";
+    resolvedPath.innerHTML = bdi(result.resolved, "ltr");
+    fragment.appendChild(resolvedPath);
+  }
+  if (result.candidates?.length) {
+    const intro = document.createElement("p");
+    intro.className = "cli-setup-intro";
+    intro.textContent = t("setupFoundIntro");
+    fragment.appendChild(intro);
+    for (const candidate of result.candidates) {
+      const row = document.createElement("div");
+      row.className = "cli-setup-row";
+      row.innerHTML = `<span class="cli-setup-path">${bdi(candidate, "ltr")}</span>`;
+      const use = document.createElement("button");
+      use.className = "btn-mini";
+      use.textContent = t("useThisPath");
+      use.setAttribute("aria-label", `${t("useThisPath")}: ${candidate}`);
+      use.onclick = async () => {
+        use.disabled = true;
+        const ok = await applyDiscoveredCommand(agent, candidate);
+        use.disabled = false;
+        if (ok) runCliSetup(agent);
+      };
+      row.appendChild(use);
+      fragment.appendChild(row);
+    }
+  } else if (!result.resolved) {
+    const info = providerInfo(agent);
+    const none = document.createElement("p");
+    none.className = "cli-setup-intro";
+    none.textContent = t("setupNoneFound");
+    fragment.appendChild(none);
+    if (info.install?.command) {
+      const row = document.createElement("div");
+      row.className = "cli-setup-row";
+      row.innerHTML = `<code class="cli-setup-cmd">${bdi(info.install.command, "ltr")}</code>`;
+      const copy = document.createElement("button");
+      copy.className = "btn-mini";
+      copy.textContent = t("copyCommand");
+      // Feedback lives beside the button so its accessible name stays stable;
+      // the panel's live region announces the span's text change.
+      const feedback = document.createElement("span");
+      feedback.className = "cli-setup-feedback";
+      copy.onclick = async () => {
+        try { await navigator.clipboard.writeText(info.install.command); feedback.textContent = t("copied"); }
+        catch { feedback.textContent = t("copyFailed"); }
+        setTimeout(() => { feedback.textContent = ""; }, 1600);
+      };
+      row.appendChild(copy);
+      row.appendChild(feedback);
+      fragment.appendChild(row);
+    }
+    if (info.install?.url && /^https:\/\//.test(info.install.url)) {
+      const docs = document.createElement("a");
+      docs.className = "cli-setup-docs";
+      docs.href = info.install.url;
+      docs.target = "_blank";
+      docs.rel = "noreferrer noopener";
+      docs.textContent = t("installDocs");
+      const newTab = document.createElement("span");
+      newTab.className = "sr-only";
+      newTab.textContent = ` (${t("opensInNewTab")})`;
+      docs.appendChild(newTab);
+      fragment.appendChild(docs);
+    }
+  }
+  panel.replaceChildren(fragment);
+}
+
 async function loadModels(agent, btn) {
   btn.disabled = true; const old = btn.textContent; btn.textContent = "...";
   try {
@@ -1060,15 +1188,64 @@ async function loadOnboard() {
       if (!r.ok && r.detail) console.error(`[Agent Room: provider_check_failed] ${r.detail}`);
       const detail = [state, r.ok ? r.detail : ""].filter(Boolean).join(" · ");
       row.innerHTML = `<span class="onboard-dot ${r.ok ? "ok" : "bad"}" aria-hidden="true"></span><span class="ob-name">${esc(r.name)}</span><span class="ob-detail">${esc(detail)}</span>`;
+      const actions = document.createElement("span"); actions.className = "ob-actions";
+      if (r.agent && !r.ok) {
+        const setupBtn = document.createElement("button"); setupBtn.className = "btn-mini"; setupBtn.textContent = t("setupCli");
+        setupBtn.setAttribute("aria-label", t("setupProviderCli")(providerInfo(r.agent).label));
+        setupBtn.onclick = () => openCliSetupFromOnboard(r.agent);
+        actions.appendChild(setupBtn);
+      }
       if (r.agent && providerInfo(r.agent).canUpdate) {
-        const actions = document.createElement("span"); actions.className = "ob-actions";
         const btn = document.createElement("button"); btn.className = "btn-mini"; btn.textContent = t("update");
         btn.onclick = () => updateAgentCli(r.agent, btn);
-        actions.appendChild(btn); row.appendChild(actions);
+        actions.appendChild(btn);
       }
+      if (actions.childElementCount > 0) row.appendChild(actions);
       list.appendChild(row);
     }
   } catch (e) { list.textContent = localizedFailure(e); }
+}
+function openCliSetupFromOnboard(agent) {
+  // Keep the onboarding dialog open: closing it felt like Setup "broke" the
+  // screen. Discover + trust in place when there is exactly one candidate
+  // (same rule as runCliSetup); multiple matches open the drawer chooser.
+  void (async () => {
+    const list = $("onboardList");
+    const prior = list.innerHTML;
+    list.textContent = t("setupSearching");
+    try {
+      const result = await api("/api/cli/discover", { method: "POST", body: JSON.stringify({ provider: agent }) });
+      if (result.resolved) {
+        await loadOnboard();
+        return;
+      }
+      if (result.candidates?.length === 1) {
+        const ok = await applyDiscoveredCommand(agent, result.candidates[0]);
+        await loadOnboard();
+        if (!ok) openCliSetupDrawer(agent);
+        return;
+      }
+      // Zero or multiple candidates: drawer shows install hints or an explicit pick.
+      openCliSetupDrawer(agent);
+    } catch (error) {
+      list.innerHTML = prior;
+      const note = document.createElement("p");
+      note.className = "ob-detail";
+      note.textContent = localizedFailure(error);
+      list.prepend(note);
+    }
+  })();
+}
+
+function openCliSetupDrawer(agent) {
+  closeManagedModal($("onboardModal"), { restoreFocus: false });
+  localStorage.setItem("agent-room-onboarded", "1");
+  if ($("setupDrawer").hidden) toggleSetup();
+  const panel = $(`${agent}CliSetup`);
+  if (panel.hidden) toggleCliSetup(agent);
+  else runCliSetup(agent);
+  document.querySelector(`.agent-card[data-agent="${agent}"]`)?.scrollIntoView({ block: "nearest" });
+  requestAnimationFrame(() => document.querySelector(`.setup-cli[data-agent="${agent}"]`)?.focus());
 }
 async function updateAgentCli(agent, btn) {
   btn.disabled = true; btn.textContent = t("updating");
@@ -1725,6 +1902,13 @@ async function initialize() {
     loadSettings();
     syncExecModes();
     updateSetupSummary();
+    // Absolute command paths from a previous session still need Trust & check
+    // on a fresh server (or after hydrate). Re-check quietly so health badges
+    // match what the user already configured.
+    await Promise.all(providers.map(async (item) => {
+      const command = $(`${item.id}Command`)?.value.trim() || "";
+      if (command && /[\\/]/.test(command)) await checkCli(item.id);
+    }));
   } catch (error) {
     setConnected(false);
     $("connText").textContent = localizedFailure(error);

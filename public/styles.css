@@ -244,6 +244,17 @@ textarea { resize: none; line-height: 1.55; }
 .stage-time { font-size: 10px; color: var(--faint); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .stage.is-active .stage-time { color: var(--text); }
 
+/* In-card CLI setup panel: native-executable discovery + install guidance */
+.cli-setup { display: grid; gap: 8px; padding: 10px; border: 1px dashed var(--line-soft); border-radius: 9px; font-size: 12px; }
+.cli-setup-ok { color: var(--ok); overflow-wrap: anywhere; }
+.cli-setup-intro { color: var(--muted); }
+.cli-setup-row { display: flex; gap: 8px; align-items: center; justify-content: space-between; }
+.cli-setup-row .btn-mini { flex: none; }
+.cli-setup-path, .cli-setup-cmd { min-width: 0; overflow-wrap: anywhere; font-family: ui-monospace, monospace; font-size: 11px; color: var(--text); }
+.cli-setup-feedback { color: var(--muted); font-size: 11px; }
+.cli-setup-cmd { background: var(--surface-2); border: 1px solid var(--line-soft); border-radius: 6px; padding: 6px 8px; }
+.cli-setup-docs { color: var(--accent); font-size: 11px; justify-self: start; }
+
 /* ============ Main + decision view ============ */
 .main { min-width: 0; min-height: 0; overflow: hidden; display: grid; grid-template-rows: minmax(0, 1fr); }
 .empty { height: 100%; display: grid; place-items: center; padding: 24px; }

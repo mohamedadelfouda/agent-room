@@ -5,7 +5,8 @@ import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import os from "node:os";
 import { listSessions, createSession, getSession, mutateSession, renameSession, deleteSession, rootPath } from "./store.js";
-import { approveProviderCommand, approvedProviderCommand, checkCommand, resolveAllowedCommand, runProcess } from "./process.js";
+import { approveProviderCommand, approvedProviderCommand, checkCommand, resolveAllowedCommand, runProcess, configureTrustedCliStore, hydrateTrustedProviderCommands } from "./process.js";
+import { discoverProviderCommands } from "./cli-discovery.js";
 import { runOrchestration, stopRun, isRunning, abortAllRuns } from "./orchestrator.js";
 import { runExecuteAndReview, acceptExecution, rejectExecution, isExecuting, stopExec, abortAllExecutions, reconcileExecutionWorktrees } from "./exec-orchestrator.js";
 import { isGitRepo, hasGitHubOrigin } from "./worktree.js";
@@ -27,10 +28,12 @@ const configuredCommand = (definition) => process.env[definition.commandEnv] || 
 const trustedCliPaths = (definition) => [process.env[definition.commandEnv], approvedProviderCommand(definition.id)].filter(Boolean);
 
 // First-run detection resolves native executables before entering an attached project.
+// A path the user already trusted this run (via Trust & check) takes precedence, so
+// re-checks reflect the working setup instead of the bare PATH lookup.
 async function detectAgents() {
   const detected = await Promise.all(providerIds().map(async (id) => {
     const definition = provider(id);
-    const status = await checkCommand(configuredCommand(definition), { allowedCommands: new Set([definition.command]), trustedPaths: trustedCliPaths(definition) });
+    const status = await checkCommand(approvedProviderCommand(definition.id) || configuredCommand(definition), { allowedCommands: new Set([definition.command]), trustedPaths: trustedCliPaths(definition) });
     return [id, { installed: status.ok, version: status.version, detail: status.detail }];
   }));
   let github = { authed: false, detail: "" };
@@ -455,6 +458,22 @@ const server = http.createServer(async (req, res) => {
       }
       catch (e) { return json(res, 200, { ok: false, version: "", code: "provider_check_failed", detail: redact(e.message) }); }
     }
+    // Read-only discovery of native executables that PATH search misses (e.g.
+    // npm-installed Codex on Windows exposes only cmd/ps1 shims). Nothing found
+    // here is executed or trusted; the user still confirms via Trust & check.
+    if (req.method === "POST" && url.pathname === "/api/cli/discover") {
+      const body = await readJson(req);
+      try {
+        const definition = provider(String(body.provider || ""));
+        if (!definition) throw new Error("Select a known provider before discovering its executable");
+        const candidates = await discoverProviderCommands(definition.command);
+        let resolved = "";
+        try { resolved = await resolveAllowedCommand(approvedProviderCommand(definition.id) || configuredCommand(definition), new Set([definition.command]), { trustedPaths: trustedCliPaths(definition) }); }
+        catch (e) { logError("cli discover: configured command did not resolve", redact(e.message)); }
+        return json(res, 200, { resolved, candidates });
+      }
+      catch (e) { return json(res, 400, apiErrorPayload("provider_discovery_failed", e)); }
+    }
     if (req.method === "POST" && parts[0] === "api" && parts[1] === "providers" && parts[2] && parts[3] === "models") {
       const body = await readJson(req);
       try {
@@ -473,23 +492,31 @@ const server = http.createServer(async (req, res) => {
 
 export const serverReady = new Promise((resolve, reject) => {
   server.once("error", reject);
-  server.listen(PORT, "127.0.0.1", () => {
-    const address = server.address();
-    const actualPort = typeof address === "object" && address ? address.port : PORT;
-    activePort = actualPort;
-    const url = `http://127.0.0.1:${actualPort}`;
-    setMcpBridgeUrl(url);
-    void reconcileExecutionWorktrees()
-      .catch((error) => logError("execution workspace reconciliation failed", error.message))
-      .finally(() => { startupReconciled = true; });
-    console.log(`\nAgent Room is running at ${url}\nData folder: ${path.join(rootPath(), "data")}\n`);
-    if (process.env.NO_OPEN !== "1") {
-      const command = process.platform === "win32" ? "cmd" : process.platform === "darwin" ? "open" : "xdg-open";
-      const args = process.platform === "win32" ? ["/c", "start", "", url] : [url];
-      try { spawn(command, args, { detached: true, stdio: "ignore" }).unref(); } catch {}
-    }
-    resolve({ port: actualPort, url });
-  });
+  void (async () => {
+    // Restore Trust & check approvals from the previous run before accepting
+    // traffic, so detectAgents and absolute command paths keep working after a
+    // restart without asking the user to set up again.
+    configureTrustedCliStore(path.join(rootPath(), "data", "trusted-cli.json"));
+    try { await hydrateTrustedProviderCommands(); }
+    catch (error) { logError("trusted CLI hydrate failed", redact(error.message)); }
+    server.listen(PORT, "127.0.0.1", () => {
+      const address = server.address();
+      const actualPort = typeof address === "object" && address ? address.port : PORT;
+      activePort = actualPort;
+      const url = `http://127.0.0.1:${actualPort}`;
+      setMcpBridgeUrl(url);
+      void reconcileExecutionWorktrees()
+        .catch((error) => logError("execution workspace reconciliation failed", error.message))
+        .finally(() => { startupReconciled = true; });
+      console.log(`\nAgent Room is running at ${url}\nData folder: ${path.join(rootPath(), "data")}\n`);
+      if (process.env.NO_OPEN !== "1") {
+        const command = process.platform === "win32" ? "cmd" : process.platform === "darwin" ? "open" : "xdg-open";
+        const args = process.platform === "win32" ? ["/c", "start", "", url] : [url];
+        try { spawn(command, args, { detached: true, stdio: "ignore" }).unref(); } catch {}
+      }
+      resolve({ port: actualPort, url });
+    });
+  })().catch(reject);
 });
 
 if (directEntry) {

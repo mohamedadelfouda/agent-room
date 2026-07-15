@@ -38,6 +38,8 @@ Agent Room uses your existing CLI subscriptions; it does not proxy them through 
 
 Windows command discovery accepts native `.exe`/`.com` binaries. Arbitrary `.cmd`, `.bat`, and PowerShell shims are not executed through a shell.
 
+If a provider check fails, the in-app **Set up** button runs a read-only search for the native executable that npm/pnpm shim installs hide (for example, a global Codex install on Windows) and offers per-provider install commands to copy. A discovered path is used only after you approve it through **Trust & check**; Agent Room never runs installers itself.
+
 Prompts and project excerpts are sent to the selected model providers through their official CLIs. Session JSON is stored locally and can contain the user's text and agent output.
 
 ## Run from source

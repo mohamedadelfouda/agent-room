@@ -1,12 +1,24 @@
 import { runClaude } from "../adapters/claude.js";
 import { discoverCodexModels, runCodex } from "../adapters/codex.js";
 
+// Install guidance only — shown to the user for copy/paste, never executed by
+// Agent Room. Claude needs its native installer because the npm package ships
+// a JS shim without the native executable this host requires.
+const installHint = (byPlatform) => byPlatform[process.platform] || byPlatform.default;
+
 const providers = new Map([
   ["claude", {
     id: "claude",
     label: "Claude",
     command: "claude",
     commandEnv: "AGENT_ROOM_CLAUDE_COMMAND",
+    install: {
+      command: installHint({
+        win32: "irm https://claude.ai/install.ps1 | iex",
+        default: "curl -fsSL https://claude.ai/install.sh | bash",
+      }),
+      url: "https://code.claude.com/docs/en/install",
+    },
     updateArgs: ["update"],
     defaultModel: "sonnet",
     models: ["default", "best", "fable", "sonnet", "opus", "haiku"],
@@ -19,6 +31,13 @@ const providers = new Map([
     label: "Codex",
     command: "codex",
     commandEnv: "AGENT_ROOM_CODEX_COMMAND",
+    install: {
+      command: installHint({
+        win32: `powershell -ExecutionPolicy ByPass -c "irm https://chatgpt.com/codex/install.ps1 | iex"`,
+        default: "curl -fsSL https://chatgpt.com/codex/install.sh | sh",
+      }),
+      url: "https://github.com/openai/codex",
+    },
     defaultModel: "",
     models: [],
     efforts: ["minimal", "low", "medium", "high", "xhigh"],

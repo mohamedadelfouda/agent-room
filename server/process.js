@@ -1,4 +1,5 @@
 import { spawn, execFile } from "node:child_process";
+import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -55,8 +56,69 @@ export function allowedCommand(input, allowed = ALLOWED_CLI, { trustedPaths = []
 const resolvedCommands = new Map();
 const approvedProviderCommands = new Map();
 
+// Persisted approvals survive process restarts. Unconfigured (tests) stays
+// in-memory only so the suite never writes into the developer's data folder.
+let trustedCliStorePath = "";
+let persistApprovedChain = Promise.resolve();
+
+export function configureTrustedCliStore(filePath) {
+  trustedCliStorePath = String(filePath || "");
+}
+
 export function approvedProviderCommand(providerId) {
   return approvedProviderCommands.get(String(providerId || "")) || "";
+}
+
+async function persistApprovedProviderCommands() {
+  if (!trustedCliStorePath) return;
+  // Serialize writes so two concurrent approvals cannot rename a stale
+  // snapshot over a newer one. Each turn reads the Map after prior writes.
+  const storePath = trustedCliStorePath;
+  const run = persistApprovedChain.then(async () => {
+    if (!storePath) return;
+    const payload = Object.fromEntries(approvedProviderCommands);
+    const tempPath = `${storePath}.${crypto.randomUUID()}.tmp`;
+    await fs.mkdir(path.dirname(storePath), { recursive: true });
+    try {
+      await fs.writeFile(tempPath, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
+      await fs.rename(tempPath, storePath);
+    } finally {
+      await fs.rm(tempPath, { force: true }).catch(() => {});
+    }
+  });
+  persistApprovedChain = run.then(() => {}, () => {});
+  return run;
+}
+
+// Re-load prior Trust & check approvals. Each path is re-validated (exists,
+// native executable, allowlisted basename) so a stale or swapped file cannot
+// silently become trusted again after a restart.
+export async function hydrateTrustedProviderCommands({ allowed = ALLOWED_CLI } = {}) {
+  if (!trustedCliStorePath) return;
+  let raw;
+  try {
+    raw = await fs.readFile(trustedCliStorePath, "utf8");
+  } catch (error) {
+    if (error.code === "ENOENT") return;
+    throw error;
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return;
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return;
+  for (const [providerId, commandPath] of Object.entries(parsed)) {
+    if (!/^[a-z0-9_-]+$/.test(providerId)) continue;
+    if (!path.isAbsolute(String(commandPath || ""))) continue;
+    try {
+      const resolved = await resolveAllowedCommand(commandPath, allowed, { trustedPaths: [commandPath] });
+      approvedProviderCommands.set(providerId, resolved);
+    } catch {
+      // Drop entries that no longer resolve — user can Trust & check again.
+    }
+  }
 }
 
 async function executablePath(candidate) {
@@ -119,7 +181,20 @@ export async function approveProviderCommand(providerId, input, allowed) {
   if (!/^[a-z0-9_-]+$/.test(String(providerId || ""))) throw new Error("Invalid provider id");
   if (!path.isAbsolute(String(input || ""))) throw new Error("Only an explicitly selected absolute path needs approval");
   const resolved = await resolveAllowedCommand(input, allowed, { trustedPaths: [input] });
+  const hadPrevious = approvedProviderCommands.has(providerId);
+  const previous = hadPrevious ? approvedProviderCommands.get(providerId) : "";
   approvedProviderCommands.set(providerId, resolved);
+  try {
+    await persistApprovedProviderCommands();
+  } catch (error) {
+    // Roll memory back only if this approval is still the latest for the
+    // provider — a newer concurrent approve must not be wiped by our failure.
+    if (approvedProviderCommands.get(providerId) === resolved) {
+      if (hadPrevious) approvedProviderCommands.set(providerId, previous);
+      else approvedProviderCommands.delete(providerId);
+    }
+    throw error;
+  }
   return resolved;
 }
 

@@ -1,6 +1,9 @@
 # Real session transcripts contain private prompts/answers/paths — never commit them.
 data/sessions/*.json
 !data/sessions/.gitkeep
+# Trusted absolute CLI paths are machine-local — never commit them.
+data/trusted-cli.json
+data/trusted-cli.json.*.tmp
 # Logs may contain paths/errors — keep them local.
 logs/
 workspace/
