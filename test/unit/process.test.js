@@ -138,6 +138,38 @@ test("trusted CLI approvals persist to disk and reload in a fresh process", asyn
   }
 });
 
+test("a failed trusted-cli persist rolls back in-memory approval", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "ar-trusted-cli-rb-"));
+  const binary = join(dir, process.platform === "win32" ? "codex.exe" : "codex");
+  const providerId = "rollback_test";
+  writeFileSync(binary, "placeholder");
+  if (process.platform !== "win32") {
+    const { chmodSync } = await import("node:fs");
+    chmodSync(binary, 0o755);
+  }
+  // Parent path is a file, so mkdir/rename for the store must fail.
+  const blocker = join(dir, "not-a-dir");
+  writeFileSync(blocker, "x");
+  const badStore = join(blocker, "trusted-cli.json");
+  const goodStore = join(dir, "trusted-cli.json");
+  try {
+    configureTrustedCliStore(badStore);
+    await assert.rejects(() => approveProviderCommand(providerId, binary, new Set(["codex"])));
+    assert.equal(approvedProviderCommand(providerId), "");
+
+    configureTrustedCliStore(goodStore);
+    const kept = await approveProviderCommand(providerId, binary, new Set(["codex"]));
+    assert.equal(approvedProviderCommand(providerId), kept);
+
+    configureTrustedCliStore(badStore);
+    await assert.rejects(() => approveProviderCommand(providerId, binary, new Set(["codex"])));
+    assert.equal(approvedProviderCommand(providerId), kept);
+  } finally {
+    configureTrustedCliStore("");
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("agent environment is allowlisted and does not inherit credentials", async () => {
   const previous = process.env.AGENT_ROOM_TEST_TOKEN;
   process.env.AGENT_ROOM_TEST_TOKEN = "do-not-inherit";

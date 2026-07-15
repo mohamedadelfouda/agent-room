@@ -181,8 +181,20 @@ export async function approveProviderCommand(providerId, input, allowed) {
   if (!/^[a-z0-9_-]+$/.test(String(providerId || ""))) throw new Error("Invalid provider id");
   if (!path.isAbsolute(String(input || ""))) throw new Error("Only an explicitly selected absolute path needs approval");
   const resolved = await resolveAllowedCommand(input, allowed, { trustedPaths: [input] });
+  const hadPrevious = approvedProviderCommands.has(providerId);
+  const previous = hadPrevious ? approvedProviderCommands.get(providerId) : "";
   approvedProviderCommands.set(providerId, resolved);
-  await persistApprovedProviderCommands();
+  try {
+    await persistApprovedProviderCommands();
+  } catch (error) {
+    // Roll memory back only if this approval is still the latest for the
+    // provider — a newer concurrent approve must not be wiped by our failure.
+    if (approvedProviderCommands.get(providerId) === resolved) {
+      if (hadPrevious) approvedProviderCommands.set(providerId, previous);
+      else approvedProviderCommands.delete(providerId);
+    }
+    throw error;
+  }
   return resolved;
 }
 
