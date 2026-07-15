@@ -8,6 +8,14 @@ const ROOT = path.resolve(__dirname, "..");
 const RUNTIME_ROOT = process.env.AGENT_ROOM_RUNTIME_DIR ? path.resolve(process.env.AGENT_ROOM_RUNTIME_DIR) : ROOT;
 const DATA_DIR = path.join(RUNTIME_ROOT, "data");
 const SESSIONS_DIR = path.join(DATA_DIR, "sessions");
+const TITLE_MAX_CODEPOINTS = 160;
+
+// `String.slice` counts UTF-16 code units, which can split a surrogate pair (e.g. an
+// emoji) in half. Truncate by Unicode code point instead so titles never end in a
+// broken/unpaired surrogate.
+function truncateTitle(title) {
+  return [...String(title || "")].slice(0, TITLE_MAX_CODEPOINTS).join("");
+}
 const SCRATCH_WORKSPACE_DIR = path.join(RUNTIME_ROOT, "workspace");
 const MAX_SESSION_MESSAGES = 200;
 const MAX_MESSAGE_CHARS = 100000;
@@ -248,7 +256,7 @@ export async function createSession(title = "جلسة جديدة") {
   const now = new Date().toISOString();
   const session = {
     id: crypto.randomUUID(),
-    title: String(title || "جلسة جديدة").trim().slice(0, 160),
+    title: truncateTitle(String(title || "جلسة جديدة").trim()),
     status: "idle",
     mode: "collaboration",
     createdAt: now,
@@ -315,7 +323,7 @@ export async function mutateSession(id, mutate) {
 }
 
 export async function renameSession(id, title) {
-  const next = String(title ?? "").trim().slice(0, 160);
+  const next = truncateTitle(String(title ?? "").trim());
   if (!next) {
     const error = new Error("Title is required");
     error.code = "title_required";
