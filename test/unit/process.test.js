@@ -4,7 +4,7 @@ import { mkdtempSync, realpathSync, symlinkSync, writeFileSync, rmSync } from "n
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync, spawn } from "node:child_process";
-import { allowedCommand, approveProviderCommand, approvedProviderCommand, parsePosixProcessGroupLiveness, resolveAllowedCommand, runProcess, sanitizedAgentEnv, sanitizedGithubEnv, sanitizedPublicationEnv, terminateProcess } from "../../server/process.js";
+import { allowedCommand, approveProviderCommand, approvedProviderCommand, configureTrustedCliStore, hydrateTrustedProviderCommands, parsePosixProcessGroupLiveness, resolveAllowedCommand, runProcess, sanitizedAgentEnv, sanitizedGithubEnv, sanitizedPublicationEnv, terminateProcess } from "../../server/process.js";
 
 // Run node against a temp .js file so large scripts stay readable and cross-platform.
 function withScript(body, fn) {
@@ -105,6 +105,67 @@ test("an explicitly approved CLI symlink resolves consistently on later launches
       realpathSync(process.execPath),
     );
   } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("trusted CLI approvals persist to disk and reload in a fresh process", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "ar-trusted-cli-"));
+  const store = join(dir, "trusted-cli.json");
+  const binary = join(dir, process.platform === "win32" ? "codex.exe" : "codex");
+  const providerId = "persist_test";
+  writeFileSync(binary, "placeholder");
+  if (process.platform !== "win32") {
+    const { chmodSync } = await import("node:fs");
+    chmodSync(binary, 0o755);
+  }
+  try {
+    configureTrustedCliStore(store);
+    const approved = await approveProviderCommand(providerId, binary, new Set(["codex"]));
+    assert.equal(approvedProviderCommand(providerId), approved);
+    const processModule = new URL("../../server/process.js", import.meta.url).href;
+    const script = `
+      import { configureTrustedCliStore, hydrateTrustedProviderCommands, approvedProviderCommand } from ${JSON.stringify(processModule)};
+      configureTrustedCliStore(${JSON.stringify(store)});
+      await hydrateTrustedProviderCommands({ allowed: new Set(["codex"]) });
+      process.stdout.write(approvedProviderCommand(${JSON.stringify(providerId)}));
+    `;
+    const reloaded = execFileSync(process.execPath, ["--input-type=module", "-e", script], { encoding: "utf8" });
+    assert.equal(reloaded, approved);
+  } finally {
+    configureTrustedCliStore("");
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a failed trusted-cli persist rolls back in-memory approval", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "ar-trusted-cli-rb-"));
+  const binary = join(dir, process.platform === "win32" ? "codex.exe" : "codex");
+  const providerId = "rollback_test";
+  writeFileSync(binary, "placeholder");
+  if (process.platform !== "win32") {
+    const { chmodSync } = await import("node:fs");
+    chmodSync(binary, 0o755);
+  }
+  // Parent path is a file, so mkdir/rename for the store must fail.
+  const blocker = join(dir, "not-a-dir");
+  writeFileSync(blocker, "x");
+  const badStore = join(blocker, "trusted-cli.json");
+  const goodStore = join(dir, "trusted-cli.json");
+  try {
+    configureTrustedCliStore(badStore);
+    await assert.rejects(() => approveProviderCommand(providerId, binary, new Set(["codex"])));
+    assert.equal(approvedProviderCommand(providerId), "");
+
+    configureTrustedCliStore(goodStore);
+    const kept = await approveProviderCommand(providerId, binary, new Set(["codex"]));
+    assert.equal(approvedProviderCommand(providerId), kept);
+
+    configureTrustedCliStore(badStore);
+    await assert.rejects(() => approveProviderCommand(providerId, binary, new Set(["codex"])));
+    assert.equal(approvedProviderCommand(providerId), kept);
+  } finally {
+    configureTrustedCliStore("");
     rmSync(dir, { recursive: true, force: true });
   }
 });
