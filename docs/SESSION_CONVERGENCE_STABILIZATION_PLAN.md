@@ -215,14 +215,20 @@ Focused tests cover:
 - Arabic and English catalog parity; and
 - existing static accessibility checks.
 
-Required final verification before a commit or push:
+Required final verification and publication order:
 
-```bash
-npm run check
-npm test
-```
+1. Review the exact branch diff with the required reviewers in `.review-gate/agents/`, running independent reviews in parallel when possible, and apply the relevant guard checklists from `.review-gate/skills/`. Documentation changes require the docs guard in addition to the always-required review and security checks.
+2. Reconcile the findings, fix every real issue, and self-review the resulting diff.
+3. Commit only the reviewed diff.
+4. Attest that exact commit before pushing. The attestation runs the configured verification commands (`npm run check` and `npm test`):
 
-The repository review gate must then review and attest the exact diff before Git accepts a commit or push.
+   ```bash
+   bash .review-gate/review-gate.sh attest --ran review,clean-code,docs
+   ```
+
+5. Push without adding another commit between attestation and the push. Any new commit invalidates the attestation and requires the review, verification, and attestation steps again.
+
+On Windows linked worktrees, invoke the same script through Git Bash when `bash` is not available on `PATH`; the review categories and ordering do not change.
 
 ## 11. Acceptance criteria
 

@@ -113,7 +113,29 @@ The following is an illustrative internal shape, not a current API contract:
 }
 ```
 
-Messages should gain session-local `participantId`, `providerId`, and `protocolRole` metadata. Existing `agent` metadata should remain readable during the compatibility period.
+### Finalizer validation
+
+Normalize and validate the participant roster before resolving the finalizer. `finalizerParticipantId` may be absent or explicitly set to `"none"`, or it must exactly match one participant ID in the normalized roster. Reject duplicate participant IDs, unknown finalizer IDs, and protocol-role mismatches before spawning any provider process.
+
+Allowed finalizers depend on the protocol:
+
+- Three-peer sessions allow no finalizer or one participant whose role is `peer`.
+- Duo-with-judge sessions use the `judge` by default and may explicitly select no final brief. A `debater` cannot replace the judge.
+- Duo-with-critic sessions allow no finalizer or one of the two `peer` participants. The `critic` cannot be the finalizer.
+
+During normalization, an omitted finalizer resolves to the `judge` in duo-with-judge sessions and to no finalizer in the three-peer and duo-with-critic protocols. An explicit `"none"` remains no finalizer in every protocol.
+
+The selected finalizer must also pass the same readiness and capability checks required for its finalization phase. Persist the selection by participant ID and never infer it from provider registry order.
+
+### Message metadata compatibility
+
+Message metadata needs an independent `messageMetadataVersion`; it must not inherit the session-settings schema version. New protocol messages should use version 1 and persist `participantId`, `providerId`, and `protocolRole` together. They may also write the legacy `agent` alias during the compatibility period.
+
+For versioned messages, the participant tuple is authoritative. Validate that `participantId` exists in the saved run roster and that its `providerId` and `protocolRole` match that roster. Reject newly written messages when the versioned tuple is incomplete or when `agent` conflicts with `providerId`.
+
+The orchestrator must stamp message attribution from the server-owned invocation claim identified by `runId`, `phaseKey`, `attemptId`, and `participantId`. Provider adapters and model output may return content and execution status, but they cannot supply or override participant identity, provider identity, or protocol authority.
+
+For unversioned legacy messages, keep `agent` as the original historical attribution and normalize a read-only participant projection from the saved session or run assignment. Set `providerId` from the legacy `agent`; set `participantId` from the saved assignment when available; and set `protocolRole` from that assignment or to `null` when it is unknown. If no saved assignment exists, derive a stable legacy participant identity from available stored message, run, and provider data rather than the current provider registry. A `null` legacy role is display-only and cannot grant protocol authority or satisfy validation for a new run. Do not rewrite the historical transcript solely to add the new fields. This preserves the original author while giving new UI and orchestration code one normalized read shape.
 
 ## 5. Availability and cardinality rules
 
@@ -122,6 +144,8 @@ Availability is independent for every provider.
 - A provider may be supported but not installed, installed but not authenticated, or installed and ready.
 - Missing or unhealthy providers must not prevent the server or desktop app from starting.
 - Seat selectors should show unavailable providers as disabled and explain the failed readiness check.
+- Client and UI readiness results are informative only. Immediately before every provider phase, including finalization, the orchestrator must repeat server-authoritative installation, authentication, capability, and command-allowlist checks against the saved run assignment.
+- Bind each saved run assignment to a trusted execution fingerprint for the resolved executable and effective provider configuration. If that identity changes before a phase starts, fail the phase without substitution or fallback and require a new run configuration.
 - Any two distinct ready providers may run the existing two-participant protocols.
 - Three-peer, duo-with-judge, and duo-with-critic protocols require three distinct ready providers.
 - A three-participant protocol selected with fewer than three ready assigned participants must be rejected before any provider process starts.
@@ -268,6 +292,8 @@ Compatibility behavior:
 - If an assigned provider becomes unavailable, the Run action is disabled and the exact seat requiring attention is identified.
 - The UI must never imply that disabling an unavailable third provider disables the two ready providers.
 
+When a phase fails but its run remains active, show one explicit retry action for that failed phase. Do not show retry for completed phases or cancelled runs. The action must identify the saved run and failed attempt; it cannot change the participant, provider, role, prompt snapshot, or protocol. A stale or conflicting retry response should refresh the current phase state instead of pretending that a new attempt started.
+
 ## 10. Cursor provider plan
 
 Cursor is the proposed third provider. A Cursor desktop editor command is not automatically equivalent to the Cursor Agent CLI and must not be accepted as a substitute without a verified machine-readable agent interface.
@@ -318,7 +344,9 @@ Introduce a schema version for new session settings rather than guessing the sha
 Compatibility rules:
 
 - Existing saved requests keyed by the current `agents` object must remain readable.
-- Derive legacy seats from enabled providers in the existing provider order when opening an old session.
+- When an old session has no explicit participant assignment, derive legacy seats from the saved `agents` keys and their saved order. That saved mapping is authoritative even if the current provider registry has been reordered or a provider is no longer available.
+- Only when neither a saved assignment nor saved provider order exists may normalization use a deterministic fallback based on stable stored provider IDs. Mark that projection as legacy-derived and do not persist it until the user changes the session.
+- Never use current provider registry order to infer a historical seat or message author.
 - Preserve historical message authors and metadata; do not rewrite prior transcripts in place.
 - Keep existing chat, collaboration, and two-participant debate behavior available while the new protocol model rolls out.
 - Store participant assignment with the session so reopening it does not depend on current provider ordering.
@@ -343,6 +371,30 @@ Define and test distinct user-facing failures for these proposed conditions:
 
 Completed outputs must remain visible after a failure. A failed judge means "no judgment produced," not "the last debater wins." A failed critic means "critique phase incomplete," not automatic approval of the peers' output.
 
+### Phase persistence and idempotency
+
+Each orchestration run needs an immutable `runId` and a monotonic `generation` that changes when the run is cancelled or superseded. Each logical phase needs a stable `phaseKey` derived from the run, protocol phase, round, and participant. Each provider invocation needs a separate `attemptId`; an explicit retry creates a new attempt under the same logical `phaseKey`. Persist explicit `pending`, `running`, `completed`, `failed`, and `cancelled` states; do not infer phase state from the presence of transcript text.
+
+The persistence boundary must guarantee that:
+
+- a phase is durably marked `running` before its provider process is treated as active;
+- a completed message and its phase transition to `completed` are stored in one serialized or atomic session mutation before a completion event is emitted;
+- message IDs are unique, and the composite `(runId, generation, phaseKey, attemptId)` is the idempotency identity for one provider invocation. `phaseKey` groups the attempt history and is intentionally reused by an explicit retry;
+- every completion mutation compares the exact `runId`, `generation`, `phaseKey`, and `attemptId` and succeeds only while that attempt is still `running` and the run is active;
+- an explicit retry creates a new attempt only for a `failed` phase and never repeats completed protocol work;
+- cancellation and failure preserve completed outputs, persist terminal state before reporting it, and leave remaining phases non-final;
+- output or events arriving after cancellation, supersession, or attempt replacement are ignored and cannot re-open a phase or feed finalization;
+- a final outcome is persisted only after every phase required by the protocol has a valid terminal result; and
+- concurrent retry, stop, or reconnect requests cannot acquire more than one active claim for the same phase.
+
+If storage cannot provide a multi-record transaction, use a single serialized session mutation or an equivalent compare-and-swap revision so readers never observe a completed phase without its message, or a final outcome while required phases are incomplete.
+
+### Explicit retry contract
+
+The first implementation supports retrying a failed phase, not continuing with fewer participants and not reconfiguring a run in place. A retry request carries `runId`, `generation`, `phaseKey`, and the failed `attemptId`. The server compares those values with persisted state, verifies that the run is still active and the phase is still `failed`, repeats the server-authoritative provider checks, and atomically creates one new `attemptId` under the same `phaseKey`. Concurrent or stale requests lose that comparison and return the current state without spawning another process.
+
+The retry must reuse the immutable phase input and saved participant assignment. If the executable or effective provider configuration fingerprint has changed, the retry fails closed and the user must create a new run configuration. Cancelled runs are terminal in the first implementation and also require a new run. Downstream phases and finalization may resume only after the retried phase is durably completed.
+
 ## 13. Security invariants
 
 - Discussion protocols remain non-mutating.
@@ -365,6 +417,14 @@ Completed outputs must remain visible after a failure. A failed judge means "no 
 - Reject a missing, unhealthy, duplicated, or disabled participant before spawning a provider process.
 - Preserve configured provider-to-seat assignment across save and reload.
 - Read legacy provider-keyed settings without rewriting historical messages.
+- Reopen a legacy session after the current provider registry is reordered or a provider is removed and preserve its saved provider-to-seat mapping and historical author attribution.
+- Accept an omitted or explicit `"none"` finalizer, resolve an omitted duo-with-judge finalizer to its judge, and resolve omitted three-peer and duo-with-critic finalizers to none.
+- Reject unknown or protocol-ineligible finalizer IDs and reject duplicate participant IDs before spawning a provider process.
+- Normalize unversioned message metadata without changing the original legacy `agent` attribution.
+- Reject provider- or model-supplied participant metadata that does not come from the server-owned invocation claim.
+- Reject a versioned message whose participant tuple is incomplete, conflicts with legacy `agent`, or does not match the saved run roster.
+- Keep deterministic legacy fallback identity stable across reloads and do not persist that fallback until the user changes the session.
+- Reject a phase when provider readiness, authentication, capability, executable, or effective configuration changes between session configuration and spawn.
 
 ### Orchestration tests
 
@@ -377,6 +437,10 @@ Completed outputs must remain visible after a failure. A failed judge means "no 
 - Three-peer convergence requires all active peers; two matching peers are insufficient.
 - A provider failure preserves completed and partial messages with accurate phase metadata.
 - Cancellation terminates every provider active in a parallel phase.
+- A reconnect or duplicate completion delivery after interruption between durable persistence and event delivery does not duplicate a message or phase completion.
+- Cancellation, duplicate events, and concurrent retries cannot produce a false final phase or more than one active attempt for the same `phaseKey`.
+- Concurrent retry requests for the same failed attempt create exactly one new composite invocation identity and one provider process.
+- A delayed completion callback received after cancellation or supersession fails its generation-and-attempt comparison and cannot persist output or trigger finalization.
 
 ### Cursor adapter tests
 
@@ -434,20 +498,27 @@ Exit criterion: three openings are demonstrably independent and no majority rule
 
 Exit criterion: automated tests prove that judge and critic authority cannot be confused.
 
-### Phase 5: Cursor provider
+### Phase 5: persistence and recovery
+
+- Add persisted phase states, invocation idempotency, late-completion fencing, and the bounded failed-phase retry contract.
+- Add the failed-phase retry action and stale-state handling to the UI.
+
+Exit criterion: crash recovery, duplicate delivery, cancellation, and concurrent retry tests cannot duplicate output, revive cancelled work, or create two active attempts for one logical phase.
+
+### Phase 6: Cursor provider
 
 - Add the adapter, registry entry, readiness checks, structured-output parsing, and authentication guidance.
 - Add native-platform support first, then the Windows-to-WSL bridge only after its containment tests pass.
 
 Exit criterion: Cursor can participate in read-only discussion with the same output, timeout, cancellation, and redaction guarantees as the existing discussion providers.
 
-### Phase 6: verification and documentation
+### Phase 7: verification and documentation
 
 - Run focused and full regression suites.
 - Review production code, test code, and documentation with the project's required review gates.
 - Update provider and architecture documentation to describe only behavior that has shipped.
 
-Exit criterion: required checks and review-gate attestation pass for the exact change before any commit or push.
+Exit criterion: required checks and review-gate attestation pass for the exact reviewed commit before it is pushed.
 
 ## 16. Acceptance criteria
 
@@ -463,7 +534,9 @@ The feature is complete only when:
 - a critic cannot issue the final verdict;
 - existing sessions remain readable;
 - discussion modes cannot modify files or execute shell commands through any provider;
-- partial failures retain completed work and accurately report the missing phase; and
+- partial failures retain completed work and accurately report the missing phase;
+- a failed phase can be retried explicitly without changing its saved assignment or duplicating completed work;
+- cancellation is terminal and late provider output cannot revive cancelled work; and
 - the complete configured verification suite passes.
 
 ## 17. Decisions to resolve before implementation
@@ -476,6 +549,6 @@ Recommended defaults are included so reviewers can disagree with something concr
 4. **Perspective customization:** allow free text, but keep protocol authority fixed and visible.
 5. **Judge identity:** blind the judge to provider/model identity and randomize recorded position order.
 6. **Three-peer finalizer:** optional; default to none until the user selects one.
-7. **Failure degradation:** never automatic; preserve partial work and require a new explicit run configuration.
+7. **Failure degradation:** never automatic; preserve partial work. An explicit retry may rerun the same failed phase under its saved assignment when the execution fingerprint is unchanged; continuing with fewer participants, changing the assignment, or recovering a cancelled run requires a new explicit run configuration.
 8. **Windows Cursor support:** require a tested WSL bridge rather than treating the desktop editor command as the Agent CLI.
 9. **Execution:** keep Cursor discussion-only until a separate execution threat model and approval flow are designed.
