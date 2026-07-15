@@ -258,6 +258,22 @@ test("execution clone rejects an alternate object store added after creation", a
   }
 });
 
+test("execution clone rejects a commondir pointer added after creation", async () => {
+  const dir = repository();
+  let wt;
+  try {
+    wt = await createWorktree(dir, "codex", "t-added-commondir");
+    // A commondir pointer redirects Git to the source repo's object/ref store without
+    // touching the alternates fingerprint; validation must still reject it.
+    assert.equal(existsSync(join(wt.path, ".git", "commondir")), false);
+    writeFileSync(join(wt.path, ".git", "commondir"), `${join(dir, ".git")}\n`);
+    await assert.rejects(() => assertExecutionRepository(wt), /common directory changed/);
+  } finally {
+    if (wt) await removeWorktree(dir, wt.path, wt.branch);
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("execution metadata redirects are rejected before trusted Git operations", async (t) => {
   const dir = repository();
   let wt;

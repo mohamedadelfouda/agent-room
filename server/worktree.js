@@ -68,13 +68,21 @@ function digest(value) {
   return crypto.createHash("sha256").update(value).digest("hex");
 }
 
-async function readAlternateObjectStores(gitDir) {
-  try { return await fs.readFile(path.join(gitDir, "objects", "info", "alternates")); }
+// Reads an optional Git metadata file, treating "absent" as empty. A fresh --no-local clone
+// has neither an alternates file nor a commondir pointer, so an empty result is the expected,
+// safe baseline; a non-empty one is either rejected at creation or caught on change.
+async function readOptionalGitMetadata(filePath) {
+  try { return await fs.readFile(filePath); }
   catch (error) {
     if (error.code === "ENOENT") return Buffer.alloc(0);
     throw error;
   }
 }
+
+const alternatesPath = (gitDir) => path.join(gitDir, "objects", "info", "alternates");
+// .git/commondir redirects object/ref/config resolution to an external "common" directory.
+// A standalone clone has none; a written one would re-link the clone to the source repo.
+const commonDirPath = (gitDir) => path.join(gitDir, "commondir");
 
 async function assertRealMetadataTree(root) {
   const rootInfo = await fs.lstat(root);
@@ -175,15 +183,19 @@ export async function createWorktree(projectPath, agent, taskId) {
     if (normalizedPath(canonical) !== normalizedPath(wtPath)) throw new Error("Execution clone escaped its approved directory");
     const gitDir = path.join(wtPath, ".git");
     await assertRealMetadataTree(gitDir);
-    const [config, alternates] = await Promise.all([
+    const [config, alternates, commonDir] = await Promise.all([
       fs.readFile(path.join(gitDir, "config")),
-      readAlternateObjectStores(gitDir),
+      readOptionalGitMetadata(alternatesPath(gitDir)),
+      readOptionalGitMetadata(commonDirPath(gitDir)),
     ]);
-    // Best-effort integrity check, not a confidentiality boundary: a clone made with
-    // --no-local has no alternates file, so any alternate here signals misconfiguration.
-    // It cannot stop an untrusted executor that transiently adds and removes one mid-run
-    // (see SECURITY.md — the clone is not an OS sandbox); OS-level isolation owns that.
+    // Best-effort integrity checks, not confidentiality boundaries: a clone made with
+    // --no-local has no alternates file and no commondir pointer, so either one here signals
+    // that the clone would resolve objects through the source repo. They cannot stop an
+    // untrusted executor that transiently adds and removes one mid-run (see SECURITY.md — the
+    // clone is not an OS sandbox); OS-level isolation owns that. Fingerprinting below still
+    // catches a pointer that persists to validation time, before any trusted Git operation.
     if (alternates.length) throw new Error("Execution clone unexpectedly depends on an alternate object store");
+    if (commonDir.length) throw new Error("Execution clone unexpectedly redirects to a shared common directory");
     return {
       path: wtPath,
       branch,
@@ -192,6 +204,7 @@ export async function createWorktree(projectPath, agent, taskId) {
       isolation: "clone",
       cloneConfigFingerprint: digest(config),
       cloneAlternatesFingerprint: digest(alternates),
+      cloneCommonDirFingerprint: digest(commonDir),
       approval: {
         baseRef: approval.baseRef,
         authorName: approval.authorName,
@@ -212,7 +225,7 @@ export async function createWorktree(projectPath, agent, taskId) {
 }
 
 export async function assertExecutionRepository(worktree) {
-  if (worktree?.isolation !== "clone" || !worktree.cloneConfigFingerprint || !worktree.cloneAlternatesFingerprint) {
+  if (worktree?.isolation !== "clone" || !worktree.cloneConfigFingerprint || !worktree.cloneAlternatesFingerprint || !worktree.cloneCommonDirFingerprint) {
     throw new Error("Execution predates isolated-clone safety; run the task again");
   }
   const gitDir = path.join(worktree.path, ".git");
@@ -229,12 +242,14 @@ export async function assertExecutionRepository(worktree) {
   const canonicalGitDir = await fs.realpath(gitDir);
   const expectedPrefix = `${normalizedPath(worktree.path)}${path.sep}`;
   if (!normalizedPath(canonicalGitDir).startsWith(expectedPrefix)) throw new Error("Execution repository metadata escaped its clone");
-  const [config, alternates] = await Promise.all([
+  const [config, alternates, commonDir] = await Promise.all([
     fs.readFile(path.join(gitDir, "config")),
-    readAlternateObjectStores(gitDir),
+    readOptionalGitMetadata(alternatesPath(gitDir)),
+    readOptionalGitMetadata(commonDirPath(gitDir)),
   ]);
   if (digest(config) !== worktree.cloneConfigFingerprint) throw new Error("Execution repository configuration changed; discard this run");
   if (digest(alternates) !== worktree.cloneAlternatesFingerprint) throw new Error("Execution repository object boundary changed; discard this run");
+  if (digest(commonDir) !== worktree.cloneCommonDirFingerprint) throw new Error("Execution repository common directory changed; discard this run");
   return true;
 }
 
