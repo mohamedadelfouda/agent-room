@@ -741,6 +741,7 @@ function renderMessages() {
   }
   renderExecutions();
   renderContextColumn();
+  renderDecisionRoom();
   // Completed sessions open at the first message (read from the top); live runs follow the newest.
   chat.scrollTop = running ? chat.scrollHeight : 0;
   chat.setAttribute("aria-busy", "false");
@@ -901,18 +902,19 @@ function autoGrow(el) { el.style.height = "auto"; el.style.height = Math.min(el.
 /* ---------------- SSE ---------------- */
 function handleEvent(event) {
   if (event.type === "session_updated") loadSession();
-  if (event.type === "run_started") setRunning(true, `${discussionModeLabel(event.mode)} · ${formatLocaleNumber(lang, event.rounds)} ${t("roundsShort")}`);
-  if (event.type === "agent_start") { setAgentState(event.agent, `${phaseLabel(event.phase)} · ${t("roundWord")} ${formatLocaleNumber(lang, event.round)}`, "running"); $("liveStatus").textContent = t("working")(event.label); }
-  if (event.type === "agent_activity" && event.event?.text) setAgentState(event.agent, event.event.text.slice(0, 90), "running");
-  if (event.type === "agent_complete") setAgentState(event.agent, t("replied"), "done");
+  if (event.type === "run_started") { liveAgents = {}; renderLiveStrip(); setRunning(true, `${discussionModeLabel(event.mode)} · ${formatLocaleNumber(lang, event.rounds)} ${t("roundsShort")}`); }
+  if (event.type === "agent_start") { const s = `${phaseLabel(event.phase)} · ${t("roundWord")} ${formatLocaleNumber(lang, event.round)}`; liveAgents[event.agent] = s; renderLiveStrip(); setAgentState(event.agent, s, "running"); $("liveStatus").textContent = t("working")(event.label); }
+  if (event.type === "agent_activity" && event.event?.text) { const s = event.event.text.slice(0, 90); if (event.agent in liveAgents) { liveAgents[event.agent] = s; renderLiveStrip(); } setAgentState(event.agent, s, "running"); }
+  if (event.type === "agent_complete") { liveAgents[event.agent] = t("replied"); renderLiveStrip(); setAgentState(event.agent, t("replied"), "done"); }
   if (["run_complete","run_stopped","run_error"].includes(event.type)) {
+    liveAgents = {}; renderLiveStrip();
     setRunning(false, event.type === "run_complete" ? t("runDone") : event.type === "run_stopped" ? t("runStopped") : localizedFailure({ code: event.code, detail: event.error }));
     loadSession(); refreshSessions();
   }
   if (event.type === "exec_started") setRunning(true, t("starting"), "execution");
-  if (event.type === "exec_phase") { const s = event.phase === "executing" ? t("execExecuting")(event.agent) : t("execReviewing")(event.agent); $("execStatus").textContent = s; $("liveStatus").textContent = s; }
-  if (event.type === "exec_ready") { setRunning(false, t("execAwaiting")); $("execStopBtn").hidden = true; $("execRun").disabled = false; $("execTask").value = ""; loadSession(); refreshSessions(); }
-  if (event.type === "exec_error") { setRunning(false, localizedFailure({ code: event.code, detail: event.error })); $("execStopBtn").hidden = true; $("execRun").disabled = false; loadSession(); refreshSessions(); }
+  if (event.type === "exec_phase") { const s = event.phase === "executing" ? t("execExecuting")(event.agent) : t("execReviewing")(event.agent); liveAgents = { [event.agent]: s }; renderLiveStrip(); $("execStatus").textContent = s; $("liveStatus").textContent = s; }
+  if (event.type === "exec_ready") { liveAgents = {}; renderLiveStrip(); setRunning(false, t("execAwaiting")); $("execStopBtn").hidden = true; $("execRun").disabled = false; $("execTask").value = ""; loadSession(); refreshSessions(); }
+  if (event.type === "exec_error") { liveAgents = {}; renderLiveStrip(); setRunning(false, localizedFailure({ code: event.code, detail: event.error })); $("execStopBtn").hidden = true; $("execRun").disabled = false; loadSession(); refreshSessions(); }
 }
 function setAgentState(agent, text, cls = "") { const el = $(`${agent}RunState`); if (el) { el.textContent = text; el.className = `run-state ${cls}`; } }
 function setRunning(value, status, kind = "orchestration") {
@@ -1404,6 +1406,213 @@ async function rejectExec(taskId) {
   }
 }
 
+/* ---------------- mission-control decision room ---------------- */
+const ROOM_PHASES = {
+  collaboration: { pill: "roomPhaseCollaboration", heading: "roomHeadingCollaboration", sub: "roomSubCollaboration" },
+  decision: { pill: "roomPhaseDecision", heading: "roomHeadingDecision", sub: "roomSubDecision" },
+  execute: { pill: "roomPhaseExecute", heading: "roomHeadingExecute", sub: "roomSubExecute" },
+};
+const STAGE_KEYS = ["stagePlan", "stageCollab", "stageDecision", "stageExecute", "stageReview", "stageAccept"];
+const STAGE_INDEX = { collaboration: 1, decision: 2, execute: 3 };
+let liveAgents = {};
+
+function pendingExecution() {
+  return (currentSession?.executions ?? []).find((item) => item.status === "awaiting_user");
+}
+// Read-only phase derived from real session state; the mockup's manual switch is never authoritative.
+function derivePhase() {
+  if (!currentSession) return "collaboration";
+  if (currentSession.executing || pendingExecution()) return "execute";
+  if (currentSession.running || currentSession.status === "running") return "collaboration";
+  return "decision";
+}
+function applyPhase() {
+  const phase = derivePhase();
+  document.documentElement.dataset.phase = phase;
+  const keys = ROOM_PHASES[phase];
+  $("statusPill").textContent = t(keys.pill);
+  $("mainHeading").textContent = t(keys.heading);
+  $("mainSub").textContent = t(keys.sub);
+  $("gateTag").hidden = phase !== "decision";
+}
+function renderStages() {
+  const host = $("stageList");
+  if (!host) return;
+  const activeIndex = STAGE_INDEX[derivePhase()] ?? 2;
+  host.setAttribute("role", "list");
+  host.innerHTML = "";
+  STAGE_KEYS.forEach((key, index) => {
+    const done = index < activeIndex;
+    const active = index === activeIndex;
+    const stage = document.createElement("div");
+    stage.className = `stage${done ? " is-done" : ""}${active ? " is-active" : ""}`;
+    stage.setAttribute("role", "listitem");
+    if (active) stage.setAttribute("aria-current", "step");
+    stage.innerHTML = `<span class="stage-dot" aria-hidden="true">${done ? "✓" : bdi(formatLocaleNumber(lang, index + 1))}</span><strong>${esc(t(key))}</strong>`;
+    host.appendChild(stage);
+  });
+}
+function latestAgentMessage(providerId) {
+  const messages = currentSession?.messages ?? [];
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (messages[index].author === "agent" && messages[index].agent === providerId) return messages[index];
+  }
+  return null;
+}
+function enabledProviders() {
+  const enabled = providers.filter((item) => $(`${item.id}Enabled`)?.checked ?? true);
+  return enabled.length ? enabled : providers;
+}
+function renderDecisionCards() {
+  const host = $("agentGrid");
+  if (!host) return;
+  host.innerHTML = "";
+  for (const provider of enabledProviders()) {
+    const message = latestAgentMessage(provider.id);
+    const nameId = `dcard-${provider.id}-name`;
+    const card = document.createElement("article");
+    card.className = `dcard ${esc(provider.id)}`;
+    card.setAttribute("aria-labelledby", nameId);
+    const badge = message ? phaseLabel(message.phase) : "";
+    const head = `<div class="dcard-head"><div class="dcard-id"><span class="agent-avatar ${esc(provider.id)}" aria-hidden="true">${esc(String(provider.label).slice(0, 1))}</span><strong id="${esc(nameId)}">${bdi(provider.label)}</strong></div>${badge ? `<span class="badge">${esc(badge)}</span>` : ""}</div>`;
+    let body;
+    if (message) {
+      const meta = message.meta || {};
+      const footParts = [
+        meta.requestedModel ? bdi(meta.requestedModel, "ltr") : "",
+        meta.requestedEffort ? bdi(meta.requestedEffort, "ltr") : "",
+        fmtDuration(meta.durationMs) ? esc(fmtDuration(meta.durationMs)) : "",
+        message.round ? `${esc(t("roundWord"))} ${bdi(formatLocaleNumber(lang, message.round))}` : "",
+      ].filter(Boolean);
+      const foot = footParts.length ? `<div class="dcard-foot">${footParts.join(" · ")}</div>` : "";
+      body = `<div class="dcard-body"><p dir="auto">${esc(String(message.content || "").slice(0, 600))}</p>${foot}</div>`;
+    } else {
+      body = `<div class="dcard-body"><p class="dcard-empty">${esc(t("dcardEmpty"))}</p></div>`;
+    }
+    card.innerHTML = head + body;
+    host.appendChild(card);
+  }
+}
+function renderApprovalGate() {
+  const host = $("approvalHost");
+  if (!host) return;
+  host.innerHTML = "";
+  const execution = pendingExecution();
+  if (!execution) return;
+  const executor = bdi(providerInfo(execution.executor).label, "ltr");
+  const card = document.createElement("div");
+  card.className = "approval";
+  card.innerHTML = `<div class="approval-lock" aria-hidden="true">🔒</div><div><strong>${esc(t("execAwaiting"))}</strong><p>${t("approvalGateSummary")(executor)}</p></div><div class="approval-actions"></div>`;
+  const actions = card.querySelector(".approval-actions");
+  const addButton = (className, label, handler) => {
+    const button = document.createElement("button");
+    button.className = className;
+    button.textContent = label;
+    button.onclick = () => { actions.querySelectorAll("button").forEach((item) => { item.disabled = true; }); handler(); };
+    actions.appendChild(button);
+  };
+  addButton("btn-primary", t("mergeLocal"), () => acceptExec(execution.taskId, "merge"));
+  if (currentSession.project?.canOpenPr) addButton("btn-ghost", t("openPr"), () => acceptExec(execution.taskId, "pr"));
+  addButton("btn-danger", t("reject"), () => rejectExec(execution.taskId));
+  host.appendChild(card);
+}
+function renderLiveStrip() {
+  const strip = $("liveStrip");
+  if (!strip) return;
+  const ids = Object.keys(liveAgents);
+  if (!ids.length) { strip.hidden = true; strip.innerHTML = ""; return; }
+  strip.hidden = false;
+  strip.innerHTML = ids.map((id) => {
+    const info = providerInfo(id);
+    return `<div class="live-actor"><span class="agent-avatar ${esc(info.id)}" aria-hidden="true">${esc(String(info.label).slice(0, 1))}</span><div><strong>${bdi(info.label)}</strong><span dir="auto">${esc(liveAgents[id])}</span></div></div>`;
+  }).join("");
+}
+// Single re-render entry point, called from renderMessages() so it tracks every session/SSE update.
+function renderDecisionRoom() {
+  if (!$("stageList")) return;
+  applyPhase();
+  renderStages();
+  renderDecisionCards();
+  renderApprovalGate();
+}
+
+/* ---------------- theme / preset / view ---------------- */
+function applyTheme(theme) {
+  const value = theme === "light" ? "light" : "dark";
+  if (value === "light") document.documentElement.dataset.theme = "light";
+  else delete document.documentElement.dataset.theme;
+  const button = $("themeBtn");
+  if (button) {
+    button.setAttribute("aria-pressed", String(value === "light"));
+    button.textContent = value === "light" ? "☾" : "☼";
+  }
+  localStorage.setItem("agent-room-theme", value);
+}
+function toggleTheme() { applyTheme(document.documentElement.dataset.theme === "light" ? "dark" : "light"); }
+
+function applyPreset(id) {
+  const value = ["simple", "builder", "mission"].includes(id) ? id : "mission";
+  document.documentElement.dataset.preset = value;
+  document.querySelectorAll(".preset").forEach((button) => {
+    const active = button.dataset.preset === value;
+    button.classList.toggle("is-active", active);
+    button.setAttribute("aria-pressed", String(active));
+  });
+  localStorage.setItem("agent-room-preset", value);
+}
+
+const VIEW_TABS = ["tabDecision", "tabConversation"];
+function setView(view) {
+  const value = view === "conversation" ? "conversation" : "decision";
+  $("decisionPanel").hidden = value !== "decision";
+  $("conversationPanel").hidden = value !== "conversation";
+  for (const id of VIEW_TABS) {
+    const tab = $(id);
+    const selected = tab.dataset.view === value;
+    tab.setAttribute("aria-selected", String(selected));
+    tab.tabIndex = selected ? 0 : -1; // roving tabindex per the ARIA tabs pattern
+  }
+  localStorage.setItem("agent-room-view", value);
+}
+function onViewTabKeydown(event) {
+  const currentIndex = VIEW_TABS.indexOf(event.currentTarget.id);
+  if (currentIndex === -1) return;
+  let nextIndex = null;
+  if (event.key === "ArrowRight" || event.key === "ArrowLeft") {
+    const forward = (event.key === "ArrowRight") !== (document.documentElement.dir === "rtl");
+    nextIndex = (currentIndex + (forward ? 1 : -1) + VIEW_TABS.length) % VIEW_TABS.length;
+  } else if (event.key === "Home") {
+    nextIndex = 0;
+  } else if (event.key === "End") {
+    nextIndex = VIEW_TABS.length - 1;
+  }
+  if (nextIndex === null) return;
+  event.preventDefault();
+  const tab = $(VIEW_TABS[nextIndex]);
+  setView(tab.dataset.view);
+  tab.focus();
+}
+
+// The presets drawer reuses the app's managed-modal machinery (focus trap +
+// appShell inert + Escape), then layers the slide/backdrop chrome on top.
+function openPresets() {
+  const drawer = $("presetsDrawer");
+  const backdrop = $("backdrop");
+  backdrop.hidden = false;
+  drawer.setAttribute("aria-hidden", "false");
+  openManagedModal(drawer, { initialFocus: $("closePresets"), dismiss: closePresets });
+  requestAnimationFrame(() => { backdrop.classList.add("open"); drawer.classList.add("open"); });
+}
+function closePresets() {
+  const drawer = $("presetsDrawer");
+  const backdrop = $("backdrop");
+  drawer.classList.remove("open");
+  backdrop.classList.remove("open");
+  backdrop.hidden = true;
+  drawer.setAttribute("aria-hidden", "true");
+  closeManagedModal(drawer);
+}
+
 /* ---------------- wiring ---------------- */
 document.querySelectorAll(".lang-btn").forEach((b) => b.onclick = () => applyLang(b.dataset.lang));
 document.querySelectorAll(".mode-btn").forEach((b) => b.onclick = () => setMode(b.dataset.mode));
@@ -1438,6 +1647,15 @@ $("approveCancel").onclick = cancelExecApproval;
 $("approveModal").addEventListener("click", (e) => { if (e.target === $("approveModal")) cancelExecApproval(); });
 $("toggleRail").onclick = toggleRailCollapsed;
 $("toggleContext").onclick = toggleContextColumn;
+$("themeBtn").onclick = toggleTheme;
+$("presetsBtn").onclick = openPresets;
+$("closePresets").onclick = closePresets;
+$("closePresets2").onclick = closePresets;
+$("backdrop").onclick = closePresets;
+document.querySelectorAll(".preset").forEach((button) => { button.onclick = () => applyPreset(button.dataset.preset); });
+$("tabDecision").onclick = () => setView("decision");
+$("tabConversation").onclick = () => setView("conversation");
+VIEW_TABS.forEach((id) => { $(id).addEventListener("keydown", onViewTabKeydown); });
 $("sessionGroupBy").onchange = () => {
   sessionGroupBy = $("sessionGroupBy").value === "project" ? "project" : "date";
   localStorage.setItem("agent-room-session-group", sessionGroupBy);
@@ -1464,6 +1682,9 @@ document.addEventListener("keydown", (event) => {
 async function initialize() {
   applyShellChrome();
   applyLang(localStorage.getItem("agent-room-lang") || "ar");
+  applyTheme(localStorage.getItem("agent-room-theme") || "dark");
+  applyPreset(localStorage.getItem("agent-room-preset") || "mission");
+  setView(localStorage.getItem("agent-room-view") || "decision");
   try {
     await loadProviderCatalog();
     loadSettings();

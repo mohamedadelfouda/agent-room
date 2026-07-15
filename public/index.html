@@ -65,7 +65,7 @@
             <p id="sessionMeta"></p>
           </div>
           <div class="topbar-actions">
-            <span class="pill" id="statusPill">—</span>
+            <span class="pill" id="statusPill" role="status" aria-live="polite">—</span>
             <button id="setupToggle" class="btn-ghost setup-toggle" aria-expanded="false" aria-controls="setupDrawer">
               <span id="setupSummary" class="setup-summary"></span>
               <span class="chevron" aria-hidden="true">⌄</span>
@@ -166,7 +166,7 @@
                   <div class="panel-title" data-i18n="evidence">الأدلة</div>
                   <span class="soon-badge" data-i18n="soon">قريباً</span>
                 </header>
-                <div class="panel-body"><p class="muted" data-i18n="evidenceSoon">جدول الأدلة المشتركة هيتوصّل بالـ backend في تحديث جاي.</p></div>
+                <div class="panel-body"><p class="muted" data-i18n="evidenceSoon">جدول الأدلة المشتركة هيتوصّل بالـbackend في تحديث جاي.</p></div>
               </section>
             </section>
 
@@ -269,9 +269,9 @@
   </div>
 
   <div class="backdrop" id="backdrop" hidden></div>
-  <aside class="drawer" id="presetsDrawer" aria-hidden="true" aria-label="Customize workspace" data-i18n-aria-label="customize">
+  <aside class="drawer hidden" id="presetsDrawer" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="presetsTitle">
     <header class="drawer-head">
-      <div><strong data-i18n="customize">تخصيص مساحة العمل</strong><div class="tiny" data-i18n="customizeSub">٣ أوضاع جاهزة</div></div>
+      <div><h2 id="presetsTitle" class="drawer-title" data-i18n="customize">تخصيص مساحة العمل</h2><div class="tiny" data-i18n="customizeSub">٣ أوضاع جاهزة</div></div>
       <button id="closePresets" type="button" class="icon-btn" aria-label="Close" data-i18n-aria-label="close">×</button>
     </header>
     <div class="drawer-body">

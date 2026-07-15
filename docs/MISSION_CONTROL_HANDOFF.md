@@ -1,8 +1,10 @@
 # Mission Control UI — Handoff
 
-Branch: `ui/mission-control` · Base: `main` · Status: **work in progress (structure landed, JS wiring pending)**
+Branch: `ui/mission-control` · Base: `main` · Status: **JS wiring complete — decision room is live and verified**
 
-This document is the single source of truth for finishing the "Mission Control" UI. Read it fully before touching `public/`.
+This document is the single source of truth for the "Mission Control" UI. The
+"Remaining work" section below has been superseded by **"Completion log"** at the
+end — read that first. Read the rest for the binding map and design decisions.
 
 ## Goal
 
@@ -89,3 +91,65 @@ npm test                                        # full suite incl. a11y + i18n p
 node --test test/unit/accessibility-markup.test.js
 node --test test/unit/i18n.test.js
 ```
+
+---
+
+## Completion log (JS wiring session)
+
+All the "Remaining work" above is done. Summary of what landed:
+
+### Wiring (`public/app.js`)
+- `derivePhase()` + `applyPhase()` — read-only phase (`collaboration` / `decision`
+  / `execute`) derived from real session state; drives `html[data-phase]`,
+  `#statusPill`, `#mainHeading`/`#mainSub`, and `#gateTag`.
+- `renderStages()` — read-only stage tracker (`role="list"`, `aria-current="step"`
+  on the active step). No timestamps (still "coming soon").
+- `renderDecisionCards()` — latest real message per enabled provider → `.dcard`;
+  empty → `.dcard-empty`.
+- `renderApprovalGate()` — real `awaiting_user` execution → `.approval` reusing
+  `acceptExec`/`rejectExec`.
+- `renderLiveStrip()` — running agents from SSE (`agent_start`/`agent_activity`/
+  `agent_complete`, cleared on run/exec end).
+- `renderDecisionRoom()` is called from `renderMessages()` (the single re-render
+  point), so it tracks every session load and SSE update.
+- Theme toggle (`html[data-theme]`), presets (`html[data-preset]`, persisted),
+  view tabs (Decision/Conversation), presets drawer — all persisted to
+  `localStorage` and wired in `initialize()`.
+
+### Shell layout fix (`public/styles.css`)
+The previous shell commit left the CSS written for an `.app` > `.sessions`
+structure while the HTML uses `.shell` > `.rail` + `.main` — so the rail rendered
+as a 52px-tall bar stacked on top of the main column (not a sidebar), and the
+shell never filled the viewport. Fixed: `.shell` is now the 2-column grid
+(`--rail-w` | main, full height), `.rail` carries the 5-row template, and
+`.main`/`.session-view` give the 3-column workspace a proper fill height with
+per-column scroll. Dead `.app`/`.sessions` rules removed. Plus the CSS from
+"Remaining work §1" (`.main-inner`, panel display, padding moved off
+`.session-view`).
+
+### i18n (`public/strings.js`)
+Added AR+EN (parity test green): `roomPhase*`, `roomHeading*`, `roomSub*`,
+`stagePlan/Collab/Decision/Execute/Review/Accept`, `dcardEmpty`,
+`approvalGateSummary`.
+
+### Verification
+- `npm run check` + `npm test` → **199/199 green**.
+- Ran the app and verified live (Browser pane, JS-measured — screenshots time out
+  in this env): shell renders as sidebar+main in both RTL and LTR with no
+  horizontal overflow; decision phase pill/heading/stages/cards render; view-tab
+  switch, theme toggle, preset density, and the presets drawer all work.
+- Review gate: `code-reviewer` + `security-reviewer` + `accessibility-reviewer`
+  + `i18n-reviewer` + `clean-code-guard`. Security: clean. Fixed every finding I
+  introduced: presets drawer now uses the managed-modal focus trap
+  (`role="dialog"`, `aria-modal`, `appShell` inert), view tabs got roving-tabindex
+  + arrow-key nav, `#statusPill` got `aria-live="polite"`, light-theme `--faint`
+  raised to AA contrast, and an `evidenceSoon` HTML/catalog text drift fixed.
+
+### Known pre-existing issues (NOT from this wiring — tracked separately)
+- `renderContextColumn()` prints the raw `goalStatus` enum (e.g. `needs_user`)
+  untranslated — Arabic users see English mid-sentence. Needs a `goalStatusKey()`
+  mapper + AR/EN keys.
+- `handleAttachFiles()` cumulative-size guard sums UTF-16 char length against a
+  byte limit, so multibyte text can exceed the 300 KB cap.
+- `loadSession()` doesn't re-sync `#attachBtn` disabled state the way `setRunning`
+  does (attach stays enabled on a running session opened fresh).
