@@ -780,7 +780,7 @@ function renderContextColumn() {
   const discussion = (currentSession.messages || []).filter((message) => message.author === "agent" && ["collaboration", "opening", "rebuttal"].includes(message.phase));
   const completed = Math.max(0, ...discussion.map((message) => Number(message.round) || 0));
   const requested = Number(currentSession.settings?.rounds) || 0;
-  const finalReport = [...(currentSession.messages || [])].reverse().find((message) => ["converged", "needs_more_rounds"].includes(message.phase));
+  const finalReport = latestFinalReport();
   const openPoints = [...new Set(discussion.flatMap((message) => message.control?.openPoints || []).filter(Boolean))];
   const corrections = discussion.filter((message) => message.control?.substantiveDelta).map((message) => ({ agent: message.agent, content: String(message.content || "").slice(0, 140) }));
   const latestGoal = [...discussion].reverse().map((message) => message.control?.goalStatus).find(Boolean);
@@ -820,6 +820,13 @@ function renderContextColumn() {
       return `<li><b>${outcome}</b> · ${type}${context ? ` (${context})` : ""}</li>`;
     }).join("");
     col.appendChild(contextCard("log", t("decisionLog"), `<ul>${items}</ul>`, false));
+  }
+
+  if (!col.children.length) {
+    const empty = document.createElement("div");
+    empty.className = "context-empty";
+    empty.innerHTML = `<span class="context-empty-mark" aria-hidden="true">◔</span><p>${esc(t("contextEmpty"))}</p>`;
+    col.appendChild(empty);
   }
 }
 
@@ -1435,10 +1442,33 @@ function applyPhase() {
   $("mainSub").textContent = t(keys.sub);
   $("gateTag").hidden = phase !== "decision";
 }
+function formatClock(iso) {
+  if (!iso) return "";
+  const date = new Date(iso);
+  return Number.isNaN(date.getTime()) ? "" : date.toLocaleTimeString(localeId(lang), { hour: "2-digit", minute: "2-digit" });
+}
+function latestFinalReport() {
+  return [...(currentSession?.messages ?? [])].reverse().find((message) => ["converged", "needs_more_rounds"].includes(message.phase));
+}
+// Stage timestamps derived from real events only; stages with no honest source (Plan, Review) stay blank.
+function stageTimes() {
+  const executions = currentSession?.executions ?? [];
+  const firstAgent = (currentSession?.messages ?? []).find((message) => message.author === "agent");
+  const finalReport = latestFinalReport();
+  const firstExec = executions.find((execution) => execution.createdAt);
+  const accepted = [...executions].reverse().find((execution) => ["merged", "pr_opened"].includes(execution.status) && execution.decidedAt);
+  return {
+    1: firstAgent?.createdAt,   // Collaborate
+    2: finalReport?.createdAt,  // Decision
+    3: firstExec?.createdAt,    // Execute
+    5: accepted?.decidedAt,     // Accept (most recent accepted cycle)
+  };
+}
 function renderStages() {
   const host = $("stageList");
   if (!host) return;
   const activeIndex = STAGE_INDEX[derivePhase()] ?? 2;
+  const times = stageTimes();
   host.setAttribute("role", "list");
   host.innerHTML = "";
   STAGE_KEYS.forEach((key, index) => {
@@ -1448,7 +1478,9 @@ function renderStages() {
     stage.className = `stage${done ? " is-done" : ""}${active ? " is-active" : ""}`;
     stage.setAttribute("role", "listitem");
     if (active) stage.setAttribute("aria-current", "step");
-    stage.innerHTML = `<span class="stage-dot" aria-hidden="true">${done ? "✓" : bdi(formatLocaleNumber(lang, index + 1))}</span><strong>${esc(t(key))}</strong>`;
+    const clock = formatClock(times[index]);
+    const clockHtml = clock ? `<time class="stage-time" datetime="${esc(times[index])}">${bdi(clock)}</time>` : "";
+    stage.innerHTML = `<span class="stage-dot" aria-hidden="true">${done ? "✓" : bdi(formatLocaleNumber(lang, index + 1))}</span><strong>${esc(t(key))}</strong>${clockHtml}`;
     host.appendChild(stage);
   });
 }

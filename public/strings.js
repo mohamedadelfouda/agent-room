@@ -1,7 +1,7 @@
 export const STRINGS = {
   ar: {
     theme:"المظهر", customize:"تخصيص مساحة العمل", customizeSub:"٣ أوضاع جاهزة", close:"إغلاق", done:"تم",
-    workflowNav:"مسار الغرفة", workflow:"مسار الغرفة", stageTimesSoon:"أوقات المراحل قريباً", gateTag:"بوابة القرار",
+    workflowNav:"مسار الغرفة", workflow:"مسار الغرفة", gateTag:"بوابة القرار",
     viewTabs:"طريقة العرض", tabDecision:"القرار", tabConversation:"المحادثة",
     evidence:"الأدلة", soon:"قريباً", evidenceSoon:"جدول الأدلة المشتركة هيتوصّل بالـbackend في تحديث جاي.",
     presetSimple:"بسيط", presetSimpleDesc:"القرار + الموافقة + الهدف", presetBuilder:"مطوّر", presetBuilderDesc:"+ مسار العمل والسياق", presetMission:"مركز التحكم", presetMissionDesc:"الوضع الكامل + السجل",
@@ -9,7 +9,7 @@ export const STRINGS = {
     roomHeadingCollaboration:"الوكلاء بيتناقشوا", roomHeadingDecision:"راجِع واتخذ القرار", roomHeadingExecute:"تنفيذ ومراجعة",
     roomSubCollaboration:"شوف ردود الوكلاء وهُم بيتكوّنوا في الوقت الحقيقي.", roomSubDecision:"قارن ردود الوكلاء واتخذ قرارك.", roomSubExecute:"في تنفيذ بانتظار قرارك داخل نسخة معزولة.",
     stagePlan:"تخطيط", stageCollab:"تعاون", stageDecision:"قرار", stageExecute:"تنفيذ", stageReview:"مراجعة", stageAccept:"اعتماد",
-    dcardEmpty:"لسه مفيش رد", approvalGateSummary:(executor)=>`${executor} خلّص التنفيذ في نسخة Git معزولة — راجِع واتخذ قرارك.`,
+    dcardEmpty:"لسه مفيش رد", contextEmpty:"السياق هيظهر هنا بعد أول جولة أو ربط مشروع.", approvalGateSummary:(executor)=>`${executor} خلّص التنفيذ في نسخة Git معزولة — راجِع واتخذ قرارك.`,
     newSession:"جلسة جديدة", sessions:"الجلسات", brandSubtitle:"جلسة ذكاء اصطناعي مشتركة", connected:"متصل", disconnected:"غير متصل — اضغط لإعادة المحاولة",
     emptyTitle:"جلسة واحدة، أكثر من عقل", emptyBody:"أنشئ جلسة، اختر التعاون أو المناظرة، وحدّد الموديل ومستوى الجهد لكل وكيل. أنت صاحب القرار.",
     mode:"أسلوب الجولة", modeCollab:"تعاون", modeDebate:"مناظرة", modeChat:"شات", rounds:"عدد الجولات", roundsShort:"جولات", finalizer:"الخلاصة النهائية", none:"بدون",
@@ -51,7 +51,7 @@ export const STRINGS = {
   },
   en: {
     theme:"Theme", customize:"Customize workspace", customizeSub:"3 ready presets", close:"Close", done:"Done",
-    workflowNav:"Room flow", workflow:"Room flow", stageTimesSoon:"Stage times coming soon", gateTag:"Decision gate",
+    workflowNav:"Room flow", workflow:"Room flow", gateTag:"Decision gate",
     viewTabs:"View", tabDecision:"Decision", tabConversation:"Conversation",
     evidence:"Evidence", soon:"Soon", evidenceSoon:"The shared evidence table will be wired to the backend in a coming update.",
     presetSimple:"Simple", presetSimpleDesc:"Decision + approval + goal", presetBuilder:"Builder", presetBuilderDesc:"+ Workflow and context", presetMission:"Mission Control", presetMissionDesc:"Full layout + log",
@@ -59,7 +59,7 @@ export const STRINGS = {
     roomHeadingCollaboration:"Agents are deliberating", roomHeadingDecision:"Review & decide", roomHeadingExecute:"Execute & review",
     roomSubCollaboration:"Watch the agents' replies take shape in real time.", roomSubDecision:"Compare the agents' replies and make your call.", roomSubExecute:"An execution is awaiting your decision inside an isolated clone.",
     stagePlan:"Plan", stageCollab:"Collaborate", stageDecision:"Decision", stageExecute:"Execute", stageReview:"Review", stageAccept:"Accept",
-    dcardEmpty:"No reply yet", approvalGateSummary:(executor)=>`${executor} finished executing in an isolated Git clone — review and make your decision.`,
+    dcardEmpty:"No reply yet", contextEmpty:"Context will appear here after the first round or once you attach a project.", approvalGateSummary:(executor)=>`${executor} finished executing in an isolated Git clone — review and make your decision.`,
     newSession:"New session", sessions:"Sessions", brandSubtitle:"Shared AI session", connected:"Connected", disconnected:"Disconnected — click to retry",
     emptyTitle:"One session, many minds", emptyBody:"Create a session, choose Collaboration or Debate, set model and effort per agent. You decide.",
     mode:"Mode", modeCollab:"Collaborate", modeDebate:"Debate", modeChat:"Chat", rounds:"Rounds", roundsShort:"rounds", finalizer:"Final synthesis", none:"None",

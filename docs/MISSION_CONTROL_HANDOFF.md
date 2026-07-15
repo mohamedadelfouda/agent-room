@@ -153,3 +153,16 @@ Added AR+EN (parity test green): `roomPhase*`, `roomHeading*`, `roomSub*`,
   byte limit, so multibyte text can exceed the 300 KB cap.
 - `loadSession()` doesn't re-sync `#attachBtn` disabled state the way `setRunning`
   does (attach stays enabled on a running session opened fresh).
+
+### Design polish (follow-up round)
+User design review produced four fixes: (1) rail brand header — CSS selectors
+renamed to match the actual HTML (`.brand-mark`/`.brand-name`), fixing the
+cramped/overlapping header and the broken collapsed-rail state; (2) `.topbar-actions`
+now flex + `nowrap` (with `overflow-x` safety) so the topbar stays one line and the
+setup summary truncates; (3) **stage timestamps wired** — `renderStages()` shows
+per-stage clock times derived from real events (first agent message, final-report
+message, execution `createdAt`/`decidedAt`); Plan/Review stay blank (no honest
+source), and the "coming soon" note is gone; (4) an empty-state for the context
+column when a session has no cards yet. Re-reviewed (code/a11y/i18n), findings
+fixed (active-stage time contrast, reflow safety, dedup helper). Evidence table
+(#5) intentionally deferred — it needs a backend data source, not just wiring.
