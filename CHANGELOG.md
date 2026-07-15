@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.1 — 2026-07-15
+
+- Rejected `.git/commondir` redirection in execution clones so an untrusted executor cannot re-link a disposable clone to the source object store.
+- Made desktop code signing optional and published unsigned tagged builds as pre-releases instead of failing the release.
+- Fixed the macOS (`.zip`) and Linux (`.deb`/`.rpm`) installer builds so tagged releases produce artifacts on all three platforms.
+
 ## 0.2.0 — 2026-07-14
 
 - Added goal-aware, proposal-versioned collaboration control blocks and neutral decision briefs.
