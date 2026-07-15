@@ -13,6 +13,7 @@ import {
 } from "./i18n-core.js";
 import { createLatestRequest } from "./latest-request.js";
 import { activityControls } from "./activity-state.js";
+import { closeReservedPrWindow, openReservedPrWindow, reservePrWindow } from "./pr-window.js";
 import { STRINGS } from "./strings.js";
 
 const $ = (id) => document.getElementById(id);
@@ -1058,14 +1059,28 @@ function renderExecutions() {
 async function acceptExec(taskId, action) {
   const requestedId = currentSessionId;
   const requestedEpoch = sessionViewEpoch;
+  // Reserve the browser window during the click event. Waiting for the API and
+  // session refresh first causes normal popup blockers to reject the PR window.
+  const reservedPrWindow = reservePrWindow(window, action);
+  let response;
   try {
-    const response = await api(`/api/sessions/${requestedId}/execution/${taskId}/accept`, { method: "POST", body: JSON.stringify({ action }) });
-    if (isCurrentSessionView(requestedId, requestedEpoch)) await loadSession();
-    if (response.prUrl) window.open(response.prUrl, "_blank");
+    response = await api(`/api/sessions/${requestedId}/execution/${taskId}/accept`, { method: "POST", body: JSON.stringify({ action }) });
   } catch (error) {
+    closeReservedPrWindow(reservedPrWindow);
     if (!isCurrentSessionView(requestedId, requestedEpoch)) return;
     $("liveStatus").textContent = localizedFailure(error);
     await loadSession();
+    return;
+  }
+  if (!isCurrentSessionView(requestedId, requestedEpoch)) {
+    closeReservedPrWindow(reservedPrWindow);
+    return;
+  }
+  openReservedPrWindow(window, reservedPrWindow, response.prUrl);
+  try {
+    await loadSession();
+  } catch (error) {
+    if (isCurrentSessionView(requestedId, requestedEpoch)) $("liveStatus").textContent = localizedFailure(error);
   }
 }
 async function rejectExec(taskId) {

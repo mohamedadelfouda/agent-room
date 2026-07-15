@@ -369,17 +369,56 @@ function processGroupAlive(pid) {
   catch (error) { return error.code === "EPERM"; }
 }
 
+export function parsePosixProcessGroupLiveness(output, processGroupId) {
+  const target = String(processGroupId);
+  let parsedRow = false;
+  for (const line of String(output || "").split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    const match = line.match(/^\s*(\d+)\s+(\S+)\s*$/);
+    if (!match) continue;
+    parsedRow = true;
+    if (match[1] !== target) continue;
+    if (!match[2].toUpperCase().startsWith("Z")) return true;
+  }
+  if (!parsedRow) return null;
+  return false;
+}
+
+function inspectPosixProcessGroup(pid) {
+  return new Promise((resolve) => {
+    execFile(
+      "/bin/ps",
+      ["-A", "-o", "pgid=", "-o", "state="],
+      {
+        env: { ...process.env, LC_ALL: "C" },
+        maxBuffer: 4 * 1024 * 1024,
+        timeout: 1000,
+        windowsHide: true,
+      },
+      (error, stdout) => resolve(error ? null : parsePosixProcessGroupLiveness(stdout, pid)),
+    );
+  });
+}
+
+async function processGroupHasLiveMembers(pid) {
+  if (!processGroupAlive(pid)) return false;
+  const inspected = await inspectPosixProcessGroup(pid);
+  // If ps is unavailable or its output changes unexpectedly, keep the old
+  // fail-closed behavior and report the group as live.
+  return inspected !== false;
+}
+
 async function waitForProcessGroupExit(pid, timeoutMs) {
   const deadline = Date.now() + timeoutMs;
-  while (processGroupAlive(pid) && Date.now() < deadline) {
-    await new Promise((resolve) => setTimeout(resolve, 25));
+  while (await processGroupHasLiveMembers(pid) && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 50));
   }
-  return !processGroupAlive(pid);
+  return !await processGroupHasLiveMembers(pid);
 }
 
 async function terminatePosixProcessGroup(child, { immediate = false, graceMs = 2500 } = {}) {
   const pid = Number(child?.pid);
-  if (!Number.isSafeInteger(pid) || pid < 1 || !processGroupAlive(pid)) return true;
+  if (!Number.isSafeInteger(pid) || pid < 1 || !await processGroupHasLiveMembers(pid)) return true;
   signalChild(child, immediate ? "SIGKILL" : "SIGTERM", true);
   if (immediate || await waitForProcessGroupExit(pid, graceMs)) return waitForProcessGroupExit(pid, 750);
   signalChild(child, "SIGKILL", true);

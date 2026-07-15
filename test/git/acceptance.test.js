@@ -27,6 +27,25 @@ function repository() {
   return dir;
 }
 
+function writeRefOnlyRecoveryState({ dir, worktree, accepted, temporaryIndex, nonce }) {
+  const lockPath = join(dir, ".git", "index.lock");
+  git(dir, "update-ref", worktree.approval.baseRef, accepted.commitSha, worktree.baseSha);
+  execFileSync("git", ["read-tree", worktree.baseSha], { cwd: dir, env: { ...process.env, GIT_INDEX_FILE: temporaryIndex } });
+  writeFileSync(lockPath, JSON.stringify({ agentRoom: true, nonce }));
+  writeFileSync(`${lockPath}.agent-room-intent`, JSON.stringify({
+    agentRoom: true, nonce, phase: "refreshing", temporaryIndex,
+    indexCommit: accepted.commitSha, targetRef: worktree.approval.baseRef,
+    baseSha: worktree.baseSha, commitSha: accepted.commitSha,
+  }));
+}
+
+function addIgnoredUserFile(dir, name, content = "user content\n") {
+  writeFileSync(join(dir, ".gitignore"), `.agent-workspaces/\n${name}\n`);
+  git(dir, "add", ".gitignore");
+  git(dir, "commit", "-qm", `ignore ${name}`);
+  writeFileSync(join(dir, name), content);
+}
+
 test("the public decision gate creates no commit before acceptance and uses the owner identity", async () => {
   const dir = repository();
   const session = await createSession("decision gate");
@@ -479,6 +498,196 @@ test("startup finishes an accepted index after a crash following worktree refres
     assert.equal(await recoverAgentRoomIndexLock(dir), true);
     assert.equal(git(dir, "status", "--porcelain").trim(), "");
     assert.equal(git(dir, "show", "HEAD:after-crash.js"), "export const recovered = true;\n");
+  } finally {
+    if (wt) await removeWorktree(dir, wt.path, wt.branch);
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("startup rebuilds a stale temporary index after the target ref advances", async () => {
+  const dir = repository();
+  let wt;
+  const temporaryIndex = join(dir, ".git", "index.agent-room-stale-refresh");
+  try {
+    wt = await createWorktree(dir, "codex", "t-stale-refresh");
+    writeFileSync(join(wt.path, "rebuilt.js"), "export const rebuilt = true;\n");
+    const accepted = await prepareAcceptedChange({ projectPath: dir, worktree: wt, message: "accepted before stale refresh" });
+    writeRefOnlyRecoveryState({ dir, worktree: wt, accepted, temporaryIndex, nonce: "stale-refresh-nonce" });
+
+    assert.equal(await recoverAgentRoomIndexLock(dir), true);
+    assert.equal(git(dir, "write-tree").trim(), git(dir, "rev-parse", `${accepted.commitSha}^{tree}`).trim());
+    assert.equal(git(dir, "status", "--porcelain").trim(), "");
+    assert.equal(readFileSync(join(dir, "rebuilt.js"), "utf8").replace(/\r\n/g, "\n"), "export const rebuilt = true;\n");
+  } finally {
+    if (wt) await removeWorktree(dir, wt.path, wt.branch);
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("startup rebuilds a stale temporary index when the accepted commit modifies a tracked file", async () => {
+  const dir = repository();
+  let wt;
+  const temporaryIndex = join(dir, ".git", "index.agent-room-stale-modification");
+  try {
+    wt = await createWorktree(dir, "codex", "t-stale-modification");
+    writeFileSync(join(wt.path, "README.md"), "accepted tracked content\n");
+    const accepted = await prepareAcceptedChange({ projectPath: dir, worktree: wt, message: "accepted tracked modification" });
+    writeRefOnlyRecoveryState({ dir, worktree: wt, accepted, temporaryIndex, nonce: "stale-modification-nonce" });
+
+    assert.equal(await recoverAgentRoomIndexLock(dir), true);
+    assert.equal(readFileSync(join(dir, "README.md"), "utf8").replace(/\r\n/g, "\n"), "accepted tracked content\n");
+    assert.equal(git(dir, "status", "--porcelain").trim(), "");
+  } finally {
+    if (wt) await removeWorktree(dir, wt.path, wt.branch);
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("stale-index recovery preserves a user edit that overlaps the accepted change", async () => {
+  const dir = repository();
+  let wt;
+  const temporaryIndex = join(dir, ".git", "index.agent-room-stale-user-edit");
+  try {
+    wt = await createWorktree(dir, "codex", "t-stale-user-edit");
+    writeFileSync(join(wt.path, "README.md"), "accepted content\n");
+    const accepted = await prepareAcceptedChange({ projectPath: dir, worktree: wt, message: "accepted before overlapping edit" });
+    writeRefOnlyRecoveryState({ dir, worktree: wt, accepted, temporaryIndex, nonce: "stale-edit-nonce" });
+    writeFileSync(join(dir, "README.md"), "user content after crash\n");
+
+    assert.equal(await recoverAgentRoomIndexLock(dir), true);
+    assert.equal(readFileSync(join(dir, "README.md"), "utf8"), "user content after crash\n");
+    assert.equal(git(dir, "write-tree").trim(), git(dir, "rev-parse", `${accepted.commitSha}^{tree}`).trim());
+    assert.match(git(dir, "status", "--porcelain"), /README\.md/);
+  } finally {
+    if (wt) await removeWorktree(dir, wt.path, wt.branch);
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("stale-index recovery carries accepted files forward beside a non-overlapping user edit", async () => {
+  const dir = repository();
+  let wt;
+  const temporaryIndex = join(dir, ".git", "index.agent-room-stale-non-overlap");
+  try {
+    wt = await createWorktree(dir, "codex", "t-stale-non-overlap");
+    writeFileSync(join(wt.path, "forward.js"), "export const forward = true;\n");
+    const accepted = await prepareAcceptedChange({ projectPath: dir, worktree: wt, message: "accepted beside later user edit" });
+    writeRefOnlyRecoveryState({ dir, worktree: wt, accepted, temporaryIndex, nonce: "stale-non-overlap-nonce" });
+    writeFileSync(join(dir, "README.md"), "user content after crash\n");
+
+    assert.equal(await recoverAgentRoomIndexLock(dir), true);
+    assert.equal(readFileSync(join(dir, "README.md"), "utf8"), "user content after crash\n");
+    assert.equal(readFileSync(join(dir, "forward.js"), "utf8").replace(/\r\n/g, "\n"), "export const forward = true;\n");
+    assert.equal(git(dir, "write-tree").trim(), git(dir, "rev-parse", `${accepted.commitSha}^{tree}`).trim());
+    assert.equal(git(dir, "status", "--porcelain").trim(), "M README.md");
+  } finally {
+    if (wt) await removeWorktree(dir, wt.path, wt.branch);
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("merge refuses to overwrite an ignored user file added by the accepted commit", async () => {
+  const dir = repository();
+  let wt;
+  try {
+    addIgnoredUserFile(dir, "local.txt");
+    wt = await createWorktree(dir, "codex", "t-ignored-collision");
+    writeFileSync(join(wt.path, ".gitignore"), ".agent-workspaces/\n");
+    writeFileSync(join(wt.path, "local.txt"), "accepted content\n");
+    const accepted = await prepareAcceptedChange({ projectPath: dir, worktree: wt, message: "accepted ignored collision" });
+
+    await assert.rejects(() => mergeBranch(dir, wt, accepted.commitSha), /overwrite an untracked or ignored project file/);
+    assert.equal(readFileSync(join(dir, "local.txt"), "utf8"), "user content\n");
+    assert.equal(git(dir, "rev-parse", "HEAD").trim(), wt.baseSha);
+  } finally {
+    if (wt) await removeWorktree(dir, wt.path, wt.branch);
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("merge collision checks honor case-insensitive repository paths", async () => {
+  const dir = repository();
+  let wt;
+  try {
+    addIgnoredUserFile(dir, "local.txt");
+    git(dir, "config", "core.ignoreCase", "true");
+    wt = await createWorktree(dir, "codex", "t-case-collision");
+    writeFileSync(join(wt.path, ".gitignore"), ".agent-workspaces/\n");
+    writeFileSync(join(wt.path, "LOCAL.txt"), "accepted content\n");
+    const accepted = await prepareAcceptedChange({ projectPath: dir, worktree: wt, message: "accepted case-only collision" });
+
+    await assert.rejects(() => mergeBranch(dir, wt, accepted.commitSha), /overwrite an untracked or ignored project file/);
+    assert.equal(readFileSync(join(dir, "local.txt"), "utf8"), "user content\n");
+    assert.equal(git(dir, "rev-parse", "HEAD").trim(), wt.baseSha);
+  } finally {
+    if (wt) await removeWorktree(dir, wt.path, wt.branch);
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("merge collision checks block an untracked file in an accepted path's parent", async () => {
+  const dir = repository();
+  let wt;
+  try {
+    addIgnoredUserFile(dir, "local");
+    wt = await createWorktree(dir, "codex", "t-parent-collision");
+    writeFileSync(join(wt.path, ".gitignore"), ".agent-workspaces/\n");
+    mkdirSync(join(wt.path, "local"));
+    writeFileSync(join(wt.path, "local", "accepted.txt"), "accepted content\n");
+    const accepted = await prepareAcceptedChange({ projectPath: dir, worktree: wt, message: "accepted parent-path collision" });
+
+    await assert.rejects(() => mergeBranch(dir, wt, accepted.commitSha), /overwrite an untracked or ignored project file/);
+    assert.equal(readFileSync(join(dir, "local"), "utf8"), "user content\n");
+    assert.equal(git(dir, "rev-parse", "HEAD").trim(), wt.baseSha);
+  } finally {
+    if (wt) await removeWorktree(dir, wt.path, wt.branch);
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("merge collision checks find descendants beyond a neighboring path", async () => {
+  const dir = repository();
+  let wt;
+  try {
+    mkdirSync(join(dir, "a"));
+    writeFileSync(join(dir, "a", "tracked.txt"), "tracked\n");
+    writeFileSync(join(dir, ".gitignore"), ".agent-workspaces/\na/b\na-\n");
+    git(dir, "add", "-A");
+    git(dir, "commit", "-qm", "prepare nested ignored paths");
+    writeFileSync(join(dir, "a", "b"), "nested user content\n");
+    writeFileSync(join(dir, "a-"), "neighbor user content\n");
+
+    wt = await createWorktree(dir, "codex", "t-descendant-collision");
+    rmSync(join(wt.path, "a"), { recursive: true, force: true });
+    writeFileSync(join(wt.path, "a"), "accepted content\n");
+    writeFileSync(join(wt.path, ".gitignore"), ".agent-workspaces/\n");
+    const accepted = await prepareAcceptedChange({ projectPath: dir, worktree: wt, message: "accepted descendant collision" });
+
+    await assert.rejects(() => mergeBranch(dir, wt, accepted.commitSha), /overwrite an untracked or ignored project file/);
+    assert.equal(readFileSync(join(dir, "a", "b"), "utf8"), "nested user content\n");
+    assert.equal(readFileSync(join(dir, "a-"), "utf8"), "neighbor user content\n");
+  } finally {
+    if (wt) await removeWorktree(dir, wt.path, wt.branch);
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("stale-index recovery preserves an ignored file that collides with an accepted addition", async () => {
+  const dir = repository();
+  let wt;
+  const temporaryIndex = join(dir, ".git", "index.agent-room-ignored-collision");
+  try {
+    addIgnoredUserFile(dir, "local.txt");
+    wt = await createWorktree(dir, "codex", "t-recovery-ignored-collision");
+    writeFileSync(join(wt.path, ".gitignore"), ".agent-workspaces/\n");
+    writeFileSync(join(wt.path, "local.txt"), "accepted content\n");
+    const accepted = await prepareAcceptedChange({ projectPath: dir, worktree: wt, message: "accepted ignored recovery collision" });
+    writeRefOnlyRecoveryState({ dir, worktree: wt, accepted, temporaryIndex, nonce: "ignored-collision-nonce" });
+
+    assert.equal(await recoverAgentRoomIndexLock(dir), true);
+    assert.equal(readFileSync(join(dir, "local.txt"), "utf8"), "user content\n");
+    assert.equal(git(dir, "write-tree").trim(), git(dir, "rev-parse", `${accepted.commitSha}^{tree}`).trim());
+    assert.match(git(dir, "status", "--porcelain"), /local\.txt/);
   } finally {
     if (wt) await removeWorktree(dir, wt.path, wt.branch);
     rmSync(dir, { recursive: true, force: true });

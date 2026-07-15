@@ -40,6 +40,14 @@ function safeExternalUrl(value) {
   }
 }
 
+function openSafeExternalUrl(value) {
+  const external = safeExternalUrl(value);
+  if (!external) return;
+  shell.openExternal(external).catch((error) => {
+    console.error("Could not open external URL:", error?.code || "open_failed");
+  });
+}
+
 async function createWindow() {
   process.env.PORT = "0";
   process.env.NO_OPEN = "1";
@@ -94,15 +102,13 @@ async function createWindow() {
     },
   });
   mainWindow.webContents.setWindowOpenHandler(({ url: target }) => {
-    const external = safeExternalUrl(target);
-    if (external) shell.openExternal(external);
+    openSafeExternalUrl(target);
     return { action: "deny" };
   });
   mainWindow.webContents.on("will-navigate", (event, target) => {
     try { if (new URL(target).origin === new URL(url).origin) return; } catch {}
     event.preventDefault();
-    const external = safeExternalUrl(target);
-    if (external) shell.openExternal(external);
+    openSafeExternalUrl(target);
   });
   mainWindow.once("ready-to-show", () => mainWindow?.show());
   await mainWindow.loadURL(url);

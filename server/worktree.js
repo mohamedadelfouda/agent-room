@@ -518,6 +518,113 @@ async function writeIntent(intentPath, value) {
   } finally { await fs.rm(temporary, { force: true }).catch(() => {}); }
 }
 
+function nulSeparatedPaths(output) {
+  return String(output || "").split("\0").filter(Boolean).map((entry) => entry.replace(/\/$/, ""));
+}
+
+function normalizedGitPath(value, ignoreCase) {
+  const unicodeNormalized = value.normalize("NFC");
+  return ignoreCase ? unicodeNormalized.toLowerCase() : unicodeNormalized;
+}
+
+function lowerBound(sorted, target) {
+  let start = 0;
+  let end = sorted.length;
+  while (start < end) {
+    const middle = Math.floor((start + end) / 2);
+    if (sorted[middle] < target) start = middle + 1;
+    else end = middle;
+  }
+  return start;
+}
+
+function gitPathListsOverlap(leftPaths, rightPaths, ignoreCase) {
+  const right = [...new Set(rightPaths.map((entry) => normalizedGitPath(entry, ignoreCase)))].sort();
+  const rightSet = new Set(right);
+  for (const entry of leftPaths) {
+    const left = normalizedGitPath(entry, ignoreCase);
+    if (rightSet.has(left)) return true;
+    for (let slash = left.lastIndexOf("/"); slash > 0; slash = left.lastIndexOf("/", slash - 1)) {
+      if (rightSet.has(left.slice(0, slash))) return true;
+    }
+    const descendantPrefix = `${left}/`;
+    const descendant = right[lowerBound(right, descendantPrefix)];
+    if (descendant?.startsWith(descendantPrefix)) return true;
+  }
+  return false;
+}
+
+async function acceptedAdditionCollidesWithUntracked(projectPath, baseSha, commitSha) {
+  const [added, ignoreCaseSetting] = await Promise.all([
+    git(["diff-tree", "--no-commit-id", "--name-only", "-z", "--diff-filter=A", "--no-renames", "-r", baseSha, commitSha], projectPath),
+    optionalGitValue(["config", "--bool", "core.ignoreCase"], projectPath),
+  ]);
+  if (added.stdoutTruncated) throw new Error("The accepted change has too many paths to check safely for merge collisions");
+  const additions = nulSeparatedPaths(added.stdout);
+  if (additions.length === 0) return false;
+  const [visible, ignored] = await Promise.all([
+    git(["ls-files", "--others", "--exclude-standard", "--directory", "-z"], projectPath),
+    git(["ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "-z"], projectPath),
+  ]);
+  if (visible.stdoutTruncated || ignored.stdoutTruncated) {
+    throw new Error("The project has too many untracked files to check safely for merge collisions");
+  }
+  const worktreeOnly = [...nulSeparatedPaths(visible.stdout), ...nulSeparatedPaths(ignored.stdout)];
+  const ignoreCase = ignoreCaseSetting === "true" || process.platform === "win32";
+  return gitPathListsOverlap(additions, worktreeOnly, ignoreCase);
+}
+
+async function rebuildInterruptedRefresh(projectPath, indexPath, intent) {
+  const lineage = (await git(["rev-list", "--parents", "-n", "1", intent.commitSha], projectPath)).stdout.trim().split(/\s+/);
+  if (lineage.length !== 2 || lineage[0] !== intent.commitSha || lineage[1] !== intent.baseSha) {
+    throw new Error("Interrupted merge recovery no longer matches the accepted commit lineage");
+  }
+
+  const [indexChanges, trackedChanges, untrackedFiles, additionCollision] = await Promise.all([
+    git(["diff-index", "--cached", "--name-only", "-z", intent.baseSha], projectPath).then((result) => result.stdout),
+    git(["diff-files", "--name-only", "-z"], projectPath).then((result) => result.stdout),
+    git(["ls-files", "--others", "--exclude-standard", "-z"], projectPath).then((result) => result.stdout),
+    acceptedAdditionCollidesWithUntracked(projectPath, intent.baseSha, intent.commitSha),
+  ]);
+  if (indexChanges) {
+    throw new Error("Interrupted merge recovery found an unexpected project index");
+  }
+
+  const temporaryIndex = intent.temporaryIndex;
+  const worktreeChanged = Boolean(trackedChanges || untrackedFiles);
+  await fs.rm(temporaryIndex, { force: true });
+  await fs.rm(`${temporaryIndex}.lock`, { force: true });
+  // The validated real index carries worktree stat and sparse-checkout bits
+  // that a freshly read tree does not. Preserve them for the safe two-tree update.
+  await fs.copyFile(indexPath, temporaryIndex);
+  if (additionCollision) {
+    await git(["read-tree", intent.commitSha], projectPath, { GIT_INDEX_FILE: temporaryIndex });
+  } else {
+    try {
+      // A two-tree update carries the accepted commit forward while preserving
+      // non-overlapping edits made after the crash.
+      await git(["read-tree", "-m", "-u", intent.baseSha, intent.commitSha], projectPath, { GIT_INDEX_FILE: temporaryIndex });
+    } catch (error) {
+      if (!worktreeChanged) throw error;
+      // If a user edit overlaps the accepted change, preserve the user's bytes
+      // and finish only the index. Git will expose that overlap as an unstaged
+      // modification instead of silently overwriting it.
+      await fs.rm(temporaryIndex, { force: true });
+      await fs.rm(`${temporaryIndex}.lock`, { force: true });
+      await git(["read-tree", intent.commitSha], projectPath, { GIT_INDEX_FILE: temporaryIndex });
+    }
+  }
+
+  const [temporaryTree, intendedTree] = await Promise.all([
+    git(["write-tree"], projectPath, { GIT_INDEX_FILE: temporaryIndex }).then((result) => result.stdout.trim()),
+    git(["rev-parse", `${intent.commitSha}^{tree}`], projectPath).then((result) => result.stdout.trim()),
+  ]);
+  if (!temporaryTree || temporaryTree !== intendedTree) {
+    throw new Error("Interrupted merge recovery could not rebuild the accepted index");
+  }
+  return fs.readFile(temporaryIndex);
+}
+
 // Startup recovery only removes a lock that carries Agent Room's marker (or a
 // binary index whose hash matches Agent Room's durable install intent). It never
 // removes an unrelated Git process's index.lock.
@@ -547,9 +654,10 @@ export async function recoverAgentRoomIndexLock(projectPath) {
   const hashOwned = identityMatches && intent?.phase === "installing" && intent.lockSha256 === crypto.createHash("sha256").update(lock).digest("hex");
   let partialInstallOwned = false;
   let verifiedTemporary = null;
+  let safeTemporary = false;
   if (typeof intent?.temporaryIndex === "string") {
     const expectedPrefix = `${path.basename(indexPath)}.agent-room-`;
-    const safeTemporary = path.dirname(intent.temporaryIndex) === path.dirname(indexPath) && path.basename(intent.temporaryIndex).startsWith(expectedPrefix);
+    safeTemporary = path.dirname(intent.temporaryIndex) === path.dirname(indexPath) && path.basename(intent.temporaryIndex).startsWith(expectedPrefix);
     if (safeTemporary) {
       try {
         const [expected, currentIndex] = await Promise.all([fs.readFile(intent.temporaryIndex), fs.readFile(indexPath)]);
@@ -569,6 +677,9 @@ export async function recoverAgentRoomIndexLock(projectPath) {
     const currentTarget = intent?.targetRef ? await optionalGitValue(["rev-parse", intent.targetRef], projectPath) : "";
     const currentHeadRef = await optionalGitValue(["symbolic-ref", "-q", "HEAD"], projectPath);
     const refsValid = currentHeadRef === intent?.targetRef && currentTarget === intent?.indexCommit && intent?.indexCommit === intent?.commitSha;
+    if (!verifiedTemporary && markerOwned && refsValid && safeTemporary && intent?.phase === "refreshing") {
+      verifiedTemporary = await rebuildInterruptedRefresh(projectPath, indexPath, intent);
+    }
     const canFinishIndex = verifiedTemporary && refsValid;
     if (canFinishIndex) {
       const previousIndex = await fs.readFile(indexPath);
@@ -653,6 +764,9 @@ export async function mergeBranch(projectPath, worktree, commitSha, ref = accept
     const targetAlreadyAdvanced = currentTarget === commitSha;
     if (!targetAlreadyAdvanced && currentTarget !== worktree.baseSha) throw new Error("Target branch moved before merge; run the task again");
     if (checkedOutRef !== targetRef) throw new Error("The checked-out branch changed before merge; run the task again");
+    if (await acceptedAdditionCollidesWithUntracked(projectPath, worktree.baseSha, commitSha)) {
+      throw new Error("The accepted change would overwrite an untracked or ignored project file");
+    }
 
     await git(["read-tree", worktree.baseSha], projectPath, { GIT_INDEX_FILE: temporaryIndex });
     await writeIntent(intentPath, {

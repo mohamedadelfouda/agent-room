@@ -3,8 +3,8 @@ import assert from "node:assert/strict";
 import { mkdtempSync, realpathSync, symlinkSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { spawn } from "node:child_process";
-import { allowedCommand, approveProviderCommand, approvedProviderCommand, resolveAllowedCommand, runProcess, sanitizedAgentEnv, sanitizedGithubEnv, sanitizedPublicationEnv, terminateProcess } from "../../server/process.js";
+import { execFileSync, spawn } from "node:child_process";
+import { allowedCommand, approveProviderCommand, approvedProviderCommand, parsePosixProcessGroupLiveness, resolveAllowedCommand, runProcess, sanitizedAgentEnv, sanitizedGithubEnv, sanitizedPublicationEnv, terminateProcess } from "../../server/process.js";
 
 // Run node against a temp .js file so large scripts stay readable and cross-platform.
 function withScript(body, fn) {
@@ -34,6 +34,22 @@ function forceStopPid(pid) {
   if (!Number.isSafeInteger(pid) || pid < 1) return;
   try { process.kill(pid, "SIGKILL"); } catch {}
 }
+
+function posixProcessIsLive(pid) {
+  try {
+    const state = execFileSync("/bin/ps", ["-o", "state=", "-p", String(pid)], { encoding: "utf8" }).trim();
+    return Boolean(state) && !state.toUpperCase().startsWith("Z");
+  } catch (error) {
+    if (error?.status === 1 && !String(error?.stdout || "").trim() && !String(error?.stderr || "").trim()) return false;
+    throw error;
+  }
+}
+
+test("POSIX process-group inspection ignores zombies but keeps live members", () => {
+  assert.equal(parsePosixProcessGroupLiveness(" 42 Z\n 42 Z+\n 7 S\n", 42), false);
+  assert.equal(parsePosixProcessGroupLiveness(" 42 Z\n 42 S\n", 42), true);
+  assert.equal(parsePosixProcessGroupLiveness("not process data\n", 42), null);
+});
 
 test("runProcess caps accumulated stdout so a runaway CLI can't blow up memory", async () => {
   await withScript("for(let i=0;i<300000;i++)console.log('xxxxxxxxxxxxxxxx')\n", async (file) => {
@@ -231,7 +247,7 @@ test("runProcess containment kills a POSIX descendant after its parent exits nor
         const result = await running;
         assert.equal(result.code, 0);
         assert.ok(Number.isSafeInteger(descendantPid));
-        assert.throws(() => process.kill(descendantPid, 0), /ESRCH|not found|no such process/i);
+        assert.equal(posixProcessIsLive(descendantPid), false);
         descendantPid = undefined;
       } finally {
         await stopChild(wrapper);
