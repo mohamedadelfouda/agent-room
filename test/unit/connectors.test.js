@@ -4,7 +4,7 @@ import { rm } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { createSession, getSession, saveSession } from "../../server/store.js";
-import { connectorCatalog } from "../../server/connectors/registry.js";
+import { connectorCatalog, executeConnectorAction } from "../../server/connectors/registry.js";
 import { setConnectorEnabled, requestConnectorAction, decideConnectorAction } from "../../server/connectors/service.js";
 import { handleMcpRequest } from "../../server/mcp-server.js";
 import { claudeMcpLaunch, resolveMcpBridgeGrant, setMcpBridgeUrl } from "../../server/mcp-config.js";
@@ -40,13 +40,25 @@ test("connector proposals reject inputs too large to review and persist safely",
   try {
     await setConnectorEnabled(session.id, "github", true);
     await assert.rejects(
-      () => requestConnectorAction(session.id, "github", "create_issue", { body: "x".repeat(70000) }),
+      () => requestConnectorAction(session.id, "github", "create_issue", { body: "🙂".repeat(17000) }),
       /64 KiB approval limit/,
     );
   } finally { await cleanup(session.id); }
 });
 
-test("Gmail send performs no network call until approval, then executes exactly once", async () => {
+test("inherited object properties are never connector actions", async () => {
+  await assert.rejects(() => executeConnectorAction("github", "constructor", {}), /Unknown connector action/);
+  const session = await createSession("connector-inherited-action-test");
+  try {
+    await setConnectorEnabled(session.id, "github", true);
+    await assert.rejects(
+      () => requestConnectorAction(session.id, "github", "constructor", {}),
+      /Unknown connector action/,
+    );
+  } finally { await cleanup(session.id); }
+});
+
+test("Gmail send requires boolean approval and executes exactly once", async () => {
   const session = await createSession("gmail-approval-test");
   const previousToken = process.env.AGENT_ROOM_GMAIL_ACCESS_TOKEN;
   const previousFetch = globalThis.fetch;
@@ -62,11 +74,76 @@ test("Gmail send performs no network call until approval, then executes exactly 
     await setConnectorEnabled(session.id, "gmail", true);
     const proposal = await requestConnectorAction(session.id, "gmail", "send_message", { to: "user@example.com", subject: "Hello", body: "Body" });
     assert.equal(calls, 0);
+    await assert.rejects(() => decideConnectorAction(session.id, proposal.id, "true"), /must be a boolean/);
+    assert.equal(calls, 0);
     const completed = await decideConnectorAction(session.id, proposal.id, true);
     assert.equal(completed.status, "completed");
     assert.equal(calls, 1);
     await assert.rejects(() => decideConnectorAction(session.id, proposal.id, true), /already completed/);
     assert.equal(calls, 1);
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousToken === undefined) delete process.env.AGENT_ROOM_GMAIL_ACCESS_TOKEN;
+    else process.env.AGENT_ROOM_GMAIL_ACCESS_TOKEN = previousToken;
+    await cleanup(session.id);
+  }
+});
+
+test("read-only connector results preserve structure while redacting credentials", async () => {
+  const session = await createSession("gmail-read-redaction-test");
+  const previousToken = process.env.AGENT_ROOM_GMAIL_ACCESS_TOKEN;
+  const previousFetch = globalThis.fetch;
+  const credential = "quoted-connector-secret";
+  process.env.AGENT_ROOM_GMAIL_ACCESS_TOKEN = "placeholder-token";
+  globalThis.fetch = async () => new Response(JSON.stringify({
+    messages: [{ id: "message-id", snippet: `TOKEN="${credential}"`, metadata: { accessToken: "opaque-value", label: "visible" } }],
+  }), {
+    status: 200,
+    headers: { "Content-Type": "application/json" },
+  });
+  try {
+    await setConnectorEnabled(session.id, "gmail", true);
+    const completed = await requestConnectorAction(session.id, "gmail", "list_messages", {});
+    assert.ok(Array.isArray(completed.result.messages));
+    assert.equal(completed.result.messages[0].snippet, "TOKEN=<redacted>");
+    assert.equal(completed.result.messages[0].metadata.accessToken, "<redacted>");
+    assert.equal(completed.result.messages[0].metadata.label, "visible");
+    assert.equal(JSON.stringify(completed).includes(credential), false);
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousToken === undefined) delete process.env.AGENT_ROOM_GMAIL_ACCESS_TOKEN;
+    else process.env.AGENT_ROOM_GMAIL_ACCESS_TOKEN = previousToken;
+    await cleanup(session.id);
+  }
+});
+
+test("approved connector results are stored safely without changing the execution input", async () => {
+  const session = await createSession("gmail-write-redaction-test");
+  const previousToken = process.env.AGENT_ROOM_GMAIL_ACCESS_TOKEN;
+  const previousFetch = globalThis.fetch;
+  const outboundValue = "send-this-value";
+  const responseSecret = "quoted-response-secret";
+  process.env.AGENT_ROOM_GMAIL_ACCESS_TOKEN = "placeholder-token";
+  globalThis.fetch = async (_url, options) => {
+    const payload = JSON.parse(options.body);
+    const message = Buffer.from(payload.raw, "base64url").toString("utf8");
+    assert.match(message, new RegExp(`TOKEN="${outboundValue}"`));
+    return { ok: true, status: 200, json: async () => ({
+      id: "message-id",
+      credentials: { accessToken: "opaque-value" },
+      summary: `PASSWORD="${responseSecret}"`,
+    }) };
+  };
+  try {
+    await setConnectorEnabled(session.id, "gmail", true);
+    const proposal = await requestConnectorAction(session.id, "gmail", "send_message", {
+      to: "user@example.com", subject: "Hello", body: `TOKEN="${outboundValue}"`,
+    });
+    const completed = await decideConnectorAction(session.id, proposal.id, true);
+    const storedResult = JSON.parse(completed.result);
+    assert.equal(storedResult.credentials, "<redacted>");
+    assert.equal(storedResult.summary, "PASSWORD=<redacted>");
+    assert.equal(completed.result.includes(responseSecret), false);
   } finally {
     globalThis.fetch = previousFetch;
     if (previousToken === undefined) delete process.env.AGENT_ROOM_GMAIL_ACCESS_TOKEN;
@@ -87,6 +164,30 @@ test("malformed success response leaves an approved connector action failed", as
     await assert.rejects(() => decideConnectorAction(session.id, proposal.id, true), SyntaxError);
     const saved = await getSession(session.id);
     assert.equal(saved.connectorActions.find((item) => item.id === proposal.id).status, "failed_after_approval");
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousToken === undefined) delete process.env.AGENT_ROOM_GMAIL_ACCESS_TOKEN;
+    else process.env.AGENT_ROOM_GMAIL_ACCESS_TOKEN = previousToken;
+    await cleanup(session.id);
+  }
+});
+
+test("connector failure-state persistence cannot mask the upstream error", async () => {
+  const session = await createSession("gmail-primary-error-test");
+  const previousToken = process.env.AGENT_ROOM_GMAIL_ACCESS_TOKEN;
+  const previousFetch = globalThis.fetch;
+  process.env.AGENT_ROOM_GMAIL_ACCESS_TOKEN = "placeholder-token";
+  try {
+    await setConnectorEnabled(session.id, "gmail", true);
+    const proposal = await requestConnectorAction(session.id, "gmail", "send_message", { to: "user@example.com", subject: "Hello", body: "Body" });
+    globalThis.fetch = async () => {
+      await cleanup(session.id);
+      throw new Error("upstream connector failed");
+    };
+    await assert.rejects(
+      () => decideConnectorAction(session.id, proposal.id, true),
+      /upstream connector failed/,
+    );
   } finally {
     globalThis.fetch = previousFetch;
     if (previousToken === undefined) delete process.env.AGENT_ROOM_GMAIL_ACCESS_TOKEN;
@@ -174,11 +275,19 @@ test("MCP transport lists only session-enabled connector tools", async () => {
   try {
     await setConnectorEnabled(session.id, "github", true);
     const initialized = await handleMcpRequest({ id: 1, method: "initialize", params: { protocolVersion: "test-version" } }, session.id);
-    assert.equal(initialized.result.protocolVersion, "test-version");
+    assert.equal(initialized.result.protocolVersion, "2025-03-26");
     const listed = await handleMcpRequest({ id: 2, method: "tools/list" }, session.id, "connectors");
     assert.ok(listed.result.tools.some((tool) => tool.name === "connector__github__create_issue"));
     assert.equal(listed.result.tools.some((tool) => tool.name.includes("gmail")), false);
   } finally { await cleanup(session.id); }
+});
+
+test("MCP rejects structurally invalid requests", async () => {
+  for (const request of [null, "invalid", [], {}]) {
+    const rejected = await handleMcpRequest(request, "session_invalid_request");
+    assert.equal(rejected.id, null);
+    assert.equal(rejected.error.code, -32600);
+  }
 });
 
 test("Claude receives a strict per-run MCP config even when no connector is enabled", () => {

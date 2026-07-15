@@ -117,7 +117,7 @@ async function runOrchestrationClaimed(sessionId, request, emit, releaseActivity
     if (projectPath) releaseProjectScope = await registerProjectScope(session.id, projectPath);
 
     const selected = providerIds().filter((key) => request.agents?.[key] && request.agents[key].enabled !== false);
-    if (selected.length < 2) throw new Error("Enable at least two providers for collaboration");
+    if (selected.length < 2) throw new Error("Enable at least two providers for this mode");
     if (mode === "debate" && selected.length !== 2) throw new Error("Debate mode requires exactly two providers");
     const connectorSessionId = Object.values(session.connectors || {}).some((item) => item.enabled) ? session.id : "";
 

@@ -7,7 +7,7 @@ export function recordDecision(session, { type, outcome, reason = "", taskId = n
     createdAt: new Date().toISOString(),
     type: String(type || "decision"),
     outcome: String(outcome || ""),
-    reason: String(reason || "").slice(0, 1000),
+    reason: String(reason || ""),
     taskId,
     metadata,
   };

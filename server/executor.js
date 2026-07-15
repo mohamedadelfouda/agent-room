@@ -1,7 +1,7 @@
 import { assertExecutionRepository, createWorktree, getDiff, changedFiles, removeWorktree } from "./worktree.js";
 import { provider } from "./providers/registry.js";
 import { scanForSecrets } from "./secret-scan.js";
-import { redact } from "./logger.js";
+import { logError, redact } from "./logger.js";
 import { executionPrompt } from "./prompts.js";
 
 // Run exactly one executor with write permissions inside its disposable clone.
@@ -45,7 +45,17 @@ export async function runExecution({ projectPath, executor, mode = "run", task, 
       secretFindings,
     };
   } catch (error) {
-    await removeWorktree(projectPath, wt.path, wt.branch);
-    throw error;
+    const primaryError = error instanceof Error ? error : new Error(String(error));
+    try {
+      const cleanup = await removeWorktree(projectPath, wt.path, wt.branch, { isolation: wt.isolation });
+      if (!cleanup.ok) {
+        primaryError.cleanupErrors = cleanup.errors;
+        logError("execution cleanup failed", cleanup.errors.join("; "));
+      }
+    } catch (cleanupError) {
+      primaryError.cleanupErrors = [redact(cleanupError?.message || cleanupError)];
+      logError("execution cleanup failed", cleanupError?.message || cleanupError);
+    }
+    throw primaryError;
   }
 }

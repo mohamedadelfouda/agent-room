@@ -60,6 +60,6 @@ export function assessRound(controls, targetVersion) {
   const goalSatisfied = allValid && present.every((control) => control.goalStatus === "satisfied");
   const consensus = allValid && present.every((control) => control.convergence === "converged");
   const disagreements = [...new Set(present.flatMap((control) => control.openPoints || []).filter(Boolean))];
-  const canStop = versionAligned && !proposalChanged && goalSatisfied && consensus;
+  const canStop = versionAligned && !proposalChanged && goalSatisfied && consensus && disagreements.length === 0;
   return { canStop, bothConverged: canStop, disagreements, proposalChanged, goalSatisfied, versionAligned };
 }

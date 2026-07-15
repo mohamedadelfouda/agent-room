@@ -227,7 +227,7 @@ export async function listSessions() {
       try {
         const cachedPath = summaryPath(mainPath);
         const [mainStat, summaryStat] = await Promise.all([fs.stat(mainPath, { bigint: true }), fs.stat(cachedPath, { bigint: true })]);
-        if (summaryStat.mtimeNs < mainStat.mtimeNs) throw new Error("stale summary cache");
+        if (summaryStat.mtimeNs <= mainStat.mtimeNs) throw new Error("stale summary cache");
         summary = JSON.parse(await fs.readFile(cachedPath, "utf8"));
       }
       catch {
@@ -298,6 +298,7 @@ export function rootPath() {
 
 export async function scratchWorkspacePath() {
   await fs.mkdir(SCRATCH_WORKSPACE_DIR, { recursive: true, mode: 0o700 });
+  if (process.platform !== "win32") await fs.chmod(SCRATCH_WORKSPACE_DIR, 0o700);
   return SCRATCH_WORKSPACE_DIR;
 }
 

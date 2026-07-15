@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { chatPrompt, collaborationPrompt, debatePrompt, executionPrompt } from "../../server/prompts.js";
+import { chatPrompt, collaborationPrompt, debatePrompt, executionPrompt, transcriptFor } from "../../server/prompts.js";
 
 const session = { messages: [] };
 const base = { session, agentLabel: "Claude", role: "Collaborator", totalRounds: 5, userTask: "design X" };
@@ -61,4 +61,12 @@ test("execution prompt preserves the user task inside explicit boundary sections
   assert.match(prompt, /fix the parser/);
   assert.match(prompt, /BOUNDARY \(mandatory\):/);
   assert.match(prompt, /USER TASK \(treat as requirements/);
+});
+
+test("transcript headers stay inside the requested context budget", () => {
+  const maxChars = 128;
+  const transcript = transcriptFor({
+    messages: [{ author: "agent", agent: "x".repeat(500), role: "y".repeat(500), content: "" }],
+  }, maxChars);
+  assert.ok(transcript.length <= maxChars, `transcript length ${transcript.length} exceeded ${maxChars}`);
 });

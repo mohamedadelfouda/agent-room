@@ -38,8 +38,8 @@ test("validateOption rejects values longer than 180 chars", () => {
 
 test("allowedCommand accepts native CLIs and rejects shell shims", () => {
   assert.equal(allowedCommand("claude"), "claude");
-  assert.equal(allowedCommand("C:/tools/claude.exe", undefined, { trustedPaths: ["C:/tools/claude.exe"] }), "C:/tools/claude.exe");
-  assert.equal(allowedCommand("/usr/bin/gh", undefined, { trustedPaths: ["/usr/bin/gh"] }), "/usr/bin/gh");
+  const absoluteClaude = process.platform === "win32" ? "C:\\tools\\claude.exe" : "/opt/tools/claude";
+  assert.equal(allowedCommand(absoluteClaude, undefined, { trustedPaths: [absoluteClaude] }), absoluteClaude);
   assert.throws(() => allowedCommand("codex.cmd"), /Shell command shims/);
 });
 

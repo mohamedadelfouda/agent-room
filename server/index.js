@@ -56,7 +56,10 @@ async function ghClone(repo) {
   const base = path.join(os.homedir(), "AgentRoomProjects");
   const [owner, rawName] = repo.split("/");
   const name = rawName.replace(/\.git$/, "");
+  if ([owner, name].some((part) => !part || part === "." || part === "..")) throw new Error("Invalid repo name");
   const dest = path.join(base, owner, name);
+  const relativeDestination = path.relative(base, dest);
+  if (!relativeDestination || relativeDestination.startsWith("..") || path.isAbsolute(relativeDestination)) throw new Error("Invalid repository destination");
   await fs.mkdir(path.dirname(dest), { recursive: true });
   try {
     await fs.access(dest);
@@ -227,7 +230,8 @@ const server = http.createServer(async (req, res) => {
       const grant = resolveMcpBridgeGrant(req.headers["x-agent-room-mcp-token"]);
       if (!grant) return json(res, 401, apiErrorPayload("unauthorized", "Unauthorized"));
       const body = await readJson(req);
-      return json(res, 200, await handleMcpRequest(body.request || {}, grant.sessionId, grant.capability));
+      const request = body && typeof body === "object" && Object.hasOwn(body, "request") ? body.request : null;
+      return json(res, 200, await handleMcpRequest(request, grant.sessionId, grant.capability));
     }
     // Every /api/* route requires the per-run session token (cookie or header),
     // plus a matching Origin for state-changing methods. The page itself (served
@@ -350,11 +354,13 @@ const server = http.createServer(async (req, res) => {
       return json(res, 200, { stopped: await stopExec(parts[2]) });
     }
     if (parts[0] === "api" && parts[1] === "sessions" && parts[2] && parts[3] === "execution" && parts[4] && parts[5] === "accept" && req.method === "POST") {
+      if (!startupReconciled) return json(res, 503, apiErrorPayload("startup_recovery_pending", "Startup recovery is still running; retry in a moment"));
       const body = await readJson(req);
       try { return json(res, 200, await acceptExecution(parts[2], parts[4], body.action || "merge")); }
       catch (e) { return json(res, 400, apiErrorPayload("execution_accept_failed", e)); }
     }
     if (parts[0] === "api" && parts[1] === "sessions" && parts[2] && parts[3] === "execution" && parts[4] && parts[5] === "reject" && req.method === "POST") {
+      if (!startupReconciled) return json(res, 503, apiErrorPayload("startup_recovery_pending", "Startup recovery is still running; retry in a moment"));
       try { return json(res, 200, await rejectExecution(parts[2], parts[4])); }
       catch (e) { return json(res, 400, apiErrorPayload("execution_reject_failed", e)); }
     }

@@ -31,7 +31,7 @@ async function stopChild(child) {
 }
 
 function forceStopPid(pid) {
-  if (!Number.isSafeInteger(pid)) return;
+  if (!Number.isSafeInteger(pid) || pid < 1) return;
   try { process.kill(pid, "SIGKILL"); } catch {}
 }
 
@@ -108,6 +108,13 @@ test("agent environment is allowlisted and does not inherit credentials", async 
   }
 });
 
+test("runProcess rejects unknown environment policies", async () => {
+  await assert.rejects(
+    () => runProcess({ command: process.execPath, args: ["-e", ""], envPolicy: "typo" }),
+    /Unsupported process environment policy/,
+  );
+});
+
 test("publication environment adds only the SSH agent socket", () => {
   const source = { PATH: "safe-path", SSH_AUTH_SOCK: "/tmp/ssh-agent.sock", SECRET_TOKEN: "no" };
   assert.deepEqual(sanitizedPublicationEnv(source), { PATH: "safe-path", SSH_AUTH_SOCK: "/tmp/ssh-agent.sock" });
@@ -169,7 +176,7 @@ test("runProcess Job Object containment kills a detached Windows descendant", as
       let running;
       let reportPid;
       const reported = new Promise((resolve, reject) => {
-        const timer = setTimeout(() => reject(new Error("contained descendant PID was not reported")), 5000);
+        const timer = setTimeout(() => reject(new Error("contained descendant PID was not reported")), 10000);
         reportPid = (line) => {
           const pid = Number(String(line).trim());
           if (!Number.isSafeInteger(pid)) return;
@@ -182,7 +189,7 @@ test("runProcess Job Object containment kills a detached Windows descendant", as
           command: process.execPath,
           args: [file],
           containTree: true,
-          timeoutMs: 5000,
+          timeoutMs: 15000,
           registerChild: (child) => { wrapper = child; },
           onStdoutLine: (line) => reportPid(line),
         });

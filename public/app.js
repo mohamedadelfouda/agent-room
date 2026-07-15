@@ -19,12 +19,24 @@ const $ = (id) => document.getElementById(id);
 
 let currentSessionId = null;
 let currentSession = null;
+let sessionViewEpoch = 0;
 const sessionRequests = createLatestRequest((id) => api(`/api/sessions/${id}`));
+const connectorRequests = createLatestRequest(async (id) => {
+  const [data, configuration] = await Promise.all([
+    api(`/api/sessions/${id}/connectors`),
+    api("/api/connector-config"),
+  ]);
+  return { data, configuration };
+});
 let eventSource = null;
 let mode = "collaboration";
 let running = false;
 let lang = "ar";
 let routeSuggestion = null;
+
+function isCurrentSessionView(sessionId, viewEpoch) {
+  return currentSessionId === sessionId && sessionViewEpoch === viewEpoch;
+}
 let providers = [];
 let renderedMessageSessionId = null;
 let renderedMessageIds = new Set();
@@ -370,22 +382,65 @@ async function refreshSessions() {
 
 /* ---------------- session open / focused view ---------------- */
 async function openSession(id) {
+  const switching = currentSessionId !== id;
+  if (switching) sessionViewEpoch += 1;
+  const viewEpoch = sessionViewEpoch;
+  sessionRequests.invalidate();
+  connectorRequests.invalidate();
   currentSessionId = id;
+  currentSession = null;
+  routeSuggestion = null;
+  pendingExec = null;
+  renderedMessageSessionId = null;
+  renderedMessageIds = new Set();
+  running = false;
+  if (activeModal === $("approveModal")) closeManagedModal($("approveModal"), { restoreFocus: false });
+  $("messageInput").disabled = true;
+  $("sendBtn").disabled = true;
+  $("stopBtn").disabled = true;
+  $("execStopBtn").hidden = true;
+  $("execRun").disabled = true;
+  $("exportBtn").disabled = true;
+  $("projectPath").value = "";
+  $("projectStatus").textContent = "";
+  $("projectStatus").className = "run-state";
+  $("trustProject").hidden = true;
+  $("chat").innerHTML = "";
+  $("connectorsList").innerHTML = "";
+  if (switching) {
+    $("sessionTitle").textContent = "—";
+    $("sessionMeta").textContent = "";
+    $("messageInput").value = "";
+    autoGrow($("messageInput"));
+    $("execTask").value = "";
+    $("execStatus").textContent = "";
+    $("liveStatus").textContent = t("ready");
+    for (const item of providers) setAgentState(item.id, t("ready"));
+  }
   if (eventSource) eventSource.close();
   const source = new EventSource(`/api/sessions/${id}/events`);
   eventSource = source;
-  source.onmessage = (e) => { if (eventSource === source && currentSessionId === id) handleEvent(JSON.parse(e.data)); };
-  source.onopen = () => { if (eventSource === source && currentSessionId === id) setConnected(true); };
-  source.onerror = () => { if (eventSource === source && currentSessionId === id) setConnected(false); };
+  source.onmessage = (e) => { if (eventSource === source && isCurrentSessionView(id, viewEpoch)) handleEvent(JSON.parse(e.data)); };
+  source.onopen = () => { if (eventSource === source && isCurrentSessionView(id, viewEpoch)) setConnected(true); };
+  source.onerror = () => { if (eventSource === source && isCurrentSessionView(id, viewEpoch)) setConnected(false); };
   $("emptyState").hidden = true;
   $("sessionView").hidden = false;
-  await loadSession();
-  if (currentSessionId === id) await refreshSessions();
+  try { await loadSession(); }
+  catch (error) {
+    if (isCurrentSessionView(id, viewEpoch)) {
+      $("liveStatus").textContent = localizedFailure(error);
+      $("messageInput").disabled = true;
+      $("sendBtn").disabled = true;
+      $("execRun").disabled = true;
+      $("exportBtn").disabled = true;
+    }
+  }
+  if (isCurrentSessionView(id, viewEpoch)) await refreshSessions();
 }
 
 async function loadSession() {
   const requestedId = currentSessionId;
-  if (!requestedId) { sessionRequests.invalidate(); return false; }
+  if (!requestedId) { sessionRequests.invalidate(); connectorRequests.invalidate(); return false; }
   const result = await sessionRequests.run(requestedId);
   if (!result.current || currentSessionId !== requestedId) return false;
   currentSession = result.value;
@@ -407,6 +462,9 @@ async function loadSession() {
     $("projectStatus").className = `run-state ${trusted ? "done" : ""}`;
     $("trustProject").hidden = trusted;
   } else {
+    $("projectPath").value = "";
+    $("projectStatus").textContent = "";
+    $("projectStatus").className = "run-state";
     $("trustProject").hidden = true;
   }
   renderMessages();
@@ -548,7 +606,7 @@ function handleEvent(event) {
   if (event.type === "exec_started") setRunning(true, t("starting"), "execution");
   if (event.type === "exec_phase") { const s = event.phase === "executing" ? t("execExecuting")(event.agent) : t("execReviewing")(event.agent); $("execStatus").textContent = s; $("liveStatus").textContent = s; }
   if (event.type === "exec_ready") { setRunning(false, t("execAwaiting")); $("execStopBtn").hidden = true; $("execRun").disabled = false; $("execTask").value = ""; loadSession(); refreshSessions(); }
-  if (event.type === "exec_error") { setRunning(false, localizedFailure({ code: event.code, detail: event.error })); $("execStopBtn").hidden = true; $("execRun").disabled = false; }
+  if (event.type === "exec_error") { setRunning(false, localizedFailure({ code: event.code, detail: event.error })); $("execStopBtn").hidden = true; $("execRun").disabled = false; loadSession(); refreshSessions(); }
 }
 function setAgentState(agent, text, cls = "") { const el = $(`${agent}RunState`); if (el) { el.textContent = text; el.className = `run-state ${cls}`; } }
 function setRunning(value, status, kind = "orchestration") {
@@ -581,15 +639,19 @@ function providerPayload(includeRole = false) {
 }
 async function sendMessage() {
   if (!currentSessionId || running) return;
+  const requestedId = currentSessionId;
+  const requestedEpoch = sessionViewEpoch;
   const body = payload();
   if (!body.content) { $("liveStatus").textContent = t("writeFirst"); return; }
   saveSettings();
   setRunning(true, t("starting"));
   try {
-    await api(`/api/sessions/${currentSessionId}/message`, { method: "POST", body: JSON.stringify(body) });
+    await api(`/api/sessions/${requestedId}/message`, { method: "POST", body: JSON.stringify(body) });
+    if (!isCurrentSessionView(requestedId, requestedEpoch)) return;
     $("messageInput").value = "";
     autoGrow($("messageInput"));
   } catch (error) {
+    if (!isCurrentSessionView(requestedId, requestedEpoch)) return;
     setRunning(false, localizedFailure(error));
     if (error.route) {
       routeSuggestion = error.route;
@@ -792,36 +854,44 @@ function toggleExec() {
 }
 async function attachProject() {
   const p = $("projectPath").value.trim(); if (!p || !currentSessionId) return;
+  const requestedId = currentSessionId;
+  const requestedEpoch = sessionViewEpoch;
   const st = $("projectStatus"); st.textContent = "..."; st.className = "run-state";
   try {
-    const r = await api(`/api/sessions/${currentSessionId}/project`, { method: "POST", body: JSON.stringify({ path: p }) });
+    const r = await api(`/api/sessions/${requestedId}/project`, { method: "POST", body: JSON.stringify({ path: p }) });
+    if (!isCurrentSessionView(requestedId, requestedEpoch)) return;
     st.textContent = t("untrustedProject");
     st.className = "run-state";
     $("trustProject").hidden = false;
     if (currentSession) currentSession.project = r.project;
-  } catch (e) { st.textContent = localizedFailure(e); }
+  } catch (e) { if (isCurrentSessionView(requestedId, requestedEpoch)) st.textContent = localizedFailure(e); }
 }
 async function trustProject() {
   if (!currentSession?.project || !window.confirm(t("trustPrompt"))) return;
+  const requestedId = currentSessionId;
+  const requestedEpoch = sessionViewEpoch;
+  const fingerprint = currentSession.project.fingerprint;
   try {
-    const response = await api(`/api/sessions/${currentSessionId}/project-trust`, {
+    const response = await api(`/api/sessions/${requestedId}/project-trust`, {
       method: "POST",
-      body: JSON.stringify({ fingerprint: currentSession.project.fingerprint }),
+      body: JSON.stringify({ fingerprint }),
     });
+    if (!isCurrentSessionView(requestedId, requestedEpoch) || !currentSession) return;
     currentSession.project = response.project;
     await loadSession();
   } catch (error) {
-    $("projectStatus").textContent = localizedFailure(error);
+    if (isCurrentSessionView(requestedId, requestedEpoch)) $("projectStatus").textContent = localizedFailure(error);
   }
 }
 async function loadConnectors() {
-  if (!currentSessionId) return;
+  const requestedId = currentSessionId;
+  const requestedEpoch = sessionViewEpoch;
+  if (!requestedId) { connectorRequests.invalidate(); return; }
   const list = $("connectorsList");
   try {
-    const [data, configuration] = await Promise.all([
-      api(`/api/sessions/${currentSessionId}/connectors`),
-      api("/api/connector-config"),
-    ]);
+    const request = await connectorRequests.run(requestedId);
+    if (!request.current || !isCurrentSessionView(requestedId, requestedEpoch)) return;
+    const { data, configuration } = request.value;
     const configs = new Map((configuration.connectors || []).map((item) => [item.id, item]));
     list.innerHTML = "";
     for (const connector of data.connectors) {
@@ -834,10 +904,10 @@ async function loadConnectors() {
       row.innerHTML = `<div><b>${connectorName}</b><small>${connector.configured ? descriptions : esc(t("notConfigured"))}</small></div><div class="connector-controls">${config ? `<button class="btn-mini" data-config aria-expanded="false">${esc(t("configure"))}</button>` : ""}<button class="btn-mini" data-toggle${!connector.configured ? " disabled" : ""}>${esc(enabled ? t("disable") : t("enable"))}</button></div>`;
       row.querySelector("[data-toggle]").onclick = async () => {
         try {
-          await api(`/api/sessions/${currentSessionId}/connectors/${encodeURIComponent(connector.id)}`, { method: "POST", body: JSON.stringify({ enabled: !enabled }) });
-          await loadSession();
+          await api(`/api/sessions/${requestedId}/connectors/${encodeURIComponent(connector.id)}`, { method: "POST", body: JSON.stringify({ enabled: !enabled }) });
+          if (isCurrentSessionView(requestedId, requestedEpoch)) await loadSession();
         } catch (error) {
-          list.textContent = localizedFailure(error);
+          if (isCurrentSessionView(requestedId, requestedEpoch)) list.textContent = localizedFailure(error);
         }
       };
       list.appendChild(row);
@@ -881,10 +951,10 @@ async function loadConnectors() {
       if (action.status === "pending") {
         const decide = async (approve) => {
           try {
-            await api(`/api/sessions/${currentSessionId}/connector-actions/${encodeURIComponent(action.id)}/decide`, { method: "POST", body: JSON.stringify({ approve }) });
-            await loadSession();
+            await api(`/api/sessions/${requestedId}/connector-actions/${encodeURIComponent(action.id)}/decide`, { method: "POST", body: JSON.stringify({ approve }) });
+            if (isCurrentSessionView(requestedId, requestedEpoch)) await loadSession();
           } catch (error) {
-            list.textContent = localizedFailure(error);
+            if (isCurrentSessionView(requestedId, requestedEpoch)) list.textContent = localizedFailure(error);
           }
         };
         const buttons = row.querySelectorAll("button");
@@ -894,7 +964,7 @@ async function loadConnectors() {
       list.appendChild(row);
     }
   } catch (error) {
-    list.textContent = localizedFailure(error);
+    if (isCurrentSessionView(requestedId, requestedEpoch)) list.textContent = localizedFailure(error);
   }
 }
 function execPayload() {
@@ -923,11 +993,19 @@ function requestExec() {
 async function confirmExec() {
   closeManagedModal($("approveModal"), { restoreFocus: false });
   if (!pendingExec) return;
+  const requestedId = currentSessionId;
+  const requestedEpoch = sessionViewEpoch;
+  const body = pendingExec;
+  pendingExec = null;
   setRunning(true, t("starting"), "execution");
   $("execStopBtn").focus();
-  try { await api(`/api/sessions/${currentSessionId}/execute`, { method: "POST", body: JSON.stringify(pendingExec) }); }
-  catch (e) { setRunning(false, localizedFailure(e)); $("execStopBtn").hidden = true; $("execRun").disabled = false; }
-  pendingExec = null;
+  try { await api(`/api/sessions/${requestedId}/execute`, { method: "POST", body: JSON.stringify(body) }); }
+  catch (e) {
+    if (!isCurrentSessionView(requestedId, requestedEpoch)) return;
+    setRunning(false, localizedFailure(e));
+    $("execStopBtn").hidden = true;
+    $("execRun").disabled = false;
+  }
 }
 function cancelExecApproval() {
   closeManagedModal($("approveModal"));
@@ -978,12 +1056,29 @@ function renderExecutions() {
   chat.querySelectorAll("[data-reject]").forEach((b) => b.onclick = () => { lockDecisionButtons(b); rejectExec(b.dataset.reject); });
 }
 async function acceptExec(taskId, action) {
-  try { const r = await api(`/api/sessions/${currentSessionId}/execution/${taskId}/accept`, { method: "POST", body: JSON.stringify({ action }) }); await loadSession(); if (r.prUrl) window.open(r.prUrl, "_blank"); }
-  catch (e) { $("liveStatus").textContent = localizedFailure(e); await loadSession(); }
+  const requestedId = currentSessionId;
+  const requestedEpoch = sessionViewEpoch;
+  try {
+    const response = await api(`/api/sessions/${requestedId}/execution/${taskId}/accept`, { method: "POST", body: JSON.stringify({ action }) });
+    if (isCurrentSessionView(requestedId, requestedEpoch)) await loadSession();
+    if (response.prUrl) window.open(response.prUrl, "_blank");
+  } catch (error) {
+    if (!isCurrentSessionView(requestedId, requestedEpoch)) return;
+    $("liveStatus").textContent = localizedFailure(error);
+    await loadSession();
+  }
 }
 async function rejectExec(taskId) {
-  try { await api(`/api/sessions/${currentSessionId}/execution/${taskId}/reject`, { method: "POST", body: "{}" }); await loadSession(); }
-  catch (e) { $("liveStatus").textContent = localizedFailure(e); await loadSession(); }
+  const requestedId = currentSessionId;
+  const requestedEpoch = sessionViewEpoch;
+  try {
+    await api(`/api/sessions/${requestedId}/execution/${taskId}/reject`, { method: "POST", body: "{}" });
+    if (isCurrentSessionView(requestedId, requestedEpoch)) await loadSession();
+  } catch (error) {
+    if (!isCurrentSessionView(requestedId, requestedEpoch)) return;
+    $("liveStatus").textContent = localizedFailure(error);
+    await loadSession();
+  }
 }
 
 /* ---------------- wiring ---------------- */

@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { rm, stat, writeFile, utimes } from "node:fs/promises";
+import { readFile, rm, stat, writeFile, utimes } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { createSession, saveSession, getSession, addMessage, listSessions } from "../../server/store.js";
@@ -52,6 +52,22 @@ test("session listing reads compact summaries instead of full transcript payload
     await utimes(mainPath, new Date(0), new Date(0));
     const summaries = await listSessions();
     assert.equal(summaries.find((item) => item.id === session.id)?.title, "summary-index-test");
+  } finally { await cleanup(session.id); }
+});
+
+test("session listing treats equal summary and transcript mtimes as stale", async () => {
+  const session = await createSession("equal-mtime-before");
+  try {
+    const mainPath = join(sessionsDir, `${session.id}.json`);
+    const summaryPath = join(sessionsDir, `${session.id}.summary.json`);
+    const stored = JSON.parse(await readFile(mainPath, "utf8"));
+    stored.title = "equal-mtime-after";
+    await writeFile(mainPath, JSON.stringify(stored, null, 2), "utf8");
+    const sameTime = new Date("2020-01-01T00:00:00.000Z");
+    await Promise.all([utimes(mainPath, sameTime, sameTime), utimes(summaryPath, sameTime, sameTime)]);
+
+    const summaries = await listSessions();
+    assert.equal(summaries.find((item) => item.id === session.id)?.title, "equal-mtime-after");
   } finally { await cleanup(session.id); }
 });
 

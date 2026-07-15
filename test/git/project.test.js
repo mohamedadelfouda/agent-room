@@ -4,7 +4,7 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, writeFileSync, rmSync, mkdirSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { projectSnapshot } from "../../server/project.js";
+import { projectIdentity, projectSnapshot } from "../../server/project.js";
 
 const git = (cwd, ...a) => execFileSync("git", a, { cwd, stdio: ["ignore", "pipe", "pipe"] }).toString();
 
@@ -37,6 +37,11 @@ test("projectSnapshot is empty for no path", async () => {
   assert.equal(await projectSnapshot(""), "");
 });
 
+test("missing trusted projects ask the user to attach again", async () => {
+  const missing = join(tmpdir(), `ar-missing-project-${Date.now()}`);
+  await assert.rejects(() => projectIdentity(missing), /attach and trust it again/);
+});
+
 test("projectSnapshot reads README through a byte cap", async () => {
   const dir = mkdtempSync(join(tmpdir(), "ar-snap-large-"));
   try {
@@ -54,7 +59,7 @@ test("projectSnapshot never follows a README symlink outside the project", async
     git(dir, "init", "-q");
     writeFileSync(outside, "OUTSIDE_PRIVATE_CONTENT");
     try { symlinkSync(outside, join(dir, "README.md"), "file"); }
-    catch (error) { if (["EPERM", "EACCES"].includes(error.code)) return t.skip("symlink creation is unavailable"); throw error; }
+    catch (error) { if (["EPERM", "EACCES", "ENOTSUP"].includes(error.code)) return t.skip("symlink creation is unavailable"); throw error; }
     const snap = await projectSnapshot(dir);
     assert.doesNotMatch(snap, /OUTSIDE_PRIVATE_CONTENT/);
   } finally {

@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync, rmSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, unlinkSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { prepareAcceptedChange } from "../../server/acceptance.js";
@@ -13,6 +13,7 @@ import { createSession, getSession, rootPath, saveSession } from "../../server/s
 import { projectIdentity } from "../../server/project.js";
 
 const git = (cwd, ...args) => execFileSync("git", args, { cwd, stdio: ["ignore", "pipe", "pipe"] }).toString();
+const secretFixture = () => ["sk", "-abcdefghij1234567890xyz"].join("");
 
 function repository() {
   const dir = mkdtempSync(join(tmpdir(), "ar-accept-"));
@@ -72,7 +73,7 @@ test("accept re-scans and blocks a secret added after the preview", async () => 
   try {
     wt = await createWorktree(dir, "claude", "t-secret");
     writeFileSync(join(wt.path, "feature.js"), "export const ready = true;\n");
-    writeFileSync(join(wt.path, ".env"), "OPENAI_API_KEY=sk-abcdefghij1234567890xyz\n");
+    writeFileSync(join(wt.path, ".env"), `OPENAI_API_KEY=${secretFixture()}\n`);
     const result = await prepareAcceptedChange({ projectPath: dir, worktree: wt, message: "must not commit" });
     assert.equal(result.blocked, true);
     assert.equal(git(wt.path, "rev-list", "--count", wt.baseSha + "..HEAD").trim(), "0");
@@ -122,12 +123,34 @@ test("a worktree mutation after the immutable scan cannot enter the accepted com
     writeFileSync(feature, "export const safe = true;\n");
     const treeSha = await stageAcceptedTree(wt.path, wt.baseSha);
     assert.equal(hasBlockingSecrets(scanForSecrets(await changedTreeFiles(wt.path, wt.baseSha, treeSha))), false);
-    writeFileSync(feature, "export const key = 'sk-abcdefghij1234567890xyz';\n");
+    writeFileSync(feature, `export const key = '${secretFixture()}';\n`);
 
     await assert.rejects(() => commitAcceptedTree(wt.path, wt, treeSha, "immutable acceptance"), /changed after the accepted snapshot/);
     assert.equal(git(wt.path, "rev-list", "--count", wt.baseSha + "..HEAD").trim(), "0");
   } finally {
     if (wt) await removeWorktree(dir, wt.path, wt.branch);
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("accepted trees reject drive-relative Windows symlink targets", async () => {
+  const dir = repository();
+  let wt;
+  try {
+    wt = await createWorktree(dir, "codex", "t-drive-link");
+    const targetSource = join(wt.path, "link-target.txt");
+    writeFileSync(targetSource, "C:outside");
+    const blob = git(wt.path, "hash-object", "-w", targetSource).trim();
+    rmSync(targetSource, { force: true });
+    git(wt.path, "update-index", "--add", "--cacheinfo", "120000", blob, "escape-link");
+    const treeSha = git(wt.path, "write-tree").trim();
+
+    await assert.rejects(
+      () => changedTreeFiles(wt.path, wt.baseSha, treeSha),
+      /Symlink target escapes the accepted project tree/,
+    );
+  } finally {
+    if (wt) await removeWorktree(dir, wt.path, wt.branch, { isolation: wt.isolation });
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -163,7 +186,7 @@ test("packed secret objects remain confined to the disposable execution clone", 
   let wt;
   try {
     wt = await createWorktree(dir, "codex", "t-packed-secret");
-    writeFileSync(join(wt.path, "secret.txt"), "OPENAI_API_KEY=sk-abcdefghij1234567890xyz\n");
+    writeFileSync(join(wt.path, "secret.txt"), `OPENAI_API_KEY=${secretFixture()}\n`);
     git(wt.path, "add", "secret.txt");
     git(wt.path, "-c", "user.name=Executor", "-c", "user.email=executor@example.com", "commit", "-qm", "secret object");
     git(wt.path, "gc", "--prune=now");
@@ -211,6 +234,40 @@ test("cleanup refuses non-Agent-Room branches and preserves the user branch", as
     assert.match(cleanup.errors.join("\n"), /cleanup safety check/);
     assert.equal(git(dir, "rev-parse", "--verify", "refs/heads/release/keep").trim().length > 0, true);
   } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("cleanup refuses a redirected clone target without deleting its destination", async (t) => {
+  const dir = repository();
+  const outside = mkdtempSync(join(tmpdir(), "ar-cleanup-outside-"));
+  const sentinel = join(outside, "keep.txt");
+  const providerRoot = join(dir, ".agent-workspaces", "codex");
+  const redirected = join(providerRoot, "t-cleanup-link");
+  mkdirSync(providerRoot, { recursive: true });
+  writeFileSync(sentinel, "keep\n");
+  try {
+    try { symlinkSync(outside, redirected, process.platform === "win32" ? "junction" : "dir"); }
+    catch (error) {
+      if (["EPERM", "EACCES", "ENOTSUP"].includes(error.code)) {
+        t.skip(`directory links are unavailable: ${error.code}`);
+        return;
+      }
+      throw error;
+    }
+
+    const cleanup = await removeWorktree(
+      dir,
+      redirected,
+      "agent/codex/t-cleanup-link",
+      { isolation: "clone" },
+    );
+    assert.equal(cleanup.ok, false, "redirected clone cleanup must fail closed");
+    assert.equal(readFileSync(sentinel, "utf8"), "keep\n");
+  } finally {
+    try { if (lstatSync(redirected).isSymbolicLink()) unlinkSync(redirected); }
+    catch {}
+    rmSync(outside, { recursive: true, force: true });
     rmSync(dir, { recursive: true, force: true });
   }
 });

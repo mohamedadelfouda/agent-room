@@ -21,7 +21,12 @@ async function git(args, cwd) {
 }
 
 export async function projectIdentity(projectPath) {
-  const realPath = await fs.realpath(projectPath);
+  let realPath;
+  try { realPath = await fs.realpath(projectPath); }
+  catch (error) {
+    if (["ENOENT", "ENOTDIR"].includes(error.code)) throw new Error("The trusted project is no longer available; attach and trust it again");
+    throw error;
+  }
   const commonDir = await git(["rev-parse", "--git-common-dir"], realPath);
   const gitPath = commonDir ? await fs.realpath(path.resolve(realPath, commonDir)) : "";
   const remote = await git(["remote", "get-url", "origin"], realPath);
@@ -70,16 +75,21 @@ export async function projectSnapshot(projectPath) {
   const readBoundedProjectFile = async (name, maxBytes) => {
     const root = await fs.realpath(projectPath);
     const candidate = path.join(root, name);
-    const info = await fs.lstat(candidate);
+    const info = await fs.lstat(candidate, { bigint: true });
     if (!info.isFile() || info.isSymbolicLink()) return "";
     const canonical = await fs.realpath(candidate);
     const relative = path.relative(root, canonical);
     if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) return "";
     const handle = await fs.open(canonical, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW || 0));
     try {
-      const opened = await handle.stat();
-      if (!opened.isFile()) return "";
-      const buffer = Buffer.alloc(Math.min(maxBytes + 1, opened.size));
+      const [opened, canonicalAgain, after] = await Promise.all([
+        handle.stat({ bigint: true }),
+        fs.realpath(candidate),
+        fs.lstat(canonical, { bigint: true }),
+      ]);
+      const sameIdentity = [opened, after].every((stat) => stat.isFile() && stat.dev === info.dev && stat.ino === info.ino);
+      if (canonicalAgain !== canonical || !sameIdentity) return "";
+      const buffer = Buffer.alloc(Math.min(maxBytes + 1, Number(opened.size)));
       const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
       return buffer.subarray(0, Math.min(bytesRead, maxBytes)).toString("utf8");
     } finally { await handle.close(); }

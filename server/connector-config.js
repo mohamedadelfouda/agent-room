@@ -33,7 +33,9 @@ function validateValue(connectorId, field, value) {
   const text = String(value || "").trim();
   if (text.length > field.max || /[\0\r\n]/.test(text)) throw new Error(`${field.label} is invalid`);
   if (connectorId === "supabase" && field.id === "url" && text) {
-    const url = new URL(text);
+    let url;
+    try { url = new URL(text); }
+    catch { throw new Error(`${field.label} is invalid`); }
     const loopback = ["127.0.0.1", "localhost", "::1"].includes(url.hostname);
     if (url.protocol !== "https:" && !(loopback && url.protocol === "http:")) throw new Error("Supabase URL must use HTTPS (except loopback development)");
     return url.toString().replace(/\/$/, "");
@@ -49,7 +51,9 @@ export function hydrateConnectorSecrets(saved = {}) {
   for (const [connectorId, fields] of Object.entries(CONNECTOR_FIELDS)) {
     for (const field of fields) {
       const value = saved?.[connectorId]?.[field.id];
-      if (typeof value === "string" && value) process.env[field.env] = validateValue(connectorId, field, value);
+      if (typeof value !== "string" || !value) continue;
+      try { process.env[field.env] = validateValue(connectorId, field, value); }
+      catch {}
     }
   }
 }

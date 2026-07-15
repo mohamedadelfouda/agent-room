@@ -7,6 +7,21 @@ export const DEFAULT_AGENT_TIMEOUT_MS = 10 * 60 * 1000;
 
 const TRUNCATED = "\n…[truncated]";
 
+export function completeUtf8PrefixLength(value, maxBytes = value.length) {
+  const buffer = Buffer.isBuffer(value) ? value : Buffer.from(value);
+  const end = Math.min(buffer.length, Math.max(0, maxBytes));
+  if (end === 0) return 0;
+  let leadIndex = end - 1;
+  while (leadIndex >= 0 && (buffer[leadIndex] & 0xc0) === 0x80) leadIndex -= 1;
+  if (leadIndex < 0) return end;
+  const lead = buffer[leadIndex];
+  const sequenceBytes = lead >= 0xf0 && lead <= 0xf4 ? 4
+    : lead >= 0xe0 && lead <= 0xef ? 3
+      : lead >= 0xc2 && lead <= 0xdf ? 2
+        : 1;
+  return leadIndex + sequenceBytes > end ? leadIndex : end;
+}
+
 export class CappedText {
   constructor(maxBytes = MAX_AGENT_TEXT_BYTES) {
     if (!Number.isSafeInteger(maxBytes) || maxBytes < 1) throw new Error("maxBytes must be a positive integer");
@@ -21,12 +36,12 @@ export class CappedText {
     const chunk = Buffer.isBuffer(value) ? value : Buffer.from(String(value), "utf8");
     const room = this.maxBytes - this.bytes;
     if (chunk.length <= room) {
-      this.chunks.push(chunk);
+      this.chunks.push(Buffer.from(chunk));
       this.bytes += chunk.length;
       return this;
     }
     if (room > 0) {
-      this.chunks.push(chunk.subarray(0, room));
+      this.chunks.push(Buffer.from(chunk.subarray(0, room)));
       this.bytes += room;
     }
     this.truncated = true;
@@ -41,7 +56,9 @@ export class CappedText {
   }
 
   toString() {
-    const text = Buffer.concat(this.chunks, this.bytes).toString("utf8");
+    const contents = Buffer.concat(this.chunks, this.bytes);
+    const safeLength = this.truncated ? completeUtf8PrefixLength(contents) : contents.length;
+    const text = contents.subarray(0, safeLength).toString("utf8");
     return this.truncated ? `${text}${TRUNCATED}` : text;
   }
 
@@ -65,7 +82,9 @@ export async function readTextFileCapped(filePath, maxBytes = MAX_AGENT_TEXT_BYT
     const buffer = Buffer.allocUnsafe(maxBytes + 1);
     const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
     const truncated = bytesRead > maxBytes;
-    const text = buffer.subarray(0, Math.min(bytesRead, maxBytes)).toString("utf8");
+    const requestedBytes = Math.min(bytesRead, maxBytes);
+    const safeBytes = truncated ? completeUtf8PrefixLength(buffer, requestedBytes) : requestedBytes;
+    const text = buffer.subarray(0, safeBytes).toString("utf8");
     return { text: truncated ? `${text}${TRUNCATED}` : text, truncated, bytesRead };
   } finally {
     await handle.close();

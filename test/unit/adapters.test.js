@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { claudePermissionArgs, runClaude } from "../../server/adapters/claude.js";
+import { claudePermissionArgs, createClaudeStreamCollector, runClaude } from "../../server/adapters/claude.js";
 import { codexSecurityOverrides, prepareIsolatedCodexHome, runCodex } from "../../server/adapters/codex.js";
 
 // The allowlist must be enforced on the REAL execution path (runClaude/runCodex spawn the
@@ -43,6 +43,20 @@ test("runClaude rejects unsupported effort values", async () => {
     () => runClaude({ prompt: "hi", config: { effort: "ultracode" }, cwd: process.cwd() }),
     /Unsupported Claude effort/,
   );
+});
+
+test("malformed Claude stream events never become final or partial output", () => {
+  const events = [];
+  const collector = createClaudeStreamCollector((event) => events.push(event));
+  collector.onStdoutLine("RAW_PRIVATE_REASONING");
+  collector.onStdoutLine(JSON.stringify({ type: "result", result: "safe final answer", session_id: "session-1" }));
+
+  const output = collector.snapshot();
+  assert.equal(output.finalText, "safe final answer");
+  assert.equal(output.streamedText, "");
+  assert.equal(output.sessionId, "session-1");
+  assert.doesNotMatch(JSON.stringify(output), /RAW_PRIVATE_REASONING/);
+  assert.deepEqual(events, [{ kind: "activity", text: "Claude emitted an unreadable event" }]);
 });
 
 function flagValue(args, flag) {

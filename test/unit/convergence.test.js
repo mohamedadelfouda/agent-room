@@ -52,6 +52,13 @@ test("assessRound stops only on aligned, complete, unchanged consensus", () => {
   assert.deepEqual(result.disagreements, []);
 });
 
+test("assessRound does not stop while converged controls report open points", () => {
+  const control = parseAgentControl(block({ openPoints: ["still unresolved"] }));
+  const result = assessRound([control, control], 2);
+  assert.equal(result.canStop, false);
+  assert.deepEqual(result.disagreements, ["still unresolved"]);
+});
+
 test("assessRound never stops with missing, invalid, stale, incomplete, or changing input", () => {
   const valid = parseAgentControl(block());
   const cases = [

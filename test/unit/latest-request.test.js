@@ -40,3 +40,12 @@ test("a stale rejected request is ignored after a newer request starts", async (
   pending[1].resolve("newest");
   assert.deepEqual(await current, { current: true, key: "session-b", value: "newest" });
 });
+
+test("invalidating an in-flight request prevents it from becoming current", async () => {
+  const item = deferred();
+  const requests = createLatestRequest(() => item.promise);
+  const pending = requests.run("session-a");
+  requests.invalidate();
+  item.resolve({ id: "session-a" });
+  assert.deepEqual(await pending, { current: false, key: "session-a" });
+});

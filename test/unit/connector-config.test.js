@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   configureConnectorSecretStore,
   connectorConfigurationCatalog,
+  hydrateConnectorSecrets,
   saveConnectorConfiguration,
 } from "../../server/connector-config.js";
 
@@ -30,5 +31,36 @@ test("concurrent secure connector updates are serialized without losing either c
       if (previous[key] === undefined) delete process.env[key];
       else process.env[key] = previous[key];
     }
+  }
+});
+
+test("credential hydration skips one invalid field and continues with valid fields", () => {
+  const previous = Object.fromEntries(KEYS.map((key) => [key, process.env[key]]));
+  for (const key of KEYS) delete process.env[key];
+  try {
+    hydrateConnectorSecrets({
+      gmail: { accessToken: "gmail-token" },
+      supabase: { url: "not a URL", key: "supabase-key" },
+    });
+    assert.equal(process.env.AGENT_ROOM_GMAIL_ACCESS_TOKEN, "gmail-token");
+    assert.equal(process.env.AGENT_ROOM_SUPABASE_URL, undefined);
+    assert.equal(process.env.AGENT_ROOM_SUPABASE_KEY, "supabase-key");
+  } finally {
+    for (const key of KEYS) {
+      if (previous[key] === undefined) delete process.env[key];
+      else process.env[key] = previous[key];
+    }
+  }
+});
+
+test("invalid connector URLs return a stable field-specific error", async () => {
+  configureConnectorSecretStore({ available: true, persist: async () => {} });
+  try {
+    await assert.rejects(
+      () => saveConnectorConfiguration("supabase", { url: "not a URL" }),
+      /Project URL is invalid/,
+    );
+  } finally {
+    configureConnectorSecretStore(null);
   }
 });

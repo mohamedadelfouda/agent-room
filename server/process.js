@@ -159,13 +159,12 @@ export function sanitizedGithubEnv(source = process.env) {
 }
 
 function processEnv(policy, overrides) {
-  const base = policy === "agent"
-    ? sanitizedAgentEnv()
-    : policy === "publication"
-      ? sanitizedPublicationEnv()
-      : policy === "github"
-        ? sanitizedGithubEnv()
-      : { ...process.env };
+  let base;
+  if (policy === "agent") base = sanitizedAgentEnv();
+  else if (policy === "publication") base = sanitizedPublicationEnv();
+  else if (policy === "github") base = sanitizedGithubEnv();
+  else if (policy === "inherit") base = { ...process.env };
+  else throw new Error(`Unsupported process environment policy: ${policy}`);
   return { ...base, ...overrides };
 }
 

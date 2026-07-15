@@ -146,8 +146,8 @@ export function connectorCatalog() {
 }
 export async function executeConnectorAction(connectorId, actionId, input = {}) {
   const definition = connector(connectorId);
-  const action = definition?.actions?.[actionId];
-  if (!definition || !action) throw new Error("Unknown connector action");
+  if (!definition || !Object.hasOwn(definition.actions, actionId)) throw new Error("Unknown connector action");
+  const action = definition.actions[actionId];
   if (!definition.configured()) throw new Error(`${definition.label} connector is not configured`);
   return action.run(input || {});
 }

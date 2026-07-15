@@ -8,12 +8,22 @@ import { executeProjectTool, projectToolDefinitions } from "./project-tools.js";
 function response(id, result) { return { jsonrpc: "2.0", id, result }; }
 function error(id, code, message) { return { jsonrpc: "2.0", id, error: { code, message: redact(message) } }; }
 const toolName = (connector, action) => `connector__${connector}__${action}`;
+const MCP_PROTOCOL_VERSION = "2025-03-26";
+
+function redactedJson(value) {
+  return JSON.stringify(value, (_key, nestedValue) => typeof nestedValue === "string" ? redact(nestedValue) : nestedValue);
+}
+
+function validRequest(request) {
+  return Boolean(request && typeof request === "object" && !Array.isArray(request) && typeof request.method === "string");
+}
 
 export async function handleMcpRequest(request, sessionId, capability = "connectors") {
+  if (!validRequest(request)) return error(null, -32600, "Invalid Request");
   if (!["project", "connectors"].includes(capability)) return error(request.id ?? null, -32602, "Invalid MCP capability scope");
   if (request.method === "initialize") {
     return response(request.id, {
-      protocolVersion: request.params?.protocolVersion || "2025-03-26",
+      protocolVersion: MCP_PROTOCOL_VERSION,
       capabilities: { tools: {} },
       serverInfo: { name: "agent-room-connectors", version: "0.2.0" },
       instructions: capability === "project"
@@ -39,13 +49,13 @@ export async function handleMcpRequest(request, sessionId, capability = "connect
     if (String(request.params?.name || "").startsWith("project__")) {
       if (capability !== "project") return error(request.id, -32602, "Project tools are outside this MCP capability scope");
       const result = await executeProjectTool(sessionId, request.params.name, request.params?.arguments || {});
-      return response(request.id, { content: [{ type: "text", text: JSON.stringify(result).slice(0, 200000) }] });
+      return response(request.id, { content: [{ type: "text", text: redactedJson(result).slice(0, 200000) }] });
     }
     if (capability !== "connectors") return error(request.id, -32602, "Connector tools are outside this MCP capability scope");
     const match = String(request.params?.name || "").match(/^connector__([a-z0-9_-]+)__([a-z0-9_-]+)$/);
     if (!match) return error(request.id, -32602, "Unknown connector tool");
     const result = await requestConnectorAction(sessionId, match[1], match[2], request.params?.arguments || {});
-    return response(request.id, { content: [{ type: "text", text: redact(JSON.stringify(result)).slice(0, 100000) }] });
+    return response(request.id, { content: [{ type: "text", text: redactedJson(result).slice(0, 100000) }] });
   }
   return error(request.id, -32601, "Method not found");
 }
@@ -63,6 +73,7 @@ async function run() {
     let request;
     try { request = JSON.parse(line); }
     catch { process.stdout.write(`${JSON.stringify(error(null, -32700, "Parse error"))}\n`); return; }
+    if (!validRequest(request)) { process.stdout.write(`${JSON.stringify(error(null, -32600, "Invalid Request"))}\n`); return; }
     try {
       const bridgeResponse = await fetch(bridgeUrl, {
         method: "POST",
@@ -74,7 +85,7 @@ async function run() {
       const result = await bridgeResponse.json();
       if (result) process.stdout.write(`${JSON.stringify(result)}\n`);
     } catch (failure) {
-      process.stdout.write(`${JSON.stringify(error(request.id ?? null, -32000, failure.message))}\n`);
+      process.stdout.write(`${JSON.stringify(error(request?.id ?? null, -32000, failure.message))}\n`);
     }
   };
   for await (const chunk of process.stdin) {

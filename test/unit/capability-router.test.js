@@ -3,9 +3,24 @@ import assert from "node:assert/strict";
 import { preflightRoute, routeRequest } from "../../server/capability-router.js";
 
 test("routes explicit state-changing requests away from discussion", () => {
-  assert.equal(routeRequest("run the tests").intent, "execute");
-  assert.equal(routeRequest("نفذ التعديلات في المشروع").intent, "execute");
-  assert.equal(routeRequest("open a PR").intent, "publish");
+  for (const [request, intent] of [
+    ["run the tests", "execute"],
+    ["نفذ التعديلات في المشروع", "execute"],
+    ["commit the changes", "execute"],
+    ["run npm test", "execute"],
+    ["review this repo", "project_read"],
+    ["open a PR", "publish"],
+    ["Can you explain the issue, then commit the changes", "execute"],
+    ["How do pull requests work; then open a PR", "publish"],
+    ["Can you explain the issue? Fix the code.", "execute"],
+    ["Can you explain and fix the code", "execute"],
+    ["What is wrong?\nPlease run the tests", "execute"],
+    ["ازاي المشكلة دي حصلت؟ اصلح الكود", "execute"],
+    ["كيف يعمل؟ ثم ارفع PR", "publish"],
+    ["How do I open a PR? Then run the tests", "execute"],
+  ]) {
+    assert.equal(routeRequest(request).intent, intent, request);
+  }
   const blocked = preflightRoute("run the tests", { projectTrusted: true });
   assert.equal(blocked.allowed, false);
   assert.equal(blocked.reasonCode, "state_change_requires_execution");

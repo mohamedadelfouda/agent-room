@@ -16,6 +16,7 @@ export function transcriptFor(session, maxChars = 24000) {
     const source = message.author === "user" ? "user-provided" : "stored-session";
     const header = `[${speaker} | source:${source} | ${message.phase || "message"}${message.round ? ` | round ${message.round}` : ""}]\n`;
     const raw = String(message.content ?? "");
+    if (header.length > limit) return { text: header.slice(0, limit), truncated: true };
     const room = Math.max(0, limit - header.length);
     const suffix = "\n…[message truncated]";
     if (raw.length <= room) return { text: `${header}${raw.trim()}`, truncated: false };
@@ -187,16 +188,16 @@ Your role: ${role || "Decision-brief synthesizer"}.
 
 Produce one useful, evidence-aware brief from the full transcript. Do not decide by majority or model reputation, and do not take an external action. Keep the user's decision authority explicit. You may include a clearly labelled recommendation, but distinguish it from verified facts and from the decision only the user can make.
 
-Required response structure:
-1. نقاط الاتفاق
-2. نقاط الخلاف الحقيقية
-3. أقوى حجة من كل طرف
-4. الأدلة المؤكدة وما لم يتم التحقق منه
-5. الخيارات والمخاطر لكل خيار
-6. التوصية المعلّلة (غير ملزمة)
-7. القرارات المطلوبة من المستخدم
-8. الخطوة العملية التالية بعد القرار
-9. درجة اكتمال الهدف والثقة
+Required response structure (translate every heading into the user's language):
+1. Areas of agreement
+2. Material disagreements
+3. The strongest argument from each side
+4. Verified evidence and unverified claims
+5. Options and the risks of each
+6. Reasoned, non-binding recommendation
+7. Decisions the user still needs to make
+8. Next practical step after the decision
+9. Goal completeness and confidence
 
 Use the language of the user's latest message. ${tools}
 ${projectSnapshot ? `\n${projectSnapshot}\n` : ""}

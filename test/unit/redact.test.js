@@ -18,10 +18,11 @@ test("redact masks provider fixtures without committing credential-shaped litera
     ["AK", "IAIOSFODNN7EXAMPLE"].join(""),
     ["xox", "b-1234567890-secret"].join(""),
     ["AI", "za12345678901234567890123456789012345"].join(""),
+    ["github", "pat", "11AA22BB33CC44DD55EE66FF77"].join("_"),
   ];
   const output = redact(credentials.join(" "));
   for (const credential of credentials) assert.equal(output.includes(credential), false);
-  assert.equal(output.match(/<redacted-key>/g)?.length, 4);
+  assert.equal(output.match(/<redacted-key>/g)?.length, 5);
 });
 
 test("pull request publication redacts task and review text at the boundary", () => {

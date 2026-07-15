@@ -226,7 +226,7 @@ export async function runCodex({ prompt, config, cwd, onEvent, registerChild }) 
 export async function discoverCodexModels({ command = "codex" } = {}) {
   const trustedCommand = process.env.AGENT_ROOM_CODEX_COMMAND || "";
   const resolvedCommand = await resolveAllowedCommand(command, new Set(["codex"]), { trustedPaths: [trustedCommand, approvedProviderCommand("codex")] });
-  const result = await runProcess({ command: resolvedCommand, args: ["debug", "models"], timeoutMs: 12000 });
+  const result = await runProcess({ command: resolvedCommand, args: ["debug", "models"], timeoutMs: 12000, containTree: true });
   if (result.code !== 0) throw new Error(result.stderr || "Unable to read Codex model catalog");
   const text = result.stdout.trim();
   const candidates = new Set();

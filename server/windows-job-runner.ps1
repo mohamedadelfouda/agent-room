@@ -59,29 +59,29 @@ function Quote-NativeArgument([string]$value) {
 if ($args.Count -ne 1) { throw "Expected one encoded launch payload" }
 $payload = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($args[0])) | ConvertFrom-Json
 $job = [AgentRoomJob]::EnterKillOnCloseJob()
-try {
-  $info = [Diagnostics.ProcessStartInfo]::new()
-  $info.FileName = [string]$payload.command
-  $info.Arguments = (($payload.args | ForEach-Object { Quote-NativeArgument ([string]$_) }) -join ' ')
-  $info.UseShellExecute = $false
-  $info.CreateNoWindow = $true
-  $info.RedirectStandardInput = $true
-  $info.RedirectStandardOutput = $true
-  $info.RedirectStandardError = $true
-  $process = [Diagnostics.Process]::new()
-  $process.StartInfo = $info
-  if (-not $process.Start()) { throw "Failed to start contained process" }
-  # Copy raw streams as they arrive. ReadToEndAsync would buffer an agent's full
-  # response inside PowerShell and would hide progress until the process exits.
-  $stdout = $process.StandardOutput.BaseStream.CopyToAsync([Console]::OpenStandardOutput())
-  $stderr = $process.StandardError.BaseStream.CopyToAsync([Console]::OpenStandardError())
-  $stdin = [Console]::OpenStandardInput().CopyToAsync($process.StandardInput.BaseStream)
-  [void]$stdin.GetAwaiter().GetResult()
-  $process.StandardInput.Close()
-  $process.WaitForExit()
-  [void]$stdout.GetAwaiter().GetResult()
-  [void]$stderr.GetAwaiter().GetResult()
-  exit $process.ExitCode
-} finally {
-  [AgentRoomJob]::CloseHandle($job) | Out-Null
-}
+$info = [Diagnostics.ProcessStartInfo]::new()
+$info.FileName = [string]$payload.command
+$info.Arguments = (($payload.args | ForEach-Object { Quote-NativeArgument ([string]$_) }) -join ' ')
+$info.UseShellExecute = $false
+$info.CreateNoWindow = $true
+$info.RedirectStandardInput = $true
+$info.RedirectStandardOutput = $true
+$info.RedirectStandardError = $true
+$process = [Diagnostics.Process]::new()
+$process.StartInfo = $info
+if (-not $process.Start()) { throw "Failed to start contained process" }
+# Copy raw streams as they arrive. ReadToEndAsync would buffer an agent's full
+# response inside PowerShell and would hide progress until the process exits.
+$stdout = $process.StandardOutput.BaseStream.CopyToAsync([Console]::OpenStandardOutput())
+$stderr = $process.StandardError.BaseStream.CopyToAsync([Console]::OpenStandardError())
+$stdin = [Console]::OpenStandardInput().CopyToAsync($process.StandardInput.BaseStream)
+[void]$stdin.GetAwaiter().GetResult()
+$process.StandardInput.Close()
+$process.WaitForExit()
+[void]$stdout.GetAwaiter().GetResult()
+[void]$stderr.GetAwaiter().GetResult()
+$exitCode = $process.ExitCode
+# Keep the last Job Object handle open until this wrapper exits. Closing it while
+# the wrapper is still a member would terminate the wrapper before it can report
+# the contained process's exit code.
+exit $exitCode

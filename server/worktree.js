@@ -16,7 +16,7 @@ function normalizedPath(value) {
 async function executionLocation(projectPath, wtPath, branch) {
   const match = String(branch || "").match(EXECUTION_BRANCH);
   if (!match || !SAFE.test(match[1]) || !SAFE.test(match[2])) return null;
-  const canonicalProject = await fs.realpath(projectPath).catch(() => path.resolve(projectPath));
+  const canonicalProject = await fs.realpath(projectPath);
   const root = path.join(canonicalProject, ".agent-workspaces");
   const expected = path.join(root, match[1], match[2]);
   if (normalizedPath(expected) !== normalizedPath(wtPath)) return null;
@@ -38,11 +38,27 @@ async function ensureExecutionRoot(projectPath) {
   return canonical;
 }
 
+async function assertRealDirectory(directory, label) {
+  const info = await fs.lstat(directory);
+  if (!info.isDirectory() || info.isSymbolicLink()) throw new Error(`${label} must be a real directory`);
+  const canonical = await fs.realpath(directory);
+  if (normalizedPath(canonical) !== normalizedPath(directory)) throw new Error(`${label} cannot redirect outside its approved location`);
+  return canonical;
+}
+
+async function ensureRealDirectory(directory, label) {
+  try { await fs.mkdir(directory, { mode: 0o700 }); }
+  catch (error) { if (error.code !== "EEXIST") throw error; }
+  return assertRealDirectory(directory, label);
+}
+
 function digest(value) {
   return crypto.createHash("sha256").update(value).digest("hex");
 }
 
 async function assertRealMetadataTree(root) {
+  const rootInfo = await fs.lstat(root);
+  if (!rootInfo.isDirectory() || rootInfo.isSymbolicLink()) throw new Error("Execution repository metadata contains a redirect");
   const pending = [root];
   let entries = 0;
   while (pending.length) {
@@ -122,11 +138,18 @@ export async function createWorktree(projectPath, agent, taskId) {
   const approval = await publicationContext(projectPath);
   const executionRoot = await ensureExecutionRoot(projectPath);
   const rel = path.join(".agent-workspaces", agent, taskId);
-  const wtPath = path.join(executionRoot, agent, taskId);
+  const agentRoot = await ensureRealDirectory(path.join(executionRoot, agent), "Execution provider directory");
+  const wtPath = path.join(agentRoot, taskId);
   const branch = `agent/${agent}/${taskId}`;
-  await fs.mkdir(path.dirname(wtPath), { recursive: true, mode: 0o700 });
+  try {
+    await fs.lstat(wtPath);
+    throw new Error("Execution directory already exists");
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
+  }
   try {
     await git(["clone", "--shared", "--no-checkout", "--origin", "agent-room-source", projectPath, wtPath], projectPath);
+    await assertRealDirectory(wtPath, "Execution clone");
     await git(["remote", "remove", "agent-room-source"], wtPath);
     await git(["switch", "-c", branch, baseSha], wtPath);
     const canonical = await fs.realpath(wtPath);
@@ -154,8 +177,13 @@ export async function createWorktree(projectPath, agent, taskId) {
       },
     };
   } catch (error) {
-    await fs.rm(wtPath, { recursive: true, force: true, maxRetries: 3 }).catch(() => {});
-    throw error;
+    const primaryError = error instanceof Error ? error : new Error(String(error));
+    const cleanup = await removeWorktree(projectPath, wtPath, branch, { isolation: "clone" }).catch((cleanupError) => ({
+      ok: false,
+      errors: [redact(cleanupError?.message || cleanupError)],
+    }));
+    if (!cleanup.ok) primaryError.cleanupErrors = cleanup.errors;
+    throw primaryError;
   }
 }
 
@@ -328,7 +356,7 @@ export async function changedTreeFiles(wtPath, baseSha, treeSha) {
   }
   if (entries.length > 5000) throw new Error("Acceptance changes too many files for a safe review");
 
-  const blobs = entries.filter((entry) => entry.mode !== "120000");
+  const blobs = entries;
   const checked = blobs.length
     ? await git(["cat-file", "--batch-check=%(objectname) %(objecttype) %(objectsize)"], wtPath, {}, `${blobs.map((entry) => entry.sha).join("\n")}\n`)
     : { stdout: "", stdoutTruncated: false };
@@ -379,9 +407,15 @@ export async function changedTreeFiles(wtPath, baseSha, treeSha) {
   }
 
   return entries.map((entry) => {
-    if (entry.mode === "120000") return { path: entry.path, content: "" };
     if (!contentByEntry.has(entry)) return { path: entry.path, content: "", oversize: true };
-    return { path: entry.path, content: contentByEntry.get(entry) };
+    const content = contentByEntry.get(entry);
+    if (entry.mode === "120000") {
+      const components = content.split(/[\\/]/);
+      if (path.posix.isAbsolute(content) || path.win32.isAbsolute(content) || path.win32.parse(content).root || components.includes("..")) {
+        throw new Error(`Symlink target escapes the accepted project tree: ${entry.path}`);
+      }
+    }
+    return { path: entry.path, content };
   });
 }
 
@@ -534,7 +568,7 @@ export async function recoverAgentRoomIndexLock(projectPath) {
   if (markerOwned || hashOwned || partialInstallOwned) {
     const currentTarget = intent?.targetRef ? await optionalGitValue(["rev-parse", intent.targetRef], projectPath) : "";
     const currentHeadRef = await optionalGitValue(["symbolic-ref", "-q", "HEAD"], projectPath);
-    const refsValid = currentHeadRef === intent?.targetRef && [intent?.baseSha, intent?.commitSha].includes(currentTarget);
+    const refsValid = currentHeadRef === intent?.targetRef && currentTarget === intent?.indexCommit && intent?.indexCommit === intent?.commitSha;
     const canFinishIndex = verifiedTemporary && refsValid;
     if (canFinishIndex) {
       const previousIndex = await fs.readFile(indexPath);
@@ -570,8 +604,8 @@ export async function mergeBranch(projectPath, worktree, commitSha, ref = accept
   let lockHandle;
   let ownsLock = false;
   let installedIndex = false;
-  let movedTarget = false;
-  let recoveryMayBeNeeded = false;
+  let targetCommitted = false;
+  let preserveRecovery = false;
   let lockIdentity = null;
 
   const installIndex = async (indexCommit) => {
@@ -619,18 +653,7 @@ export async function mergeBranch(projectPath, worktree, commitSha, ref = accept
     const targetAlreadyAdvanced = currentTarget === commitSha;
     if (!targetAlreadyAdvanced && currentTarget !== worktree.baseSha) throw new Error("Target branch moved before merge; run the task again");
     if (checkedOutRef !== targetRef) throw new Error("The checked-out branch changed before merge; run the task again");
-    recoveryMayBeNeeded = true;
 
-    // Hold Git's real index lock across the target CAS and worktree refresh. Git
-    // switch/checkout/merge obey this lock, so another branch cannot become the
-    // refresh target between the HEAD check and read-tree.
-    if (!targetAlreadyAdvanced) {
-      await git(["update-ref", targetRef, commitSha, worktree.baseSha], projectPath);
-      movedTarget = true;
-    }
-    if (await optionalGitValue(["symbolic-ref", "-q", "HEAD"], projectPath) !== targetRef) {
-      throw new Error("The checked-out branch changed during merge; the accepted branch was not applied to this worktree");
-    }
     await git(["read-tree", worktree.baseSha], projectPath, { GIT_INDEX_FILE: temporaryIndex });
     await writeIntent(intentPath, {
       agentRoom: true,
@@ -643,34 +666,37 @@ export async function mergeBranch(projectPath, worktree, commitSha, ref = accept
       commitSha,
       lockIdentity,
     });
+
+    // Hold Git's real index lock across the target CAS and worktree refresh. Git
+    // switch/checkout/merge obey this lock, so another branch cannot become the
+    // refresh target between the HEAD check and read-tree.
+    if (!targetAlreadyAdvanced) {
+      await git(["update-ref", targetRef, commitSha, worktree.baseSha], projectPath);
+    }
+    targetCommitted = true;
+    if (await optionalGitValue(["symbolic-ref", "-q", "HEAD"], projectPath) !== targetRef) {
+      throw new Error("The checked-out branch changed during merge; the accepted branch was not applied to this worktree");
+    }
     await git(["read-tree", "--reset", "-u", commitSha], projectPath, { GIT_INDEX_FILE: temporaryIndex });
-    if (await optionalGitValue(["symbolic-ref", "-q", "HEAD"], projectPath) !== targetRef) throw new Error("The checked-out branch changed during merge");
-    await installIndex(commitSha);
-    const [mergedHead, mergedRef] = await Promise.all([
+    const [preparedHead, preparedRef] = await Promise.all([
       optionalGitValue(["rev-parse", "HEAD"], projectPath),
       optionalGitValue(["symbolic-ref", "-q", "HEAD"], projectPath),
     ]);
-    if (mergedHead !== commitSha || mergedRef !== targetRef) throw new Error("Git could not verify the accepted fast-forward; inspect the repository before retrying");
+    if (preparedHead !== commitSha || preparedRef !== targetRef) throw new Error("The checked-out branch changed during merge");
+    await installIndex(commitSha);
   } catch (error) {
-    const recoveryErrors = [];
-    if (recoveryMayBeNeeded && lockHandle && !installedIndex) {
-      try {
-        await fs.rm(temporaryIndex, { force: true });
-        await git(["read-tree", commitSha], projectPath, { GIT_INDEX_FILE: temporaryIndex });
-        await git(["read-tree", "--reset", "-u", worktree.baseSha], projectPath, { GIT_INDEX_FILE: temporaryIndex });
-        await installIndex(worktree.baseSha);
-      } catch (recoveryError) { recoveryErrors.push(`worktree recovery failed: ${recoveryError.message}`); }
-    }
-    if (movedTarget) {
-      try { await git(["update-ref", targetRef, worktree.baseSha, commitSha], projectPath); }
-      catch (recoveryError) { recoveryErrors.push(`branch rollback failed: ${recoveryError.message}`); }
-    }
-    throw new Error(`${error.message}${recoveryErrors.length ? `; ${recoveryErrors.join("; ")}` : ""}`);
+    // Once the accepted commit is visible through the target ref, recovery must
+    // finish forward. Rolling the ref back after another Git process could have
+    // observed it can leave HEAD, the index, and the worktree inconsistent.
+    preserveRecovery = targetCommitted && !installedIndex;
+    throw error;
   } finally {
     if (lockHandle) await lockHandle.close().catch(() => {});
-    await fs.rm(temporaryIndex, { force: true }).catch(() => {});
-    if (ownsLock) await fs.rm(intentPath, { force: true }).catch(() => {});
-    if (ownsLock && !installedIndex) await fs.rm(lockPath, { force: true }).catch(() => {});
+    if (!preserveRecovery) {
+      await fs.rm(temporaryIndex, { force: true }).catch(() => {});
+      if (ownsLock) await fs.rm(intentPath, { force: true }).catch(() => {});
+      if (ownsLock && !installedIndex) await fs.rm(lockPath, { force: true }).catch(() => {});
+    }
   }
 }
 
@@ -707,27 +733,59 @@ export async function pruneObjects(projectPath, { strict = false, isolation = "l
 }
 
 // Discard an executor's worktree and its branch (used on reject / cleanup).
-export async function removeWorktree(projectPath, wtPath, branch, { strict = false } = {}) {
+export async function removeWorktree(projectPath, wtPath, branch, { strict = false, isolation = "" } = {}) {
   const errors = [];
-  const location = await executionLocation(projectPath, wtPath, branch);
+  let location;
+  try { location = await executionLocation(projectPath, wtPath, branch); }
+  catch (error) { errors.push(redact(error.message)); }
   if (!location) {
-    const message = "execution path or branch failed the cleanup safety check";
+    const message = errors[0] || "execution path or branch failed the cleanup safety check";
     if (strict) throw new Error(message);
     return { ok: false, errors: [message] };
   }
+  let rootAvailable = true;
+  let targetAvailable = true;
   try {
     const rootInfo = await fs.lstat(location.root);
     if (!rootInfo.isDirectory() || rootInfo.isSymbolicLink()) throw new Error("execution root is not a real directory");
+    const canonicalRoot = await fs.realpath(location.root);
+    if (normalizedPath(canonicalRoot) !== normalizedPath(location.root)) throw new Error("execution root changed before cleanup");
+    const agentRoot = path.join(location.root, location.agent);
+    const agentInfo = await fs.lstat(agentRoot);
+    if (!agentInfo.isDirectory() || agentInfo.isSymbolicLink()) throw new Error("execution provider directory is not a real directory");
+    const canonicalAgent = await fs.realpath(agentRoot);
+    if (normalizedPath(canonicalAgent) !== normalizedPath(agentRoot)) throw new Error("execution provider directory changed before cleanup");
   } catch (error) {
-    if (error.code !== "ENOENT") errors.push(redact(error.message));
+    if (error.code === "ENOENT") { rootAvailable = false; targetAvailable = false; }
+    else errors.push(redact(error.message));
   }
-  let isolatedClone = false;
-  try {
-    const gitInfo = await fs.lstat(path.join(wtPath, ".git"));
-    isolatedClone = gitInfo.isDirectory() && !gitInfo.isSymbolicLink();
-  } catch {}
+  if (rootAvailable) {
+    try { await assertRealDirectory(location.expected, "Execution workspace"); }
+    catch (error) {
+      if (error.code === "ENOENT") targetAvailable = false;
+      else errors.push(redact(error.message));
+    }
+  }
+  if (errors.length) {
+    if (strict) throw new Error(`Execution cleanup failed: ${errors.join("; ")}`);
+    return { ok: false, errors };
+  }
+  let savedIsolation = isolation;
+  if (!savedIsolation && rootAvailable) {
+    try {
+      const gitInfo = await fs.lstat(path.join(wtPath, ".git"));
+      if (!gitInfo.isSymbolicLink() && gitInfo.isDirectory()) savedIsolation = "clone";
+      else if (!gitInfo.isSymbolicLink() && gitInfo.isFile()) savedIsolation = "legacy";
+    } catch {}
+  }
+  if (!["clone", "legacy"].includes(savedIsolation)) {
+    const message = "execution isolation type is unknown; cleanup was left for manual review";
+    if (strict) throw new Error(message);
+    return { ok: false, errors: [message] };
+  }
+  const isolatedClone = savedIsolation === "clone";
   if (isolatedClone) {
-    try { await fs.rm(wtPath, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 }); }
+    try { if (targetAvailable) await fs.rm(wtPath, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 }); }
     catch (error) { errors.push(`clone delete: ${redact(error.message)}`); }
   } else {
     try { await git(["worktree", "remove", "--force", wtPath], projectPath); } catch {}
@@ -769,8 +827,18 @@ export async function listExecutionWorkspaces(projectPath) {
       found.push({
         path: path.join(agentPath, taskEntry.name),
         branch: `agent/${agentEntry.name}/${taskEntry.name}`,
+        isolation: await workspaceIsolation(path.join(agentPath, taskEntry.name)),
       });
     }
   }
   return found;
+}
+
+async function workspaceIsolation(workspacePath) {
+  try {
+    const gitInfo = await fs.lstat(path.join(workspacePath, ".git"));
+    if (!gitInfo.isSymbolicLink() && gitInfo.isDirectory()) return "clone";
+    if (!gitInfo.isSymbolicLink() && gitInfo.isFile()) return "legacy";
+  } catch {}
+  return "unknown";
 }

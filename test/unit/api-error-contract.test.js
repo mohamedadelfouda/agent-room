@@ -12,6 +12,7 @@ let runtimeDir;
 let projectDir;
 let shutdownServer;
 let mutateSession;
+let claudeMcpLaunch;
 
 async function post(pathname, body) {
   return fetch(`${origin}${pathname}`, {
@@ -30,6 +31,7 @@ before(async () => {
   process.env.PORT = "0";
   const serverModule = await import("../../server/index.js");
   ({ mutateSession } = await import("../../server/store.js"));
+  ({ claudeMcpLaunch } = await import("../../server/mcp-config.js"));
   ({ url: origin } = await serverModule.serverReady);
   shutdownServer = serverModule.shutdownServer;
 
@@ -81,4 +83,22 @@ test("pending execution conflict returns 409 with a stable code", async () => {
   assert.equal(response.status, 409);
   assert.equal(payload.code, "pending_execution_decisions");
   assert.equal(payload.detail, payload.error);
+});
+
+test("MCP bridge returns Invalid Request for a JSON null body", async () => {
+  const launch = claudeMcpLaunch(sessionId, "connectors");
+  const config = JSON.parse(launch.args[launch.args.indexOf("--mcp-config") + 1]);
+  const token = config.mcpServers.agent_room.env.AGENT_ROOM_MCP_BRIDGE_TOKEN;
+  try {
+    const response = await fetch(`${origin}/internal/mcp`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Agent-Room-MCP-Token": token },
+      body: "null",
+    });
+    const payload = await response.json();
+    assert.equal(response.status, 200);
+    assert.equal(payload.error.code, -32600);
+  } finally {
+    launch.release();
+  }
 });

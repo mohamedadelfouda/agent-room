@@ -62,7 +62,7 @@ function projectRecoveryState(projects, projectPath) {
 }
 
 async function cleanupExecutionWorkspace(projectPath, worktree, { purgeSecrets = false, acceptedRef = "", acceptedCommit = "" } = {}) {
-  let cleanup = await removeWorktree(projectPath, worktree.path, worktree.branch);
+  let cleanup = await removeWorktree(projectPath, worktree.path, worktree.branch, { isolation: worktree.isolation });
   if (purgeSecrets) {
     const purged = await pruneObjects(projectPath, { isolation: worktree.isolation });
     cleanup = { ok: cleanup.ok && purged.ok, errors: [...cleanup.errors, ...purged.errors] };
@@ -83,52 +83,54 @@ export async function reconcileExecutionWorktrees() {
     try {
       let session = await getSession(summary.id);
       for (const execution of session.executions || []) {
-      const executionProjectPath = execution.projectPath || session.project?.path;
-      if (execution.status !== "accepting_merge" || !executionProjectPath || recoveredIndexLocks.has(executionProjectPath)) continue;
-      await recoverAgentRoomIndexLock(executionProjectPath);
-      recoveredIndexLocks.add(executionProjectPath);
-    }
-    const needsStateRecovery = (session.executions || []).some((execution) => ["accepting_merge", "accepting_pr", "rejecting"].includes(execution.status));
-    if (needsStateRecovery) {
-      session = await mutateSession(session.id, (latest) => {
-        for (const execution of latest.executions || []) {
-          if (execution.status === "accepting_merge") execution.status = "accepted_pending_merge";
-          if (execution.status === "accepting_pr") execution.status = "accepted_pending_pr";
-          if (execution.status === "rejecting") execution.status = "rejected_cleanup_pending";
-        }
-        return structuredClone(latest);
-      });
-    }
-    if (session.project?.path) {
-      projectRecoveryState(projects, session.project.path);
-    }
-    for (const execution of session.executions || []) {
-      const executionProjectPath = execution.projectPath || session.project?.path;
-      if (!executionProjectPath) continue;
-      const project = projectRecoveryState(projects, executionProjectPath);
-      if (RETAINED_EXECUTION_STATUSES.has(execution.status)) {
-        if (execution.worktree?.path) project.keep.add(path.resolve(execution.worktree.path));
-        if (execution.acceptedRef) project.acceptedRefs.add(execution.acceptedRef);
-        continue;
+        const executionProjectPath = execution.projectPath || session.project?.path;
+        if (execution.status !== "accepting_merge" || !executionProjectPath || recoveredIndexLocks.has(executionProjectPath)) continue;
+        await recoverAgentRoomIndexLock(executionProjectPath);
+        recoveredIndexLocks.add(executionProjectPath);
       }
-      if (execution.cleanupPending === false && execution.cleanupCompletedAt) continue;
-      let cleanup = execution.worktree?.path
-        ? await cleanupExecutionWorkspace(executionProjectPath, execution.worktree, {
-          purgeSecrets: execution.status === "blocked_secret",
-          acceptedRef: execution.acceptedRef,
-          acceptedCommit: execution.acceptedCommit,
-        })
-        : execution.acceptedRef
-          ? await releaseAcceptedCommit(executionProjectPath, execution.acceptedRef, execution.acceptedCommit)
-          : { ok: false, errors: ["execution cleanup record is missing its isolated workspace"] };
-      await mutateSession(session.id, (latest) => {
-        const current = findExecution(latest, execution.taskId);
-        if (!current) return;
-        current.cleanupPending = !cleanup.ok;
-        current.cleanupErrors = cleanup.errors.slice(0, 5);
-        if (cleanup.ok) current.cleanupCompletedAt = new Date().toISOString();
-        if (cleanup.ok && current.status === "rejected_cleanup_pending") current.status = "rejected";
-      });
+      const needsStateRecovery = (session.executions || []).some((execution) => ["accepting_merge", "accepting_pr", "rejecting"].includes(execution.status));
+      if (needsStateRecovery) {
+        for (const execution of session.executions || []) {
+          if (!["accepting_merge", "accepting_pr", "rejecting"].includes(execution.status)) continue;
+          await withDecisionLock(session.id, execution.taskId, () => mutateSession(session.id, (latest) => {
+            const current = findExecution(latest, execution.taskId);
+            if (current?.status === "accepting_merge") current.status = "accepted_pending_merge";
+            if (current?.status === "accepting_pr") current.status = "accepted_pending_pr";
+            if (current?.status === "rejecting") current.status = "rejected_cleanup_pending";
+          }));
+        }
+        session = await getSession(session.id);
+      }
+      if (session.project?.path) projectRecoveryState(projects, session.project.path);
+      for (const execution of session.executions || []) {
+        const executionProjectPath = execution.projectPath || session.project?.path;
+        if (!executionProjectPath) continue;
+        const project = projectRecoveryState(projects, executionProjectPath);
+        if (RETAINED_EXECUTION_STATUSES.has(execution.status)) {
+          if (execution.worktree?.path) project.keep.add(path.resolve(execution.worktree.path));
+          if (execution.acceptedRef) project.acceptedRefs.add(execution.acceptedRef);
+          continue;
+        }
+        if (execution.cleanupPending === false && execution.cleanupCompletedAt) continue;
+        await withDecisionLock(session.id, execution.taskId, async () => {
+          const cleanup = execution.worktree?.path
+            ? await cleanupExecutionWorkspace(executionProjectPath, execution.worktree, {
+              purgeSecrets: execution.status === "blocked_secret",
+              acceptedRef: execution.acceptedRef,
+              acceptedCommit: execution.acceptedCommit,
+            })
+            : execution.acceptedRef
+              ? await releaseAcceptedCommit(executionProjectPath, execution.acceptedRef, execution.acceptedCommit)
+              : { ok: false, errors: ["execution cleanup record is missing its isolated workspace"] };
+          await mutateSession(session.id, (latest) => {
+            const current = findExecution(latest, execution.taskId);
+            if (!current) return;
+            current.cleanupPending = !cleanup.ok;
+            current.cleanupErrors = cleanup.errors.slice(0, 5);
+            if (cleanup.ok) current.cleanupCompletedAt = new Date().toISOString();
+            if (cleanup.ok && current.status === "rejected_cleanup_pending") current.status = "rejected";
+          });
+        });
       }
     } catch (error) {
       logError(`execution reconciliation skipped session ${summary.id}`, error.message);
@@ -140,14 +142,14 @@ export async function reconcileExecutionWorktrees() {
   for (const [projectPath, project] of projects) {
     try {
       for (const workspace of await listExecutionWorkspaces(projectPath)) {
-        if (!project.keep.has(path.resolve(workspace.path))) await removeWorktree(projectPath, workspace.path, workspace.branch);
+        if (!project.keep.has(path.resolve(workspace.path))) await removeWorktree(projectPath, workspace.path, workspace.branch, { isolation: workspace.isolation });
       }
       const blocks = (await listWorktrees(projectPath)).split(/\r?\n\r?\n/).filter(Boolean);
       for (const block of blocks) {
         const wtPath = block.match(/^worktree (.+)$/m)?.[1];
         const branch = block.match(/^branch refs\/heads\/(agent\/.+)$/m)?.[1];
         if (!wtPath || !branch || !path.resolve(wtPath).includes(`${path.sep}.agent-workspaces${path.sep}`)) continue;
-        if (!project.keep.has(path.resolve(wtPath))) await removeWorktree(projectPath, wtPath, branch);
+        if (!project.keep.has(path.resolve(wtPath))) await removeWorktree(projectPath, wtPath, branch, { isolation: "legacy" });
       }
       for (const ref of await listAcceptedRefs(projectPath)) {
         if (project.acceptedRefs.has(ref)) continue;
@@ -482,17 +484,20 @@ export async function rejectExecution(sessionId, taskId) {
       if (!["awaiting_user", "rejected_cleanup_pending"].includes(rec.status)) throw new Error(`Execution already ${rec.status}`);
       rec.status = "rejecting";
       rec.decision = "reject";
-      if (!rec.decidedAt) recordDecision(session, { type: "execution", outcome: "rejected", taskId });
+      if (!rec.decidedAt) {
+        rec.decidedAt = new Date().toISOString();
+        recordDecision(session, { type: "execution", outcome: "rejected", taskId });
+      }
       return { projectPath: rec.projectPath || session.project.path, rec: structuredClone(rec) };
     });
     const cleanup = claim.rec.worktree?.path
-      ? await removeWorktree(claim.projectPath, claim.rec.worktree.path, claim.rec.worktree.branch)
+      ? await removeWorktree(claim.projectPath, claim.rec.worktree.path, claim.rec.worktree.branch, { isolation: claim.rec.worktree.isolation })
       : { ok: true, errors: [] };
     await mutateSession(sessionId, (session) => {
       const current = findExecution(session, taskId);
       if (current?.status !== "rejecting") throw new Error("Execution decision changed while rejecting");
       current.status = cleanup.ok ? "rejected" : "rejected_cleanup_pending";
-      current.decidedAt = new Date().toISOString();
+      current.decidedAt ||= new Date().toISOString();
       current.cleanupPending = !cleanup.ok;
       current.cleanupErrors = cleanup.errors.slice(0, 5);
       if (cleanup.ok) current.cleanupCompletedAt = new Date().toISOString();

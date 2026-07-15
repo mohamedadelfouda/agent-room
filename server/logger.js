@@ -20,6 +20,7 @@ export function redact(input) {
     .replace(/(https?:\/\/)[^\s/@:]+:[^\s/@]+@/gi, "$1<redacted>@")
     .replace(/sk-[A-Za-z0-9_\-]{10,}/g, "<redacted-key>")
     .replace(/\bgh[pousr]_[A-Za-z0-9]{20,}\b/g, "<redacted-key>")
+    .replace(/\bgithub_pat_[A-Za-z0-9_]{20,}\b/g, "<redacted-key>")
     .replace(/\bAKIA[0-9A-Z]{16}\b/g, "<redacted-key>")
     .replace(/\bxox[baprs]-[A-Za-z0-9-]{10,}\b/g, "<redacted-key>")
     .replace(/\bAIza[0-9A-Za-z_-]{35}\b/g, "<redacted-key>")
