@@ -10,14 +10,11 @@
 
 `server/orchestrator.js` selects providers from `server/providers/registry.js`. A trusted project produces one bounded shared evidence pack through `server/project.js`. Round one establishes proposals. Later rounds run from the same session snapshot and end in a validated `<agent-control>` JSON block.
 
-`server/convergence.js` permits early stop only when every participating provider:
+`server/convergence.js` validates the version 2 control contract. Agents propose item changes through `itemProposals`; deterministic assessment applies valid proposals to the official `itemRegistry` and derives `nextSteps` from its open items. Agents cannot close or merge an official item by omission, and closing or merging an existing item requires the same explicit action from every participant. Stored unversioned controls with `openPoints` remain readable, but their unclassified points cannot create an early stop.
 
-- supplied a valid control block for the current proposal version;
-- reported no substantive delta;
-- reported `goalStatus: satisfied`; and
-- reported `convergence: converged`.
+Agreement and completion are assessed separately. Early stop requires every participating provider to supply a valid current control, report no substantive delta, and report convergence without a genuine disagreement. The terminal completion state may be `satisfied`, `needs_user`, or `blocked`; `incomplete`, missing, invalid, stale, or contradictory control data keeps the discussion open. The orchestrator stores the approved outcome with the system message before asking the finalizer to explain it, so finalizer prose cannot change the official result.
 
-Missing or invalid control data fails closed and keeps the session open.
+`public/app.js` renders one round-summary card for the latest user run. New sessions read the persisted outcome directly and show localized agreement, completion, stop reason, pending categories, and derived next steps. Legacy sessions fall back to their stored report and `openPoints` without rewriting session files.
 
 ## Execution pipeline
 

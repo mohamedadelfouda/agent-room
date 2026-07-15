@@ -90,21 +90,32 @@ export function transcriptFor(session, maxChars = 24000) {
   return [base, tail.join(SEP)].filter(Boolean).join(SEP).slice(0, cap);
 }
 
-function controlInstruction(targetVersion) {
+function controlInstruction(targetVersion, itemRegistry = []) {
   const shape = JSON.stringify({
+    controlVersion: 2,
     convergence: "converged|open|not_evaluated",
     goalStatus: "satisfied|incomplete|blocked|needs_user",
     substantiveDelta: false,
-    openPoints: ["specific unresolved point"],
-    confidence: 0.0,
+    itemProposals: [{
+      action: "create|keep_open|resolve|merge_into",
+      itemId: "required except for create",
+      targetItemId: "merge_into only",
+      kind: "create only: disagreement|user_decision|external_validation|remaining_work|out_of_scope",
+      text: "create only: specific unresolved item",
+      requiredStep: { actor: "create only: user|human_operator|orchestrator|agent", action: "create only: provide_decision|run_external_check|resume_agent_round" },
+    }],
     targetVersion,
   });
   return `End with exactly one machine-readable control block after your reader-facing answer:
 <agent-control>${shape}</agent-control>
-Use convergence=converged only if you agree with the latest proposal. goalStatus describes whether the user's actual task is complete, not whether the agents agree. Set substantiveDelta=true when your answer changes the proposal; that creates a newer version and prevents an early stop this round. confidence is from 0 to 1. Do not put the block in a code fence or write anything after it.`;
+Use convergence=converged only if you agree with the latest proposal. goalStatus describes whether the user's actual task is complete, not whether the agents agree. Set substantiveDelta=true only when your answer materially changes the proposal; that creates a newer version and prevents an early stop this round.
+itemProposals are proposals, not official state. For a new item use action=create without itemId or targetItemId. For an existing open item reuse its itemId and use keep_open, resolve, or merge_into; merge_into also requires targetItemId. A user_decision requires user/provide_decision. external_validation requires user, human_operator, or orchestrator with run_external_check. disagreement and remaining_work require agent/resume_agent_round. out_of_scope requires user/provide_decision. Do not include confidence or openPoints in version 2.
+Current approved itemRegistry (reuse these IDs; omission never closes an item):
+${JSON.stringify(itemRegistry)}
+Do not put the block in a code fence or write anything after it.`;
 }
 
-export function collaborationPrompt({ session, agentLabel, role, round, totalRounds, userTask, projectSnapshot = "", targetVersion = 1 }) {
+export function collaborationPrompt({ session, agentLabel, role, round, totalRounds, userTask, projectSnapshot = "", targetVersion = 1, itemRegistry = [] }) {
   const tools = projectSnapshot
     ? `You can READ the attached project (Read/Grep/Glob) to ground what you say in the real code — read only, never edit or run anything. When you make a claim about the code, point to the file (and the line when you can), and be honest about what you actually checked versus what you're inferring.`
     : `Work from what's in front of you — don't reach for tools, edit files, or run commands.`;
@@ -114,7 +125,7 @@ export function collaborationPrompt({ session, agentLabel, role, round, totalRou
   const guidance = round === 1
     ? `Lay out your take in full this round. Talk through what's already solid in the shared work, what you'd change or add and why, the proposal as you'd shape it now, and anything you're honestly still unsure about. Write it the way you'd talk it through with a colleague you respect — in your own voice, not as a stiff numbered form.`
     : `This is a later round, so keep it to what's actually new — don't rewrite the whole plan. In a few honest lines: what you now accept from the other agent's last turn, where they're off and why, the one or two things you're really adding this round, and whatever's still open between you. If you've got nothing substantive left to add, just say so — don't pad it out.`;
-  const control = round >= 2 ? `\n${controlInstruction(targetVersion)}\n` : "";
+  const control = round >= 2 ? `\n${controlInstruction(targetVersion, itemRegistry)}\n` : "";
   return `You're ${agentLabel}, one of two agents thinking this through together in a shared session that the user runs and ultimately decides on.
 Your seat at the table: ${role || "Collaborator"}.
 This is round ${round}, and there's room for up to ${totalRounds} — but you're not here to fill rounds. The moment you and the other agent genuinely land in the same place, the session stops early, and that's exactly the outcome we want.
@@ -154,14 +165,14 @@ Shared session transcript (for context only):
 ${transcriptFor(session)}`;
 }
 
-export function debatePrompt({ session, agentLabel, role, opponentLabel, round, totalRounds, userTask, independent, projectSnapshot = "", targetVersion = 1 }) {
+export function debatePrompt({ session, agentLabel, role, opponentLabel, round, totalRounds, userTask, independent, projectSnapshot = "", targetVersion = 1, itemRegistry = [] }) {
   const tools = projectSnapshot
     ? `You can READ the attached project (Read/Grep/Glob) to ground your argument in the real code — read only, never edit or run anything. When you cite the code, name the file (and the line when you can), and keep what you verified separate from what you're inferring.`
     : `Argue from what's in front of you — don't reach for tools, edit files, or run commands.`;
   const guidance = independent
     ? `This is your opening. Form your own position from the task and the earlier context — don't shadow how your opponent framed theirs. Make the real case: where you stand and why, your strongest arguments, what you'll honestly concede, where the other side falls short, what evidence or test would actually change your mind, the call you'd make, and how confident you are (0–100). Argue it like you mean it, in your own voice — not as a checklist.`
     : `This is a rebuttal, so go straight at the strongest opposing point on the table — don't re-argue your whole case. In a few sharp, honest lines: what you now concede from their last turn, your best specific challenge to it, anything genuinely new you're bringing this round, what's still unsettled between you, and your updated confidence (0–100).`;
-  const control = !independent ? `\n${controlInstruction(targetVersion)}\n` : "";
+  const control = !independent ? `\n${controlInstruction(targetVersion, itemRegistry)}\n` : "";
   return `You're ${agentLabel}, debating in a shared session that the user runs and ultimately decides on.
 Your position: ${role || "Critical debater"}.
 Across the table: ${opponentLabel}.
@@ -178,26 +189,32 @@ The debate so far:
 ${transcriptFor(session)}`;
 }
 
-export function synthesisPrompt({ session, agentLabel, role, userTask, mode, projectSnapshot = "" }) {
+export function synthesisPrompt({ session, agentLabel, role, userTask, mode, projectSnapshot = "", outcome = null }) {
   const tools = projectSnapshot
     ? `You may READ the attached project's files (Read/Grep/Glob) to verify claims against the real code — read only, never modify files or run commands.`
     : `Do not use tools or change files.`;
+  const officialOutcome = outcome ? JSON.stringify(outcome) : "No machine-readable outcome was produced.";
   return `You are ${agentLabel}, preparing a decision brief from a persistent multi-agent session.
 Mode completed: ${String(mode).toUpperCase()}.
 Your role: ${role || "Decision-brief synthesizer"}.
 
+The local orchestrator has already computed and persisted the official outcome below. It is immutable for this response. Explain it faithfully; do not re-evaluate, replace, or contradict its agreement state, completion state, stop reason, pending items, or next steps. Your prose is supporting explanation and cannot change the UI status.
+
+Official outcome:
+${officialOutcome}
+
 Produce one useful, evidence-aware brief from the full transcript. Do not decide by majority or model reputation, and do not take an external action. Keep the user's decision authority explicit. You may include a clearly labelled recommendation, but distinguish it from verified facts and from the decision only the user can make.
 
 Required response structure (translate every heading into the user's language):
-1. Areas of agreement
-2. Material disagreements
-3. The strongest argument from each side
-4. Verified evidence and unverified claims
-5. Options and the risks of each
-6. Reasoned, non-binding recommendation
-7. Decisions the user still needs to make
-8. Next practical step after the decision
-9. Goal completeness and confidence
+1. Official outcome
+2. Areas of agreement
+3. Material disagreements, only if the official outcome contains them
+4. The strongest argument from each side
+5. Verified evidence and unverified claims
+6. Options and the risks of each
+7. Reasoned, non-binding recommendation
+8. Pending decisions or external checks from the official outcome
+9. Next practical step
 
 Use the language of the user's latest message. ${tools}
 ${projectSnapshot ? `\n${projectSnapshot}\n` : ""}

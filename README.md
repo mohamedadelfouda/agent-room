@@ -1,31 +1,39 @@
 # Agent Room
 
-Agent Room is a local desktop workspace where multiple coding-agent CLIs share evidence, challenge one proposal, and leave the final decision to the user. It currently ships provider adapters for Claude Code and Codex CLI.
+Agent Room is a local workspace where multiple coding-agent CLIs share evidence, challenge one proposal, and leave the final decision to the user. It currently ships provider adapters for Claude Code and Codex CLI.
 
 The product is built around four contracts:
 
 - Both agents receive the same bounded evidence pack from a trusted project.
-- Early stopping requires agreement on the latest proposal version **and** a satisfied user goal.
+- Early stopping requires a valid, delta-free agreement on the latest proposal version. A settled run may finish as complete, waiting for the user, or waiting for external validation; incomplete work and genuine disagreement keep the discussion open.
 - One executor changes a disposable local Git clone; a separate agent reviews the captured tree read-only.
 - The accepted project commit, merge, pull request, email, issue, or database write happens only after an explicit user decision. Disposable executor commits, if any, are collapsed before acceptance.
 
 ## What is different
 
-Agent Room is not a side-by-side chat wrapper. It records proposal versions and machine-readable goal status, shows why rounds stopped, preserves unresolved points, and keeps a decision log. Its Execute → Review → Decide path creates the accepted Git commit only after approval and rechecks the immutable Git tree for secrets immediately before that commit.
+Agent Room is not a side-by-side chat wrapper. It records proposal versions, a machine-approved pending-item registry, and separate agreement and task-completion states. The decision card shows why the latest run stopped and the next required step without treating a user choice or external check as agent disagreement. Its Execute → Review → Decide path creates the accepted Git commit only after approval and rechecks the immutable Git tree for secrets immediately before that commit.
 
-Optional connector tools use the same rule. Read actions require per-session opt-in. State-changing GitHub, Gmail, and Supabase tools create a pending proposal; they do not perform the action until the user approves it in Agent Room. Installed desktop builds can configure Gmail and Supabase through OS-backed encrypted storage; source deployments can use documented environment variables.
+Optional connector tools use the same rule. Read actions require per-session opt-in. State-changing GitHub, Gmail, and Supabase tools create a pending proposal; they do not perform the action until the user approves it in Agent Room. Connector credentials for source deployments use documented environment variables; optional Electron builds can use OS-backed encrypted storage when you package them locally.
 
-## Install the desktop app
+## Run the local server
 
-Tagged releases build native artifacts on all three platforms:
+Node.js 22 or newer is required. Agent Room is meant to run as a **loopback HTTP server** and open in your browser.
 
-- Windows: `Agent Room-<version> Setup.exe` (Squirrel installer)
-- macOS: `.zip` (unzip and move Agent Room to Applications)
-- Linux: `.deb` and `.rpm`
+```bash
+corepack enable
+pnpm install --frozen-lockfile
+pnpm start
+```
 
-Download them from [GitHub Releases](https://github.com/mohamedadelfouda/agent-room/releases). Public builds need the maintainer's signing credentials to avoid Windows SmartScreen and macOS Gatekeeper warnings; see [desktop distribution](docs/DESKTOP.md).
+By default the server listens on **`http://127.0.0.1:3210`**. Override the port with `PORT` when needed:
 
-The installed app is one click: it starts its private loopback server on a free port, opens one secured Electron window, and stores sessions/logs under the operating system's application-data directory.
+```bash
+PORT=3210 pnpm start
+```
+
+On Windows you can also double-click `start-windows.bat` (macOS: `start-macos.command`, Linux: `start-linux.sh`). Those scripts start the same browser-facing server.
+
+There are no published GitHub Release installers right now. To try the optional Electron shell from this checkout: `pnpm desktop` (see [desktop distribution](docs/DESKTOP.md) if you build locally).
 
 ## Required agent CLIs
 
@@ -42,33 +50,12 @@ If a provider check fails, the in-app **Set up** button runs a read-only search 
 
 Prompts and project excerpts are sent to the selected model providers through their official CLIs. Session JSON is stored locally and can contain the user's text and agent output.
 
-## Run from source
-
-Node.js 22 or newer is required.
-
-```bash
-corepack enable
-pnpm install --frozen-lockfile
-pnpm desktop
-```
-
-For the browser-only local server:
-
-```bash
-pnpm start
-```
-
-Source checkouts also include `start-windows.bat`, `start-macos.command`, and `start-linux.sh`. These launch the browser-only server and require Node.js 22+.
-
 ## Validate
 
 ```bash
 pnpm check
 pnpm test
-pnpm make
 ```
-
-`pnpm make` creates artifacts only for the current operating system. The GitHub workflow [desktop-build.yml](.github/workflows/desktop-build.yml) builds Windows, macOS, and Linux artifacts on their native runners.
 
 ## Safety boundaries
 

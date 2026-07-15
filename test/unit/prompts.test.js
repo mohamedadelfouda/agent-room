@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { chatPrompt, collaborationPrompt, debatePrompt, executionPrompt, transcriptFor } from "../../server/prompts.js";
+import { chatPrompt, collaborationPrompt, debatePrompt, executionPrompt, synthesisPrompt, transcriptFor } from "../../server/prompts.js";
 
 const session = { messages: [] };
 const base = { session, agentLabel: "Claude", role: "Collaborator", totalRounds: 5, userTask: "design X" };
@@ -9,8 +9,12 @@ function assertControlContract(prompt, targetVersion) {
   assert.match(prompt, /<agent-control>/);
   assert.match(prompt, /<\/agent-control>/);
   assert.match(prompt, new RegExp(`"targetVersion":${targetVersion}`));
+  assert.match(prompt, /"controlVersion":2/);
   assert.match(prompt, /"goalStatus"/);
   assert.match(prompt, /"substantiveDelta"/);
+  assert.match(prompt, /"itemProposals"/);
+  assert.doesNotMatch(prompt, /"confidence":/);
+  assert.doesNotMatch(prompt, /"openPoints":/);
   assert.match(prompt, /write anything after it/i);
 }
 
@@ -21,8 +25,20 @@ test("collaboration opening requests a full proposal without a control block", (
 });
 
 test("later collaboration rounds request a versioned control contract", () => {
-  const prompt = collaborationPrompt({ ...base, round: 3, targetVersion: 7 });
+  const prompt = collaborationPrompt({
+    ...base,
+    round: 3,
+    targetVersion: 7,
+    itemRegistry: [{
+      itemId: "item-001",
+      kind: "user_decision",
+      status: "open",
+      text: "Choose the rollout",
+      requiredStep: { actor: "user", action: "provide_decision" },
+    }],
+  });
   assertControlContract(prompt, 7);
+  assert.match(prompt, /item-001/);
 });
 
 test("project grounding appears only when a snapshot is supplied", () => {
@@ -42,6 +58,22 @@ test("debate opening is independent and has no convergence control", () => {
 test("debate rebuttal uses the same versioned control contract", () => {
   const prompt = debatePrompt({ ...base, opponentLabel: "Codex", round: 2, independent: false, targetVersion: 4 });
   assertControlContract(prompt, 4);
+});
+
+test("synthesis receives an immutable official outcome to explain", () => {
+  const prompt = synthesisPrompt({
+    ...base,
+    mode: "collaboration",
+    outcome: {
+      agreementState: "converged",
+      completionState: "needs_user",
+      stopReason: "user_decision",
+      pendingItems: [{ itemId: "item-001", text: "Choose a mode" }],
+      nextSteps: [{ actor: "user", action: "provide_decision", itemIds: ["item-001"] }],
+    },
+  });
+  assert.match(prompt, /official outcome/i);
+  assert.match(prompt, /"completionState":"needs_user"/);
 });
 
 test("chat describes only capabilities that are actually available", () => {
