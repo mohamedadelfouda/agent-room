@@ -148,9 +148,12 @@ test("terminateProcess immediate kills a child that ignores SIGTERM (shutdown pa
       detached: process.platform !== "win32",
       stdio: "ignore",
     });
-    const closed = waitForClose(child);
+    // terminateProcess resolves only after the child has actually exited, so confirm the
+    // close afterwards. A close promise created *before* the await races the kill — on
+    // Windows CI, PowerShell/taskkill cold-start can exceed the timer, which then rejects
+    // while unawaited (an unhandled rejection that flaked the release build).
     assert.equal(await terminateProcess(child, { immediate: true }), true);
-    await closed;
+    await waitForClose(child, 15000);
   } finally {
     await stopChild(child);
   }
@@ -169,9 +172,10 @@ test("terminateProcess removes a Windows child process tree", async () => {
           const timer = setTimeout(() => reject(new Error("grandchild PID was not reported")), 2000);
           child.stdout.once("data", (chunk) => { clearTimeout(timer); resolve(Number(String(chunk).trim())); });
         });
-        const closed = waitForClose(child);
+        // Await the kill first, then confirm close — see the shutdown-path test above for
+        // why a pre-attached close promise races the Windows kill and flakes.
         assert.equal(await terminateProcess(child, { immediate: true }), true);
-        await closed;
+        await waitForClose(child, 15000);
         assert.throws(() => process.kill(grandchildPid, 0), /ESRCH|not found|no such process/i);
         grandchildPid = undefined;
       } finally {
