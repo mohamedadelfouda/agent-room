@@ -313,3 +313,46 @@ export async function mutateSession(id, mutate) {
     return result === undefined ? session : result;
   });
 }
+
+export async function renameSession(id, title) {
+  const next = String(title ?? "").trim().slice(0, 160);
+  if (!next) {
+    const error = new Error("Title is required");
+    error.code = "title_required";
+    throw error;
+  }
+  return mutateSession(id, (session) => {
+    session.title = next;
+    return { id: session.id, title: session.title };
+  });
+}
+
+export async function deleteSession(id, { isBusy } = {}) {
+  const filePath = sessionPath(id);
+  return runExclusive(filePath, async () => {
+    let session;
+    try {
+      session = JSON.parse(await fs.readFile(filePath, "utf8"));
+    } catch (error) {
+      if (error.code === "ENOENT") {
+        const missing = new Error("Session not found");
+        missing.code = "ENOENT";
+        throw missing;
+      }
+      throw error;
+    }
+    if (typeof isBusy === "function" && isBusy()) {
+      const error = new Error("Session is already busy");
+      error.code = "session_busy";
+      throw error;
+    }
+    if (Array.isArray(session.executions) && session.executions.some(executionNeedsRecovery)) {
+      const error = new Error("Resolve pending execution decisions before deleting the session");
+      error.code = "pending_execution_decisions";
+      throw error;
+    }
+    await fs.rm(filePath, { force: true });
+    await fs.rm(summaryPath(filePath), { force: true });
+    return { id: session.id, deleted: true };
+  });
+}

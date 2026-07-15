@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { readFile, rm, stat, writeFile, utimes } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { createSession, saveSession, getSession, addMessage, listSessions } from "../../server/store.js";
+import { createSession, saveSession, getSession, addMessage, listSessions, renameSession, deleteSession } from "../../server/store.js";
 
 const sessionsDir = join(dirname(fileURLToPath(import.meta.url)), "../../data/sessions");
 const cleanup = (id) => Promise.all([
@@ -94,4 +94,44 @@ test("history retention never drops a terminal execution whose cleanup is pendin
     assert.ok(saved.executions.some((record) => record.taskId === "pending-cleanup"));
     assert.equal(saved.executions.filter((record) => record.taskId.startsWith("clean-")).length, 50);
   } finally { await cleanup(session.id); }
+});
+test('renameSession updates title and keeps the same id', async () => {
+  const session = await createSession('rename-before');
+  try {
+    const renamed = await renameSession(session.id, 'rename-after');
+    assert.equal(renamed.id, session.id);
+    assert.equal(renamed.title, 'rename-after');
+    const loaded = await getSession(session.id);
+    assert.equal(loaded.id, session.id);
+    assert.equal(loaded.title, 'rename-after');
+    const listed = await listSessions();
+    assert.equal(listed.find((item) => item.id === session.id)?.title, 'rename-after');
+  } finally {
+    await cleanup(session.id);
+  }
+});
+
+test('deleteSession removes transcript and summary without breaking listSessions', async () => {
+  const session = await createSession('delete-me');
+  try {
+    await deleteSession(session.id);
+    await assert.rejects(() => getSession(session.id), /ENOENT|no such file/i);
+    const listed = await listSessions();
+    assert.equal(listed.find((item) => item.id === session.id), undefined);
+  } finally {
+    await cleanup(session.id);
+  }
+});
+
+test('deleteSession refuses sessions with recoverable executions', async () => {
+  const session = await createSession('delete-blocked');
+  try {
+    session.executions = [{ taskId: 'open', status: 'awaiting_decision', cleanupPending: true }];
+    await saveSession(session);
+    await assert.rejects(() => deleteSession(session.id), (error) => error.code === 'pending_execution_decisions');
+    const loaded = await getSession(session.id);
+    assert.equal(loaded.id, session.id);
+  } finally {
+    await cleanup(session.id);
+  }
 });

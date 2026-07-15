@@ -41,6 +41,13 @@ function isCurrentSessionView(sessionId, viewEpoch) {
 let providers = [];
 let renderedMessageSessionId = null;
 let renderedMessageIds = new Set();
+let pendingAttachments = [];
+let sessionGroupBy = localStorage.getItem("agent-room-session-group") || "date";
+let renameTargetId = null;
+let openSessionMenu = null;
+const ATTACH_MAX_BYTES = 100 * 1024;
+const ATTACH_MAX_FILES = 5;
+const ATTACH_MAX_TOTAL_BYTES = 300 * 1024;
 
 const settingsIds = () => ["rounds", "finalizer", ...providers.flatMap((item) => ["Command", "Model", "Effort", "Role", "Enabled"].map((suffix) => `${item.id}${suffix}`))];
 const providerInfo = (id) => providers.find((item) => item.id === id) || { id, label: id || "Agent" };
@@ -132,6 +139,7 @@ function applyLang(next) {
   });
   setConnected(!$("serverStatus").classList.contains("is-bad") ? true : false);
   updateSetupSummary();
+  applyShellChrome();
   refreshSessions();
   if (currentSession) { loadSessionMeta(); renderMessages(); loadConnectors(); }
   localStorage.setItem("agent-room-lang", lang);
@@ -367,18 +375,217 @@ async function refreshSessions() {
   try { sessions = await api("/api/sessions"); } catch { return; }
   const list = $("sessionList");
   list.innerHTML = "";
-  for (const s of sessions) {
-    const btn = document.createElement("button");
-    btn.className = `session-item ${s.id === currentSessionId ? "is-active" : ""}`;
-    if (s.id === currentSessionId) btn.setAttribute("aria-current", "page");
-    const title = document.createElement("div"); title.className = "si-title"; title.textContent = s.title;
-    const sub = document.createElement("div"); sub.className = "si-sub";
-    const dot = document.createElement("span"); dot.className = `si-dot ${s.status || ""}`; dot.setAttribute("aria-hidden", "true");
-    const meta = document.createElement("span"); meta.textContent = `${discussionModeLabel(s.mode)} · ${formatMessageCount(lang, s.messageCount)} · ${sessionStatusLabel(s.status)}`;
-    sub.append(dot, meta); btn.append(title, sub);
-    btn.onclick = () => openSession(s.id);
-    list.appendChild(btn);
+  closeSessionMenu();
+  const groups = groupSessions(sessions, sessionGroupBy);
+  for (const group of groups) {
+    const label = document.createElement("div");
+    label.className = "session-group-label";
+    label.textContent = group.label;
+    list.appendChild(label);
+    for (const s of group.sessions) {
+      const row = document.createElement("div");
+      row.className = `session-row ${s.id === currentSessionId ? "is-active" : ""}`;
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "session-item";
+      if (s.id === currentSessionId) btn.setAttribute("aria-current", "page");
+      const dot = document.createElement("span");
+      dot.className = `si-dot ${s.status || ""}`;
+      dot.setAttribute("aria-hidden", "true");
+      const copy = document.createElement("span");
+      copy.className = "si-copy";
+      const title = document.createElement("strong");
+      title.className = "si-title";
+      title.textContent = s.title;
+      const meta = document.createElement("small");
+      meta.className = "si-sub";
+      meta.textContent = `${discussionModeLabel(s.mode)} · ${formatMessageCount(lang, s.messageCount)} · ${sessionStatusLabel(s.status)}`;
+      copy.append(title, meta);
+      btn.append(dot, copy);
+      btn.onclick = () => openSession(s.id);
+      const more = document.createElement("button");
+      more.type = "button";
+      more.className = "session-more";
+      more.setAttribute("aria-label", t("sessionMenu"));
+      more.setAttribute("aria-haspopup", "menu");
+      more.setAttribute("aria-expanded", "false");
+      more.textContent = "⋯";
+      more.onclick = (event) => {
+        event.stopPropagation();
+        toggleSessionMenu(more, s);
+      };
+      row.append(btn, more);
+      list.appendChild(row);
+    }
   }
+}
+
+function groupSessions(sessions, by) {
+  const buckets = new Map();
+  for (const session of sessions) {
+    let key;
+    let label;
+    if (by === "project") {
+      const path = String(session.projectPath || "").trim();
+      key = path || "__none__";
+      label = path ? projectBasename(path) : t("noProject");
+    } else {
+      const bucket = dateBucket(session.updatedAt);
+      key = bucket.key;
+      label = bucket.label;
+    }
+    if (!buckets.has(key)) buckets.set(key, { key, label, sessions: [] });
+    buckets.get(key).sessions.push(session);
+  }
+  return [...buckets.values()];
+}
+
+function projectBasename(projectPath) {
+  const parts = String(projectPath).replace(/\\/g, "/").split("/").filter(Boolean);
+  return parts[parts.length - 1] || projectPath;
+}
+
+function dateBucket(iso) {
+  const date = iso ? new Date(iso) : null;
+  if (!date || Number.isNaN(date.getTime())) return { key: "earlier", label: t("earlier") };
+  const now = new Date();
+  const startToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const startThat = new Date(date.getFullYear(), date.getMonth(), date.getDate());
+  const dayDiff = Math.round((startToday - startThat) / 86400000);
+  if (dayDiff <= 0) return { key: "today", label: t("today") };
+  if (dayDiff === 1) return { key: "yesterday", label: t("yesterday") };
+  return { key: "earlier", label: t("earlier") };
+}
+
+function closeSessionMenu() {
+  if (openSessionMenu) {
+    openSessionMenu.remove();
+    openSessionMenu = null;
+  }
+  document.querySelectorAll(".session-more[aria-expanded='true']").forEach((btn) => btn.setAttribute("aria-expanded", "false"));
+}
+
+function toggleSessionMenu(anchor, session) {
+  if (openSessionMenu && openSessionMenu.dataset.sessionId === session.id) {
+    closeSessionMenu();
+    return;
+  }
+  closeSessionMenu();
+  const menu = document.createElement("div");
+  menu.className = "session-menu";
+  menu.dataset.sessionId = session.id;
+  menu.setAttribute("role", "menu");
+  const renameBtn = document.createElement("button");
+  renameBtn.type = "button";
+  renameBtn.setAttribute("role", "menuitem");
+  renameBtn.textContent = t("renameSession");
+  renameBtn.onclick = () => { closeSessionMenu(); openRenameSessionModal(session); };
+  const deleteBtn = document.createElement("button");
+  deleteBtn.type = "button";
+  deleteBtn.className = "is-danger";
+  deleteBtn.setAttribute("role", "menuitem");
+  deleteBtn.textContent = t("deleteSession");
+  deleteBtn.onclick = () => { closeSessionMenu(); void confirmDeleteSession(session); };
+  menu.append(renameBtn, deleteBtn);
+  document.body.appendChild(menu);
+  openSessionMenu = menu;
+  anchor.setAttribute("aria-expanded", "true");
+  const rect = anchor.getBoundingClientRect();
+  const menuWidth = menu.offsetWidth;
+  const left = Math.min(window.innerWidth - menuWidth - 8, Math.max(8, rect.left));
+  menu.style.top = `${Math.min(window.innerHeight - menu.offsetHeight - 8, rect.bottom + 4)}px`;
+  menu.style.left = `${left}px`;
+}
+
+function openRenameSessionModal(session) {
+  renameTargetId = session.id;
+  $("renameSessionInput").value = session.title || "";
+  $("renameSessionError").textContent = "";
+  $("renameSessionError").classList.add("hidden");
+  openManagedModal($("renameSessionModal"), { initialFocus: $("renameSessionInput"), dismiss: closeRenameSessionModal });
+}
+
+function closeRenameSessionModal() {
+  renameTargetId = null;
+  closeManagedModal($("renameSessionModal"));
+}
+
+async function saveRenameSession() {
+  if (!renameTargetId) return;
+  const title = $("renameSessionInput").value.trim();
+  const err = $("renameSessionError");
+  if (!title) {
+    err.textContent = t("errorTitleRequired");
+    err.classList.remove("hidden");
+    return;
+  }
+  try {
+    const result = await api(`/api/sessions/${renameTargetId}`, { method: "PATCH", body: JSON.stringify({ title }) });
+    if (currentSessionId === renameTargetId && currentSession) {
+      currentSession.title = result.title;
+      loadSessionMeta();
+    }
+    closeRenameSessionModal();
+    await refreshSessions();
+  } catch (error) {
+    err.textContent = localizedFailure(error);
+    err.classList.remove("hidden");
+  }
+}
+
+async function confirmDeleteSession(session) {
+  if (!window.confirm(t("deleteSessionConfirm"))) return;
+  try {
+    await api(`/api/sessions/${session.id}`, { method: "DELETE" });
+    if (currentSessionId === session.id) {
+      if (eventSource) { eventSource.close(); eventSource = null; }
+      currentSessionId = null;
+      currentSession = null;
+      sessionRequests.invalidate();
+      connectorRequests.invalidate();
+      $("sessionView").hidden = true;
+      $("emptyState").hidden = false;
+      $("contextCol").innerHTML = "";
+      clearAttachments();
+    }
+    await refreshSessions();
+  } catch (error) {
+    $("liveStatus").textContent = localizedFailure(error);
+  }
+}
+
+function applyShellChrome() {
+  const railCollapsed = localStorage.getItem("agent-room-rail-collapsed") === "1";
+  const contextHidden = localStorage.getItem("agent-room-context-hidden") === "1";
+  document.documentElement.classList.toggle("rail-collapsed", railCollapsed);
+  document.documentElement.classList.toggle("context-hidden", contextHidden);
+  const railBtn = $("toggleRail");
+  if (railBtn) {
+    railBtn.setAttribute("aria-pressed", String(railCollapsed));
+    railBtn.title = t("toggleRail");
+    railBtn.setAttribute("aria-label", t("toggleRail"));
+  }
+  const contextBtn = $("toggleContext");
+  if (contextBtn) {
+    contextBtn.classList.toggle("is-active", !contextHidden);
+    contextBtn.setAttribute("aria-pressed", String(!contextHidden));
+    contextBtn.title = t("toggleContext");
+    contextBtn.setAttribute("aria-label", t("toggleContext"));
+  }
+  const groupSelect = $("sessionGroupBy");
+  if (groupSelect) groupSelect.value = sessionGroupBy;
+}
+
+function toggleRailCollapsed() {
+  const next = !document.documentElement.classList.contains("rail-collapsed");
+  localStorage.setItem("agent-room-rail-collapsed", next ? "1" : "0");
+  applyShellChrome();
+}
+
+function toggleContextColumn() {
+  const next = !document.documentElement.classList.contains("context-hidden");
+  localStorage.setItem("agent-room-context-hidden", next ? "1" : "0");
+  applyShellChrome();
 }
 
 /* ---------------- session open / focused view ---------------- */
@@ -413,6 +620,7 @@ async function openSession(id) {
     $("sessionMeta").textContent = "";
     $("messageInput").value = "";
     autoGrow($("messageInput"));
+    clearAttachments();
     $("execTask").value = "";
     $("execStatus").textContent = "";
     $("liveStatus").textContent = t("ready");
@@ -499,7 +707,7 @@ function renderMessages() {
   renderedMessageIds = new Set(messages.map((message) => message.id).filter(Boolean));
   chat.setAttribute("aria-busy", "true");
   chat.innerHTML = "";
-  renderSessionInsights(chat);
+  renderRouteSuggestion(chat);
   for (const msg of messages) {
     const meta = msg.meta || {};
     const isPartial = meta.status === "partial";
@@ -532,6 +740,7 @@ function renderMessages() {
     chat.appendChild(el);
   }
   renderExecutions();
+  renderContextColumn();
   // Completed sessions open at the first message (read from the top); live runs follow the newest.
   chat.scrollTop = running ? chat.scrollHeight : 0;
   chat.setAttribute("aria-busy", "false");
@@ -544,23 +753,60 @@ function renderMessages() {
   }
 }
 
-function renderSessionInsights(chat) {
+function renderRouteSuggestion(chat) {
+  if (!routeSuggestion) return;
+  const card = document.createElement("section");
+  card.className = "session-insight route-suggestion";
+  card.innerHTML = `<p>${esc(t(errorMessageKey(routeSuggestion)))}</p><button class="btn-primary">${esc(t("routeAction"))}</button>`;
+  card.querySelector("button").onclick = () => {
+    $("execDrawer").hidden = false;
+    $("execToggle").setAttribute("aria-expanded", "true");
+    $("setupDrawer").hidden = true;
+    $("setupToggle").setAttribute("aria-expanded", "false");
+    if (routeSuggestion.action === "open_execution") $("execTask").value = $("messageInput").value.trim();
+    routeSuggestion = null;
+    renderMessages();
+  };
+  chat.appendChild(card);
+}
+
+function renderContextColumn() {
+  const col = $("contextCol");
+  if (!col) return;
+  col.innerHTML = "";
   if (!currentSession) return;
+
   const discussion = (currentSession.messages || []).filter((message) => message.author === "agent" && ["collaboration", "opening", "rebuttal"].includes(message.phase));
   const completed = Math.max(0, ...discussion.map((message) => Number(message.round) || 0));
   const requested = Number(currentSession.settings?.rounds) || 0;
   const finalReport = [...(currentSession.messages || [])].reverse().find((message) => ["converged", "needs_more_rounds"].includes(message.phase));
   const openPoints = [...new Set(discussion.flatMap((message) => message.control?.openPoints || []).filter(Boolean))];
   const corrections = discussion.filter((message) => message.control?.substantiveDelta).map((message) => ({ agent: message.agent, content: String(message.content || "").slice(0, 140) }));
-  if (requested || completed) {
-    const card = document.createElement("section");
-    card.className = "session-insight";
-    card.innerHTML = `<h2>${esc(t("roundTracker"))}</h2><div class="insight-metrics"><span>${esc(t("requested"))}: <b>${bdi(formatLocaleNumber(lang, requested))}</b></span><span>${esc(t("completed"))}: <b>${bdi(formatLocaleNumber(lang, completed))}</b></span></div>${finalReport ? `<p dir="auto">${esc(finalReport.content)}</p>` : ""}${corrections.length ? `<p><b>${esc(t("corrections"))}:</b> ${corrections.map((correction) => `${bdi(correction.agent, "ltr")}: <span dir="auto">${esc(correction.content)}</span>`).join(" · ")}</p>` : ""}${openPoints.length ? `<p><b>${esc(t("unresolved"))}:</b> ${openPoints.map((point) => `<span dir="auto">${esc(point)}</span>`).join(" · ")}</p>` : ""}`;
-    chat.appendChild(card);
+  const latestGoal = [...discussion].reverse().map((message) => message.control?.goalStatus).find(Boolean);
+
+  if (requested || completed || latestGoal || openPoints.length || corrections.length || finalReport) {
+    const body = [
+      `<div class="insight-metrics"><span>${esc(t("requested"))}: <b>${bdi(formatLocaleNumber(lang, requested))}</b></span><span>${esc(t("completed"))}: <b>${bdi(formatLocaleNumber(lang, completed))}</b></span></div>`,
+      latestGoal ? `<p class="context-meta">${esc(t("goalStatus"))}: <b dir="ltr">${esc(latestGoal)}</b></p>` : "",
+      finalReport ? `<p dir="auto">${esc(finalReport.content)}</p>` : "",
+      corrections.length ? `<p><b>${esc(t("corrections"))}:</b> ${corrections.map((correction) => `${bdi(correction.agent, "ltr")}: <span dir="auto">${esc(correction.content)}</span>`).join(" · ")}</p>` : "",
+    ].filter(Boolean).join("");
+    col.appendChild(contextCard("goal", t("roundTracker"), body, true));
   }
+
+  if (openPoints.length) {
+    const riskBody = `<ul>${openPoints.map((point) => `<li dir="auto">${esc(point)}</li>`).join("")}</ul>`;
+    col.appendChild(contextCard("risk", t("contextRisks"), riskBody, false));
+  }
+
+  if (currentSession.project?.path) {
+    const trusted = currentSession.project.trusted === true;
+    const trustLabel = trusted ? t("attached") : t("untrustedProject");
+    const body = `<p class="context-path">${esc(currentSession.project.path)}</p><p class="context-meta">${esc(trustLabel)}</p>`;
+    col.appendChild(contextCard("project", t("contextProject"), body, true));
+  }
+
   if (currentSession.decisions?.length) {
-    const card = document.createElement("section");
-    card.className = "session-insight";
     const items = currentSession.decisions.slice(-8).map((decision) => {
       const type = localizedMarkup(decisionTypeKey(decision.type), decision.type);
       const outcome = localizedMarkup(decisionOutcomeKey(decision.outcome), decision.outcome);
@@ -572,26 +818,85 @@ function renderSessionInsights(chat) {
         : connectorId ? localizedMarkup(connectorLabelKey(connectorId), connectorId) : "";
       return `<li><b>${outcome}</b> · ${type}${context ? ` (${context})` : ""}</li>`;
     }).join("");
-    card.innerHTML = `<h2>${esc(t("decisionLog"))}</h2><ul>${items}</ul>`;
-    chat.appendChild(card);
-  }
-  if (routeSuggestion) {
-    const card = document.createElement("section");
-    card.className = "session-insight route-suggestion";
-    card.innerHTML = `<p>${esc(t(errorMessageKey(routeSuggestion)))}</p><button class="btn-primary">${esc(t("routeAction"))}</button>`;
-    card.querySelector("button").onclick = () => {
-      $("execDrawer").hidden = false;
-      $("execToggle").setAttribute("aria-expanded", "true");
-      $("setupDrawer").hidden = true;
-      $("setupToggle").setAttribute("aria-expanded", "false");
-      if (routeSuggestion.action === "open_execution") $("execTask").value = $("messageInput").value.trim();
-      routeSuggestion = null;
-      renderMessages();
-    };
-    chat.appendChild(card);
+    col.appendChild(contextCard("log", t("decisionLog"), `<ul>${items}</ul>`, false));
   }
 }
-function autoGrow(el) { el.style.height = "auto"; el.style.height = Math.min(el.scrollHeight, 200) + "px"; }
+
+function contextCard(id, title, bodyHtml, open) {
+  const details = document.createElement("details");
+  details.className = "context-card";
+  details.dataset.contextCard = id;
+  details.open = open;
+  details.innerHTML = `<summary>${esc(title)}</summary><div class="context-card-body">${bodyHtml}</div>`;
+  return details;
+}
+
+function clearAttachments() {
+  pendingAttachments = [];
+  renderAttachChips();
+}
+
+function renderAttachChips() {
+  const host = $("attachChips");
+  if (!host) return;
+  host.innerHTML = "";
+  host.hidden = pendingAttachments.length === 0;
+  pendingAttachments.forEach((file, index) => {
+    const chip = document.createElement("div");
+    chip.className = "attach-chip";
+    const name = document.createElement("span");
+    name.textContent = file.name;
+    name.title = file.name;
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.setAttribute("aria-label", t("clear"));
+    remove.textContent = "×";
+    remove.onclick = () => {
+      pendingAttachments.splice(index, 1);
+      renderAttachChips();
+    };
+    chip.append(name, remove);
+    host.appendChild(chip);
+  });
+}
+
+async function handleAttachFiles(fileList) {
+  const files = [...(fileList || [])];
+  for (const file of files) {
+    if (pendingAttachments.length >= ATTACH_MAX_FILES) {
+      $("liveStatus").textContent = t("attachTooMany");
+      break;
+    }
+    if (file.size > ATTACH_MAX_BYTES) {
+      $("liveStatus").textContent = `${t("attachTooLarge")}: ${file.name}`;
+      continue;
+    }
+    const used = pendingAttachments.reduce((sum, item) => sum + String(item.content || "").length, 0);
+    if (used + file.size > ATTACH_MAX_TOTAL_BYTES) {
+      $("liveStatus").textContent = t("attachTooLarge");
+      break;
+    }
+    try {
+      const content = await file.text();
+      const name = String(file.name || "file").replace(/[\r\n]+/g, " ").slice(0, 180);
+      pendingAttachments.push({ name, content });
+    } catch {
+      $("liveStatus").textContent = `${t("attachReadFailed")}: ${file.name}`;
+    }
+  }
+  renderAttachChips();
+  $("attachInput").value = "";
+}
+
+function contentWithAttachments(base) {
+  if (!pendingAttachments.length) return base;
+  const blocks = pendingAttachments.map((file) => {
+    const safeName = String(file.name || "file").replace(/[\r\n]+/g, " ").slice(0, 180);
+    return `--- ${safeName} ---\n${file.content}`;
+  }).join("\n\n");
+  return `${base}\n\n[Attached files]\n${blocks}`.trim();
+}
+function autoGrow(el) { el.style.height = "auto"; el.style.height = Math.min(el.scrollHeight, 120) + "px"; }
 
 /* ---------------- SSE ---------------- */
 function handleEvent(event) {
@@ -615,6 +920,7 @@ function setRunning(value, status, kind = "orchestration") {
   const controls = activityControls(value, kind);
   $("messageInput").disabled = value || !currentSessionId;
   $("sendBtn").disabled = value || !currentSessionId;
+  if ($("attachBtn")) $("attachBtn").disabled = value || !currentSessionId;
   $("stopBtn").disabled = controls.mainStopDisabled;
   $("execStopBtn").hidden = controls.executionStopHidden;
   $("execRun").disabled = controls.executionRunDisabled;
@@ -623,8 +929,9 @@ function setRunning(value, status, kind = "orchestration") {
 
 /* ---------------- send ---------------- */
 function payload() {
+  const content = contentWithAttachments($("messageInput").value.trim());
   return {
-    content: $("messageInput").value.trim(), mode, rounds: Number($("rounds").value), finalizer: $("finalizer").value,
+    content, mode, rounds: Number($("rounds").value), finalizer: $("finalizer").value,
     agents: providerPayload(true),
   };
 }
@@ -650,6 +957,7 @@ async function sendMessage() {
     await api(`/api/sessions/${requestedId}/message`, { method: "POST", body: JSON.stringify(body) });
     if (!isCurrentSessionView(requestedId, requestedEpoch)) return;
     $("messageInput").value = "";
+    clearAttachments();
     autoGrow($("messageInput"));
   } catch (error) {
     if (!isCurrentSessionView(requestedId, requestedEpoch)) return;
@@ -1128,8 +1436,33 @@ $("execStopBtn").onclick = async () => { if (currentSessionId) await api(`/api/s
 $("approveGo").onclick = confirmExec;
 $("approveCancel").onclick = cancelExecApproval;
 $("approveModal").addEventListener("click", (e) => { if (e.target === $("approveModal")) cancelExecApproval(); });
+$("toggleRail").onclick = toggleRailCollapsed;
+$("toggleContext").onclick = toggleContextColumn;
+$("sessionGroupBy").onchange = () => {
+  sessionGroupBy = $("sessionGroupBy").value === "project" ? "project" : "date";
+  localStorage.setItem("agent-room-session-group", sessionGroupBy);
+  refreshSessions();
+};
+$("attachBtn").onclick = () => $("attachInput").click();
+$("attachInput").addEventListener("change", () => handleAttachFiles($("attachInput").files));
+$("renameSessionSave").onclick = saveRenameSession;
+$("renameSessionCancel").onclick = closeRenameSessionModal;
+$("renameSessionModal").addEventListener("click", (e) => { if (e.target === $("renameSessionModal")) closeRenameSessionModal(); });
+$("renameSessionInput").addEventListener("keydown", (e) => { if (e.key === "Enter") saveRenameSession(); });
+document.addEventListener("click", (event) => {
+  if (openSessionMenu && !openSessionMenu.contains(event.target) && !event.target.closest?.(".session-more")) {
+    closeSessionMenu();
+  }
+});
+document.addEventListener("keydown", (event) => {
+  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "b" && !activeModal) {
+    event.preventDefault();
+    toggleRailCollapsed();
+  }
+});
 
 async function initialize() {
+  applyShellChrome();
   applyLang(localStorage.getItem("agent-room-lang") || "ar");
   try {
     await loadProviderCatalog();

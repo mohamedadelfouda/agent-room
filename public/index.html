@@ -15,6 +15,7 @@
           <strong>Agent Room</strong>
           <small data-i18n="brandSubtitle">جلسة ذكاء اصطناعي مشتركة</small>
         </div>
+        <button id="toggleContext" type="button" class="icon-btn" title="Context" aria-label="Context" aria-pressed="true" data-i18n-title="toggleContext" data-i18n-aria-label="toggleContext">◫</button>
         <button id="openOnboard" type="button" class="icon-btn" title="Setup" aria-label="Setup" data-i18n-title="setup" data-i18n-aria-label="setup">⚙</button>
         <div class="lang-toggle" role="group" aria-label="Language" data-i18n-aria-label="language">
           <button type="button" class="lang-btn is-active" data-lang="ar" aria-label="Arabic" data-i18n-aria-label="arabicLanguage" aria-pressed="true">ع</button>
@@ -22,15 +23,29 @@
         </div>
       </div>
 
-      <button id="newSessionBtn" class="btn-primary rail-new" data-i18n="newSession">جلسة جديدة</button>
+      <div class="rail-tools">
+        <button id="newSessionBtn" class="btn-primary rail-new" data-i18n="newSession">جلسة جديدة</button>
+        <div class="rail-filters">
+          <label class="rail-filter">
+            <span class="sr-only" data-i18n="groupBy">تجميع حسب</span>
+            <select id="sessionGroupBy" aria-label="Group by" data-i18n-aria-label="groupBy">
+              <option value="date" data-i18n="groupByDate">بالتاريخ</option>
+              <option value="project" data-i18n="groupByProject">بالمشروع</option>
+            </select>
+          </label>
+        </div>
+      </div>
 
       <div class="rail-label" data-i18n="sessions">الجلسات</div>
       <nav id="sessionList" class="session-list" aria-label="Sessions" data-i18n-aria-label="sessions"></nav>
 
-      <button id="connFooter" class="conn" title="">
-        <span id="serverStatus" class="conn-dot" aria-hidden="true"></span>
-        <span id="connText" role="status" aria-live="polite" data-i18n="connected">متصل</span>
-      </button>
+      <div class="rail-foot">
+        <button id="connFooter" class="conn" title="">
+          <span id="serverStatus" class="conn-dot" aria-hidden="true"></span>
+          <span id="connText" role="status" aria-live="polite" data-i18n="connected">متصل</span>
+        </button>
+        <button id="toggleRail" type="button" class="icon-btn rail-collapse" title="Collapse sessions" aria-label="Collapse sessions" aria-pressed="false" data-i18n-title="toggleRail" data-i18n-aria-label="toggleRail">◂</button>
+      </div>
     </aside>
 
     <main class="main">
@@ -118,11 +133,17 @@
           </div>
         </section>
 
-        <div id="chat" class="conversation" role="log" aria-live="off" aria-label="Conversation" data-i18n-aria-label="conversation"></div>
+        <div class="session-body">
+          <div id="chat" class="conversation" role="log" aria-live="off" aria-label="Conversation" data-i18n-aria-label="conversation"></div>
+          <aside id="contextCol" class="context-col" aria-label="Context" data-i18n-aria-label="contextColumn"></aside>
+        </div>
         <div id="conversationAnnouncements" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></div>
 
         <footer class="composer">
+          <div id="attachChips" class="attach-chips" hidden></div>
           <div class="composer-box">
+            <button id="attachBtn" type="button" class="attach-btn" title="Attach file" aria-label="Attach file" data-i18n-title="attachFile" data-i18n-aria-label="attachFile">📎</button>
+            <input id="attachInput" type="file" class="sr-only" multiple accept=".txt,.md,.markdown,.json,.js,.ts,.tsx,.jsx,.css,.html,.csv,.log,.yml,.yaml,.toml,.xml,.py,.go,.rs,.java,.c,.h,.cpp,.rb,.php,.sh,.env,.gitignore,text/plain,text/markdown,application/json" aria-label="Attach text file" data-i18n-aria-label="attachFile" />
             <label for="messageInput" class="sr-only" data-i18n="composerLabel">الرسالة</label>
             <textarea id="messageInput" rows="1" placeholder="اكتب الفكرة أو السؤال..." data-i18n-ph="composerPh"></textarea>
             <button id="sendBtn" class="send-btn" title="ابدأ الجولة" aria-label="ابدأ الجولة" data-i18n-title="send" data-i18n-aria-label="send" disabled>↑</button>
@@ -190,6 +211,19 @@
       <div class="modal-actions">
         <button id="newSessionCancel" class="btn-ghost" data-i18n="cancel">إلغاء</button>
         <button id="newSessionCreate" class="btn-primary" data-i18n="create">إنشاء</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="renameSessionModal" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="renameSessionModalTitle">
+    <div class="modal" tabindex="-1">
+      <h2 id="renameSessionModalTitle" data-i18n="renameSession">إعادة تسمية الجلسة</h2>
+      <div class="field"><label for="renameSessionInput" data-i18n="nameLabel">اسم الجلسة</label>
+        <input id="renameSessionInput" type="text" /></div>
+      <div id="renameSessionError" class="modal-error hidden" role="alert" aria-live="assertive"></div>
+      <div class="modal-actions">
+        <button id="renameSessionCancel" class="btn-ghost" data-i18n="cancel">إلغاء</button>
+        <button id="renameSessionSave" class="btn-primary" data-i18n="save">حفظ</button>
       </div>
     </div>
   </div>
