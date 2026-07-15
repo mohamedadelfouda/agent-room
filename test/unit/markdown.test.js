@@ -27,6 +27,18 @@ test("http/https links render as safe anchors", () => {
   assert.match(html, /<a href="https:\/\/example\.com\/a\?b=1&amp;c=2" target="_blank" rel="noopener noreferrer">docs<\/a>/);
 });
 
+test("emphasis passes cannot corrupt an emitted anchor's target attribute", () => {
+  const html = renderMarkdown("[a](https://e.com/x) some_ [b](https://e.com/y)");
+  assert.ok(!/target="<em>/.test(html), "no <em> spliced into target=");
+  assert.match(html, /target="_blank" rel="noopener noreferrer">a<\/a>/);
+  assert.match(html, /target="_blank" rel="noopener noreferrer">b<\/a>/);
+});
+
+test("a link whose text contains inline code is fully restored", () => {
+  const html = renderMarkdown("[use `run`](https://e.com)");
+  assert.match(html, /<a href="https:\/\/e\.com"[^>]*>use <code>run<\/code><\/a>/);
+});
+
 test("bold, italic and inline code render", () => {
   assert.match(renderMarkdown("**b**"), /<strong>b<\/strong>/);
   assert.match(renderMarkdown("_i_"), /<em>i<\/em>/);

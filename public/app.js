@@ -1602,17 +1602,34 @@ const STAGE_KEYS = ["stagePlan", "stageCollab", "stageDecision", "stageExecute",
 const STAGE_INDEX = { plan: 0, collaboration: 1, decision: 2, execute: 3 };
 let liveAgents = {};
 
+const TERMINAL_EXEC = new Set(["merged", "pr_opened", "rejected", "blocked_secret"]);
 function pendingExecution() {
   return (currentSession?.executions ?? []).find((item) => item.status === "awaiting_user");
+}
+// An execution that still needs the user (awaiting a decision) or is stuck mid-accept/reject
+// after an interruption (the *_pending retry states) — anything not yet in a terminal state.
+function unresolvedExecution() {
+  return (currentSession?.executions ?? []).find((item) => !TERMINAL_EXEC.has(item.status));
 }
 // Read-only phase derived from real session state; the mockup's manual switch is never authoritative.
 function derivePhase() {
   if (!currentSession) return "plan";
-  if (currentSession.executing || pendingExecution()) return "execute";
+  if (currentSession.executing || unresolvedExecution()) return "execute";
   if (currentSession.running || currentSession.status === "running") return "collaboration";
   // A fresh session with no agent replies yet hasn't reached a decision — keep it at Plan.
   const hasAgentReply = (currentSession.messages ?? []).some((message) => message.author === "agent");
   return hasAgentReply ? "decision" : "plan";
+}
+// Highest workflow stage the session has actually reached, from history — so the tracker
+// never regresses (e.g. a merged execution keeps Execute/Accept marked done even though the
+// live phase falls back to "decision" once nothing is in flight).
+function furthestStageReached() {
+  const executions = currentSession?.executions ?? [];
+  if (executions.some((item) => ["merged", "pr_opened"].includes(item.status))) return 5;
+  if (executions.length) return 3;
+  if (latestFinalReport()) return 2;
+  if ((currentSession?.messages ?? []).some((message) => message.author === "agent")) return 1;
+  return 0;
 }
 function applyPhase() {
   const phase = derivePhase();
@@ -1648,7 +1665,7 @@ function stageTimes() {
 function renderStages() {
   const host = $("stageList");
   if (!host) return;
-  const activeIndex = STAGE_INDEX[derivePhase()] ?? 2;
+  const activeIndex = Math.max(STAGE_INDEX[derivePhase()] ?? 2, furthestStageReached());
   const times = stageTimes();
   host.setAttribute("role", "list");
   host.innerHTML = "";
@@ -1712,8 +1729,12 @@ function renderApprovalGate() {
   host.innerHTML = "";
   const execution = pendingExecution();
   if (!execution) {
-    // No execution awaiting a decision: once the room reaches the decision phase,
-    // offer a one-click bridge into the Execute drawer, prefilled with the outcome.
+    // A prior accept/reject stuck mid-flight after an interruption still needs the user —
+    // surface its retry here rather than the "Start execution" CTA, so nothing is stranded.
+    const stuck = unresolvedExecution();
+    if (stuck) { renderExecStuck(host, stuck); return; }
+    // Otherwise, once the room reaches the decision phase, offer a one-click bridge into
+    // the Execute drawer, prefilled with the outcome.
     if (derivePhase() === "decision") renderProceedToExecute(host);
     return;
   }
@@ -1732,6 +1753,27 @@ function renderApprovalGate() {
   addButton("btn-primary", t("mergeLocal"), () => acceptExec(execution.taskId, "merge"));
   if (currentSession.project?.canOpenPr) addButton("btn-ghost", t("openPr"), () => acceptExec(execution.taskId, "pr"));
   addButton("btn-danger", t("reject"), () => rejectExec(execution.taskId));
+  host.appendChild(card);
+}
+// A crash/interruption can leave an execution mid-accept or mid-reject. Surface the
+// retry (or the in-progress status) in the Decision view so it isn't only reachable
+// from the Conversation tab.
+function renderExecStuck(host, ex) {
+  const card = document.createElement("div");
+  card.className = "approval";
+  card.innerHTML = `<div class="approval-lock" aria-hidden="true">⟳</div><div><strong>${esc(t("execAwaiting"))}</strong><p>${esc(execStatusLabel(ex.status))}</p></div><div class="approval-actions"></div>`;
+  const retry = {
+    accepted_pending_merge: () => acceptExec(ex.taskId, "merge"),
+    accepted_pending_pr: () => acceptExec(ex.taskId, "pr"),
+    rejected_cleanup_pending: () => rejectExec(ex.taskId),
+  }[ex.status];
+  if (retry) {
+    const button = document.createElement("button");
+    button.className = "btn-primary";
+    button.textContent = execStatusLabel(ex.status);
+    button.onclick = () => { button.disabled = true; retry(); };
+    card.querySelector(".approval-actions").appendChild(button);
+  }
   host.appendChild(card);
 }
 function renderProceedToExecute(host) {

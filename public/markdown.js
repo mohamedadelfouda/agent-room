@@ -10,28 +10,33 @@
 
 const ESCAPE = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" };
 // A NUL byte cannot occur in normal text (and is stripped from input below), so it
-// is a safe placeholder marker for parking inline code out of the way.
+// is a safe placeholder marker for parking already-emitted spans out of the way.
 const SENTINEL = String.fromCharCode(0);
-const CODE_SLOT = new RegExp(SENTINEL + "(\\d+)" + SENTINEL, "g");
-// Link URLs stop at whitespace, ")", or the sentinel — the last prevents an inline-code
-// placeholder from ever being captured into an href, so a code span inside a URL cannot
-// splice markup into the attribute.
+const SLOT = new RegExp(SENTINEL + "(\\d+)" + SENTINEL, "g");
+// Link URLs stop at whitespace, ")", or the sentinel — the last prevents a parked
+// span from ever being captured into an href.
 const LINK = new RegExp("\\[([^\\]\\n]+?)\\]\\((https?://[^\\s)" + SENTINEL + "]+?)\\)", "g");
 
 export function escapeHtml(text) {
   return String(text ?? "").replace(/[&<>'"]/g, (c) => ESCAPE[c]);
 }
 
-// Inline spans, applied to an already-escaped string.
+// Inline spans, applied to an already-escaped string. Inline code AND links are
+// parked behind sentinels before the emphasis passes run, so those passes can
+// never re-parse a code span's contents or corrupt an emitted anchor's markup
+// (e.g. matching a `_` inside target="_blank"). Parked spans are expanded last,
+// looping so a link that itself contains inline code is fully restored.
 function renderInline(escaped) {
-  const codes = [];
-  let s = escaped.replace(/`([^`\n]+?)`/g, (_, code) => SENTINEL + (codes.push(code) - 1) + SENTINEL);
-  s = s.replace(LINK, (_, text, url) => `<a href="${url}" target="_blank" rel="noopener noreferrer">${text}</a>`);
+  const parked = [];
+  const park = (html) => SENTINEL + (parked.push(html) - 1) + SENTINEL;
+  let s = escaped.replace(/`([^`\n]+?)`/g, (_, code) => park(`<code>${code}</code>`));
+  s = s.replace(LINK, (_, text, url) => park(`<a href="${url}" target="_blank" rel="noopener noreferrer">${text}</a>`));
   s = s.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
   s = s.replace(/__(.+?)__/g, "<strong>$1</strong>");
   s = s.replace(/(^|[^*])\*([^*\n]+?)\*(?!\*)/g, "$1<em>$2</em>");
   s = s.replace(/(^|[^\w_])_([^_\n]+?)_(?![\w_])/g, "$1<em>$2</em>");
-  s = s.replace(CODE_SLOT, (_, index) => `<code>${codes[Number(index)]}</code>`);
+  let previous;
+  do { previous = s; s = s.replace(SLOT, (_, index) => parked[Number(index)] ?? ""); } while (s !== previous);
   return s;
 }
 
