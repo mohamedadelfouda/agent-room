@@ -15,6 +15,7 @@ import { createLatestRequest } from "./latest-request.js";
 import { activityControls } from "./activity-state.js";
 import { closeReservedPrWindow, openReservedPrWindow, reservePrWindow } from "./pr-window.js";
 import { STRINGS } from "./strings.js";
+import { renderMarkdown } from "./markdown.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -734,9 +735,9 @@ function renderMessages() {
       el.innerHTML =
         `<div class="msg-head"><span class="agent-avatar ${esc(info.id)}" aria-hidden="true">${esc(name.slice(0, 1))}</span>` +
         `<span class="msg-name">${bdi(name)}</span>${badges}<span class="msg-time">${bdi(time)}</span></div>` +
-        `<div class="msg-body"><div class="msg-content" dir="auto">${esc(msg.content)}</div>${footer}${techHtml}</div>`;
+        `<div class="msg-body"><div class="msg-content md">${renderMarkdown(msg.content)}</div>${footer}${techHtml}</div>`;
     } else if (msg.author === "user") {
-      el.innerHTML = `<div class="msg-body"><div class="msg-content" dir="auto">${esc(msg.content)}</div></div>`;
+      el.innerHTML = `<div class="msg-body"><div class="msg-content md">${renderMarkdown(msg.content)}</div></div>`;
     } else {
       el.innerHTML = `<div class="msg-body" dir="auto">${appError ? esc(msg.phase === "exec_error" ? t("executionFailed") : t("runFailed")) : esc(msg.content)}</div>${techHtml}`;
     }
