@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Added in-app CLI setup: read-only discovery of native provider executables hidden behind npm/pnpm shims (such as a global Codex install on Windows), one-click Trust & check from a discovered path, and per-provider install guidance in the settings drawer and onboarding checklist.
+
 ## 0.2.1 — 2026-07-15
 
 - Rejected `.git/commondir` redirection in execution clones so an untrusted executor cannot re-link a disposable clone to the source object store.

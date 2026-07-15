@@ -23,6 +23,7 @@ const ERROR_MESSAGE_KEYS = Object.freeze({
   provider_update_failed: "errorProviderUpdateFailed",
   provider_check_failed: "errorProviderCheckFailed",
   provider_model_discovery_failed: "errorProviderModelDiscoveryFailed",
+  provider_discovery_failed: "errorProviderDiscoveryFailed",
   github_repositories_unavailable: "errorGithubRepositoriesUnavailable",
   github_clone_failed: "errorGithubCloneFailed",
   filesystem_list_failed: "errorFilesystemListFailed",

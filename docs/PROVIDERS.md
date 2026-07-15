@@ -14,6 +14,9 @@ Add one adapter under `server/adapters/`, then register it in `server/providers/
 - `run(options)`: adapter function;
 - optional `discoverModels(options)`.
 - optional `updateArgs`; omit it when the CLI has no safe non-interactive self-update command.
+- optional `install`: `{ command, url }` install guidance shown by the UI for copy/paste; Agent Room never executes it.
+
+If the provider's package manager install hides the native binary behind shell shims (as npm does for Codex on Windows), add its well-known package layout to `server/cli-discovery.js`. Discovery is read-only and bounded to fixed layouts; a discovered path still requires the user's explicit **Trust & check** before it can run.
 
 The browser reads `GET /api/providers`, so a registered provider automatically appears in collaboration, finalizer, executor, reviewer, health, model, effort, and role controls.
 

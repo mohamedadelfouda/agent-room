@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import os from "node:os";
 import { listSessions, createSession, getSession, mutateSession, rootPath } from "./store.js";
 import { approveProviderCommand, approvedProviderCommand, checkCommand, resolveAllowedCommand, runProcess } from "./process.js";
+import { discoverProviderCommands } from "./cli-discovery.js";
 import { runOrchestration, stopRun, isRunning, abortAllRuns } from "./orchestrator.js";
 import { runExecuteAndReview, acceptExecution, rejectExecution, isExecuting, stopExec, abortAllExecutions, reconcileExecutionWorktrees } from "./exec-orchestrator.js";
 import { isGitRepo, hasGitHubOrigin } from "./worktree.js";
@@ -27,10 +28,12 @@ const configuredCommand = (definition) => process.env[definition.commandEnv] || 
 const trustedCliPaths = (definition) => [process.env[definition.commandEnv], approvedProviderCommand(definition.id)].filter(Boolean);
 
 // First-run detection resolves native executables before entering an attached project.
+// A path the user already trusted this run (via Trust & check) takes precedence, so
+// re-checks reflect the working setup instead of the bare PATH lookup.
 async function detectAgents() {
   const detected = await Promise.all(providerIds().map(async (id) => {
     const definition = provider(id);
-    const status = await checkCommand(configuredCommand(definition), { allowedCommands: new Set([definition.command]), trustedPaths: trustedCliPaths(definition) });
+    const status = await checkCommand(approvedProviderCommand(definition.id) || configuredCommand(definition), { allowedCommands: new Set([definition.command]), trustedPaths: trustedCliPaths(definition) });
     return [id, { installed: status.ok, version: status.version, detail: status.detail }];
   }));
   let github = { authed: false, detail: "" };
@@ -416,6 +419,22 @@ const server = http.createServer(async (req, res) => {
         return json(res, 200, status.ok ? status : { ...status, code: "provider_check_failed" });
       }
       catch (e) { return json(res, 200, { ok: false, version: "", code: "provider_check_failed", detail: redact(e.message) }); }
+    }
+    // Read-only discovery of native executables that PATH search misses (e.g.
+    // npm-installed Codex on Windows exposes only cmd/ps1 shims). Nothing found
+    // here is executed or trusted; the user still confirms via Trust & check.
+    if (req.method === "POST" && url.pathname === "/api/cli/discover") {
+      const body = await readJson(req);
+      try {
+        const definition = provider(String(body.provider || ""));
+        if (!definition) throw new Error("Select a known provider before discovering its executable");
+        const candidates = await discoverProviderCommands(definition.command);
+        let resolved = "";
+        try { resolved = await resolveAllowedCommand(approvedProviderCommand(definition.id) || configuredCommand(definition), new Set([definition.command]), { trustedPaths: trustedCliPaths(definition) }); }
+        catch (e) { logError("cli discover: configured command did not resolve", redact(e.message)); }
+        return json(res, 200, { resolved, candidates });
+      }
+      catch (e) { return json(res, 400, apiErrorPayload("provider_discovery_failed", e)); }
     }
     if (req.method === "POST" && parts[0] === "api" && parts[1] === "providers" && parts[2] && parts[3] === "models") {
       const body = await readJson(req);
