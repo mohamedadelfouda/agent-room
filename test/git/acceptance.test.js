@@ -225,6 +225,39 @@ test("packed secret objects remain confined to the disposable execution clone", 
   }
 });
 
+test("execution clone remains readable without the source object store", async () => {
+  const dir = repository();
+  const sourceObjects = join(dir, ".git", "objects");
+  const heldObjects = join(dir, ".git", "objects.agent-room-test-held");
+  let wt;
+  try {
+    wt = await createWorktree(dir, "codex", "t-independent-objects");
+    assert.equal(existsSync(join(wt.path, ".git", "objects", "info", "alternates")), false);
+    await fsPromises.rename(sourceObjects, heldObjects);
+    assert.equal(git(wt.path, "show", `${wt.baseSha}:README.md`), "hello\n");
+  } finally {
+    if (existsSync(heldObjects)) await fsPromises.rename(heldObjects, sourceObjects);
+    if (wt) await removeWorktree(dir, wt.path, wt.branch);
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("execution clone rejects an alternate object store added after creation", async () => {
+  const dir = repository();
+  let wt;
+  try {
+    wt = await createWorktree(dir, "codex", "t-added-alternate");
+    writeFileSync(
+      join(wt.path, ".git", "objects", "info", "alternates"),
+      `${join(dir, ".git", "objects")}\n`,
+    );
+    await assert.rejects(() => assertExecutionRepository(wt), /object boundary changed/);
+  } finally {
+    if (wt) await removeWorktree(dir, wt.path, wt.branch);
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("execution metadata redirects are rejected before trusted Git operations", async (t) => {
   const dir = repository();
   let wt;

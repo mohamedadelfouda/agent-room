@@ -21,7 +21,7 @@ Missing or invalid control data fails closed and keeps the session open.
 
 ## Execution pipeline
 
-`server/executor.js`, `server/exec-orchestrator.js`, `server/acceptance.js`, and `server/worktree.js` implement the lifecycle documented in [EXECUTION.md](../EXECUTION.md). Each writer receives a disposable shared clone whose new Git objects and refs stay outside the project repository. The reviewed tree is imported only after acceptance under an exact private ref. Raw child processes are centralized in `server/process.js`, which preserves argument boundaries with `shell: false`, bounds output, sanitizes agent environments, applies timeouts, and contains descendant processes with Windows Job Objects or POSIX process groups.
+`server/executor.js`, `server/exec-orchestrator.js`, `server/acceptance.js`, and `server/worktree.js` implement the lifecycle documented in [EXECUTION.md](../EXECUTION.md). Each writer receives a disposable independent clone whose Git objects and refs stay outside the project repository. The reviewed tree is imported only after acceptance under an exact private ref. Raw child processes are centralized in `server/process.js`, which preserves argument boundaries with `shell: false`, bounds output, sanitizes agent environments, applies timeouts, and contains descendant processes with Windows Job Objects or POSIX process groups.
 
 ## Connector pipeline
 

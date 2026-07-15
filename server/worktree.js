@@ -68,6 +68,14 @@ function digest(value) {
   return crypto.createHash("sha256").update(value).digest("hex");
 }
 
+async function readAlternateObjectStores(gitDir) {
+  try { return await fs.readFile(path.join(gitDir, "objects", "info", "alternates")); }
+  catch (error) {
+    if (error.code === "ENOENT") return Buffer.alloc(0);
+    throw error;
+  }
+}
+
 async function assertRealMetadataTree(root) {
   const rootInfo = await fs.lstat(root);
   if (!rootInfo.isDirectory() || rootInfo.isSymbolicLink()) throw new Error("Execution repository metadata contains a redirect");
@@ -139,9 +147,8 @@ export async function isGitRepo(projectPath) {
   catch { return false; }
 }
 
-// Create a separate local clone for one executor. The clone may read the source repository's
-// existing objects through Git alternates, but every new object/ref is written under the clone's
-// own .git directory. A blocked secret therefore never enters the user's object database.
+// The regular Git transport copies reachable source objects so the disposable executor clone
+// never depends on the source repository's object storage.
 export async function createWorktree(projectPath, agent, taskId) {
   if (!isSafeExecutionComponent(agent) || !isSafeExecutionComponent(taskId)) throw new Error("Invalid agent/taskId");
   if (!(await isGitRepo(projectPath))) throw new Error("Project is not a git repository");
@@ -160,7 +167,7 @@ export async function createWorktree(projectPath, agent, taskId) {
     if (error.code !== "ENOENT") throw error;
   }
   try {
-    await git(["clone", "--shared", "--no-checkout", "--origin", "agent-room-source", projectPath, wtPath], projectPath);
+    await git(["clone", "--no-local", "--no-checkout", "--origin", "agent-room-source", projectPath, wtPath], projectPath);
     await assertRealDirectory(wtPath, "Execution clone");
     await git(["remote", "remove", "agent-room-source"], wtPath);
     await git(["switch", "-c", branch, baseSha], wtPath);
@@ -170,8 +177,9 @@ export async function createWorktree(projectPath, agent, taskId) {
     await assertRealMetadataTree(gitDir);
     const [config, alternates] = await Promise.all([
       fs.readFile(path.join(gitDir, "config")),
-      fs.readFile(path.join(gitDir, "objects", "info", "alternates")),
+      readAlternateObjectStores(gitDir),
     ]);
+    if (alternates.length) throw new Error("Execution clone unexpectedly depends on an alternate object store");
     return {
       path: wtPath,
       branch,
@@ -219,7 +227,7 @@ export async function assertExecutionRepository(worktree) {
   if (!normalizedPath(canonicalGitDir).startsWith(expectedPrefix)) throw new Error("Execution repository metadata escaped its clone");
   const [config, alternates] = await Promise.all([
     fs.readFile(path.join(gitDir, "config")),
-    fs.readFile(path.join(gitDir, "objects", "info", "alternates")),
+    readAlternateObjectStores(gitDir),
   ]);
   if (digest(config) !== worktree.cloneConfigFingerprint) throw new Error("Execution repository configuration changed; discard this run");
   if (digest(alternates) !== worktree.cloneAlternatesFingerprint) throw new Error("Execution repository object boundary changed; discard this run");
