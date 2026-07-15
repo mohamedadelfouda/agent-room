@@ -14,8 +14,10 @@ const ESCAPE = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#
 const SENTINEL = String.fromCharCode(0);
 const SLOT = new RegExp(SENTINEL + "(\\d+)" + SENTINEL, "g");
 // Link URLs stop at whitespace, ")", or the sentinel — the last prevents a parked
-// span from ever being captured into an href.
-const LINK = new RegExp("\\[([^\\]\\n]+?)\\]\\((https?://[^\\s)" + SENTINEL + "]+?)\\)", "g");
+// span from ever being captured into an href. Both capture groups are length-bounded
+// (unlike an unbounded `+?`) so a malformed line with many `[` and no matching `](...)`
+// can't force a quadratic re-scan of the rest of the line from every bracket.
+const LINK = new RegExp("\\[([^\\]\\n]{1,500}?)\\]\\((https?://[^\\s)" + SENTINEL + "]{1,2000}?)\\)", "g");
 
 export function escapeHtml(text) {
   return String(text ?? "").replace(/[&<>'"]/g, (c) => ESCAPE[c]);

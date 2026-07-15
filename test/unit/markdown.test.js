@@ -22,6 +22,13 @@ test("javascript: and other non-http links are NOT turned into anchors", () => {
   }
 });
 
+test("a huge line of unterminated link brackets does not hang (regex is length-bounded, not quadratic)", () => {
+  const start = Date.now();
+  const html = renderMarkdown("[".repeat(20000) + "tail with no closing brackets at all");
+  assert.ok(Date.now() - start < 1000, "must render well under a second, not scan quadratically");
+  assert.match(html, /tail with no closing brackets/);
+});
+
 test("http/https links render as safe anchors", () => {
   const html = renderMarkdown("see [docs](https://example.com/a?b=1&c=2)");
   assert.match(html, /<a href="https:\/\/example\.com\/a\?b=1&amp;c=2" target="_blank" rel="noopener noreferrer">docs<\/a>/);

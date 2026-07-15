@@ -135,3 +135,28 @@ test('deleteSession refuses sessions with recoverable executions', async () => {
     await cleanup(session.id);
   }
 });
+
+test('deleteSession refuses sessions with an active connector action', async () => {
+  const session = await createSession('delete-blocked-connector');
+  try {
+    session.connectorActions = [{ id: 'a1', connector: 'gmail', action: 'send_message', status: 'executing_unknown' }];
+    await saveSession(session);
+    await assert.rejects(() => deleteSession(session.id), (error) => error.code === 'pending_execution_decisions');
+    const loaded = await getSession(session.id);
+    assert.equal(loaded.id, session.id);
+  } finally {
+    await cleanup(session.id);
+  }
+});
+
+test('deleteSession allows sessions whose connector actions are all terminal', async () => {
+  const session = await createSession('delete-ok-connector');
+  try {
+    session.connectorActions = [{ id: 'a1', connector: 'gmail', action: 'send_message', status: 'completed' }];
+    await saveSession(session);
+    await deleteSession(session.id);
+    await assert.rejects(() => getSession(session.id), /ENOENT|no such file/i);
+  } finally {
+    await cleanup(session.id);
+  }
+});

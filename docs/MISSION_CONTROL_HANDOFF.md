@@ -10,7 +10,7 @@ end — read that first. Read the rest for the binding map and design decisions.
 
 Make the full **Mission Control decision-room mockup** the real Agent Room UI, wired to the real backend, with **no fabricated data** and **no lost functionality**.
 
-- Mockup file (design reference, static demo): `C:/Users/moham_ub2xpub/Downloads/agent-room-decision-room-v1.html`
+- Mockup file (design reference, static demo, not included in the repository).
 - Target surfaces: `public/index.html`, `public/styles.css`, `public/app.js`, `public/strings.js`.
 
 ## Decisions already made with the user (do not re-litigate)

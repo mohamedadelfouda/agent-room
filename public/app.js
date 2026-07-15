@@ -46,6 +46,7 @@ let pendingAttachments = [];
 let sessionGroupBy = localStorage.getItem("agent-room-session-group") || "date";
 let renameTargetId = null;
 let openSessionMenu = null;
+let openSessionMenuAnchor = null;
 const ATTACH_MAX_BYTES = 100 * 1024;
 const ATTACH_MAX_FILES = 5;
 const ATTACH_MAX_TOTAL_BYTES = 300 * 1024;
@@ -461,12 +462,30 @@ function dateBucket(iso) {
   return { key: "earlier", label: t("earlier") };
 }
 
-function closeSessionMenu() {
+function closeSessionMenu({ restoreFocus = false } = {}) {
   if (openSessionMenu) {
     openSessionMenu.remove();
     openSessionMenu = null;
   }
   document.querySelectorAll(".session-more[aria-expanded='true']").forEach((btn) => btn.setAttribute("aria-expanded", "false"));
+  if (restoreFocus) openSessionMenuAnchor?.focus();
+  openSessionMenuAnchor = null;
+}
+
+function onSessionMenuKeydown(event) {
+  const items = [...openSessionMenu.querySelectorAll("[role='menuitem']")];
+  const currentIndex = items.indexOf(document.activeElement);
+  if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+    event.preventDefault();
+    const delta = event.key === "ArrowDown" ? 1 : -1;
+    items[(currentIndex + delta + items.length) % items.length]?.focus();
+  } else if (event.key === "Escape") {
+    event.preventDefault();
+    closeSessionMenu({ restoreFocus: true });
+  } else if (event.key === "Tab") {
+    // A borderless popup menu isn't part of the page's tab order — Tab closes it.
+    closeSessionMenu();
+  }
 }
 
 function toggleSessionMenu(anchor, session) {
@@ -491,14 +510,17 @@ function toggleSessionMenu(anchor, session) {
   deleteBtn.textContent = t("deleteSession");
   deleteBtn.onclick = () => { closeSessionMenu(); void confirmDeleteSession(session); };
   menu.append(renameBtn, deleteBtn);
+  menu.addEventListener("keydown", onSessionMenuKeydown);
   document.body.appendChild(menu);
   openSessionMenu = menu;
+  openSessionMenuAnchor = anchor;
   anchor.setAttribute("aria-expanded", "true");
   const rect = anchor.getBoundingClientRect();
   const menuWidth = menu.offsetWidth;
   const left = Math.min(window.innerWidth - menuWidth - 8, Math.max(8, rect.left));
   menu.style.top = `${Math.min(window.innerHeight - menu.offsetHeight - 8, rect.bottom + 4)}px`;
   menu.style.left = `${left}px`;
+  renameBtn.focus();
 }
 
 function openRenameSessionModal(session) {
@@ -590,6 +612,10 @@ function toggleContextColumn() {
   const next = !document.documentElement.classList.contains("context-hidden");
   localStorage.setItem("agent-room-context-hidden", next ? "1" : "0");
   applyShellChrome();
+  // Below the responsive breakpoint the column is an overlay gated by `.open` (not
+  // `context-hidden`, which only drives the desktop grid-column layout). Tie it to this
+  // explicit toggle rather than the persisted state, so it never auto-opens on load.
+  $("contextCol")?.classList.toggle("open", next);
 }
 
 /* ---------------- session open / focused view ---------------- */
@@ -843,7 +869,11 @@ function contextCard(id, title, bodyHtml, open) {
   return details;
 }
 
+let attachGeneration = 0;
+// Invalidates any in-flight file.text() reads (e.g. from a session switch mid-read) so
+// their result can't land in pendingAttachments after the list has moved on.
 function clearAttachments() {
+  attachGeneration += 1;
   pendingAttachments = [];
   renderAttachChips();
 }
@@ -874,7 +904,10 @@ function renderAttachChips() {
 
 async function handleAttachFiles(fileList) {
   const files = [...(fileList || [])];
+  const requestedGeneration = attachGeneration;
   for (const file of files) {
+    if (requestedGeneration !== attachGeneration) return; // a clear/switch happened mid-read
+
     if (pendingAttachments.length >= ATTACH_MAX_FILES) {
       $("liveStatus").textContent = t("attachTooMany");
       break;
@@ -883,17 +916,18 @@ async function handleAttachFiles(fileList) {
       $("liveStatus").textContent = `${t("attachTooLarge")}: ${file.name}`;
       continue;
     }
-    const used = pendingAttachments.reduce((sum, item) => sum + String(item.content || "").length, 0);
+    const used = pendingAttachments.reduce((sum, item) => sum + item.bytes, 0);
     if (used + file.size > ATTACH_MAX_TOTAL_BYTES) {
       $("liveStatus").textContent = t("attachTooLarge");
       break;
     }
     try {
       const content = await file.text();
+      if (requestedGeneration !== attachGeneration) return; // superseded while awaiting the read
       const name = String(file.name || "file").replace(/[\r\n]+/g, " ").slice(0, 180);
-      pendingAttachments.push({ name, content });
+      pendingAttachments.push({ name, content, bytes: file.size });
     } catch {
-      $("liveStatus").textContent = `${t("attachReadFailed")}: ${file.name}`;
+      if (requestedGeneration === attachGeneration) $("liveStatus").textContent = `${t("attachReadFailed")}: ${file.name}`;
     }
   }
   renderAttachChips();
@@ -1625,7 +1659,9 @@ function derivePhase() {
 // live phase falls back to "decision" once nothing is in flight).
 function furthestStageReached() {
   const executions = currentSession?.executions ?? [];
-  if (executions.some((item) => ["merged", "pr_opened"].includes(item.status))) return 5;
+  // A successfully accepted execution completes every stage (index has no
+  // "active" stage past the last one, so Accept stops showing as still in-progress).
+  if (executions.some((item) => ["merged", "pr_opened"].includes(item.status))) return STAGE_KEYS.length;
   if (executions.length) return 3;
   if (latestFinalReport()) return 2;
   if ((currentSession?.messages ?? []).some((message) => message.author === "agent")) return 1;
@@ -1733,9 +1769,10 @@ function renderApprovalGate() {
     // surface its retry here rather than the "Start execution" CTA, so nothing is stranded.
     const stuck = unresolvedExecution();
     if (stuck) { renderExecStuck(host, stuck); return; }
-    // Otherwise, once the room reaches the decision phase, offer a one-click bridge into
-    // the Execute drawer, prefilled with the outcome.
-    if (derivePhase() === "decision") renderProceedToExecute(host);
+    // Otherwise, once the room actually converged on an outcome, offer a one-click bridge
+    // into the Execute drawer. "needs_more_rounds" means the discussion did NOT reach
+    // agreement — don't offer to execute an unresolved report.
+    if (derivePhase() === "decision" && latestFinalReport()?.phase === "converged") renderProceedToExecute(host);
     return;
   }
   const executor = bdi(providerInfo(execution.executor).label, "ltr");
