@@ -3,6 +3,7 @@ const ERROR_MESSAGE_KEYS = Object.freeze({
   forbidden_origin: "errorForbiddenOrigin",
   server_shutting_down: "errorServerShuttingDown",
   session_busy: "errorSessionBusy",
+  title_required: "errorTitleRequired",
   state_change_requires_execution: "routeStateChangeRequiresExecution",
   project_trust_required: "routeProjectTrustRequired",
   project_path_required: "errorProjectPathRequired",

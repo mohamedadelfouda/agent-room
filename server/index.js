@@ -4,7 +4,7 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import os from "node:os";
-import { listSessions, createSession, getSession, mutateSession, rootPath } from "./store.js";
+import { listSessions, createSession, getSession, mutateSession, renameSession, deleteSession, rootPath } from "./store.js";
 import { approveProviderCommand, approvedProviderCommand, checkCommand, resolveAllowedCommand, runProcess, configureTrustedCliStore, hydrateTrustedProviderCommands } from "./process.js";
 import { discoverProviderCommands } from "./cli-discovery.js";
 import { runOrchestration, stopRun, isRunning, abortAllRuns } from "./orchestrator.js";
@@ -262,6 +262,44 @@ const server = http.createServer(async (req, res) => {
       session.executing = isExecuting(parts[2]);
       delete session.connectorActions;
       return json(res, 200, session);
+    }
+    if (parts[0] === "api" && parts[1] === "sessions" && parts[2] && req.method === "PATCH" && parts.length === 3) {
+      const body = await readJson(req);
+      try {
+        return json(res, 200, await renameSession(parts[2], body.title));
+      } catch (error) {
+        if (error.code === "title_required") return json(res, 400, apiErrorPayload("title_required", error));
+        if (error.code === "ENOENT" || /ENOENT|no such file/i.test(String(error.message))) {
+          return json(res, 404, apiErrorPayload("not_found", error));
+        }
+        throw error;
+      }
+    }
+    if (parts[0] === "api" && parts[1] === "sessions" && parts[2] && req.method === "DELETE" && parts.length === 3) {
+      try {
+        const result = await deleteSession(parts[2], {
+          isBusy: () => isRunning(parts[2]) || isExecuting(parts[2]),
+        });
+        const set = clients.get(parts[2]);
+        if (set) {
+          for (const client of set) {
+            try { client.end(); } catch {}
+          }
+          clients.delete(parts[2]);
+        }
+        return json(res, 200, result);
+      } catch (error) {
+        if (error.code === "session_busy") {
+          return json(res, 409, apiErrorPayload("session_busy", error));
+        }
+        if (error.code === "pending_execution_decisions") {
+          return json(res, 409, apiErrorPayload("pending_execution_decisions", error));
+        }
+        if (error.code === "ENOENT" || /ENOENT|no such file/i.test(String(error.message))) {
+          return json(res, 404, apiErrorPayload("not_found", error));
+        }
+        throw error;
+      }
     }
     if (parts[0] === "api" && parts[1] === "sessions" && parts[2] && parts[3] === "events" && req.method === "GET") {
       return addSseClient(parts[2], req, res);

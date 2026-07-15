@@ -15,6 +15,7 @@ import { createLatestRequest } from "./latest-request.js";
 import { activityControls } from "./activity-state.js";
 import { closeReservedPrWindow, openReservedPrWindow, reservePrWindow } from "./pr-window.js";
 import { STRINGS } from "./strings.js";
+import { renderMarkdown } from "./markdown.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -41,6 +42,14 @@ function isCurrentSessionView(sessionId, viewEpoch) {
 let providers = [];
 let renderedMessageSessionId = null;
 let renderedMessageIds = new Set();
+let pendingAttachments = [];
+let sessionGroupBy = localStorage.getItem("agent-room-session-group") || "date";
+let renameTargetId = null;
+let openSessionMenu = null;
+let openSessionMenuAnchor = null;
+const ATTACH_MAX_BYTES = 100 * 1024;
+const ATTACH_MAX_FILES = 5;
+const ATTACH_MAX_TOTAL_BYTES = 300 * 1024;
 
 const settingsIds = () => ["rounds", "finalizer", ...providers.flatMap((item) => ["Command", "Model", "Effort", "Role", "Enabled"].map((suffix) => `${item.id}${suffix}`))];
 const providerInfo = (id) => providers.find((item) => item.id === id) || { id, label: id || "Agent" };
@@ -133,6 +142,7 @@ function applyLang(next) {
   });
   setConnected(!$("serverStatus").classList.contains("is-bad") ? true : false);
   updateSetupSummary();
+  applyShellChrome();
   refreshSessions();
   if (currentSession) { loadSessionMeta(); renderMessages(); loadConnectors(); }
   localStorage.setItem("agent-room-lang", lang);
@@ -372,18 +382,242 @@ async function refreshSessions() {
   try { sessions = await api("/api/sessions"); } catch { return; }
   const list = $("sessionList");
   list.innerHTML = "";
-  for (const s of sessions) {
-    const btn = document.createElement("button");
-    btn.className = `session-item ${s.id === currentSessionId ? "is-active" : ""}`;
-    if (s.id === currentSessionId) btn.setAttribute("aria-current", "page");
-    const title = document.createElement("div"); title.className = "si-title"; title.textContent = s.title;
-    const sub = document.createElement("div"); sub.className = "si-sub";
-    const dot = document.createElement("span"); dot.className = `si-dot ${s.status || ""}`; dot.setAttribute("aria-hidden", "true");
-    const meta = document.createElement("span"); meta.textContent = `${discussionModeLabel(s.mode)} · ${formatMessageCount(lang, s.messageCount)} · ${sessionStatusLabel(s.status)}`;
-    sub.append(dot, meta); btn.append(title, sub);
-    btn.onclick = () => openSession(s.id);
-    list.appendChild(btn);
+  closeSessionMenu();
+  const groups = groupSessions(sessions, sessionGroupBy);
+  for (const group of groups) {
+    const label = document.createElement("div");
+    label.className = "session-group-label";
+    label.textContent = group.label;
+    list.appendChild(label);
+    for (const s of group.sessions) {
+      const row = document.createElement("div");
+      row.className = `session-row ${s.id === currentSessionId ? "is-active" : ""}`;
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "session-item";
+      if (s.id === currentSessionId) btn.setAttribute("aria-current", "page");
+      const dot = document.createElement("span");
+      dot.className = `si-dot ${s.status || ""}`;
+      dot.setAttribute("aria-hidden", "true");
+      const copy = document.createElement("span");
+      copy.className = "si-copy";
+      const title = document.createElement("strong");
+      title.className = "si-title";
+      title.textContent = s.title;
+      const meta = document.createElement("small");
+      meta.className = "si-sub";
+      meta.textContent = `${discussionModeLabel(s.mode)} · ${formatMessageCount(lang, s.messageCount)} · ${sessionStatusLabel(s.status)}`;
+      copy.append(title, meta);
+      btn.append(dot, copy);
+      btn.onclick = () => openSession(s.id);
+      const more = document.createElement("button");
+      more.type = "button";
+      more.className = "session-more";
+      more.setAttribute("aria-label", t("sessionMenu"));
+      more.setAttribute("aria-haspopup", "menu");
+      more.setAttribute("aria-expanded", "false");
+      more.textContent = "⋯";
+      more.onclick = (event) => {
+        event.stopPropagation();
+        toggleSessionMenu(more, s);
+      };
+      row.append(btn, more);
+      list.appendChild(row);
+    }
   }
+}
+
+function groupSessions(sessions, by) {
+  const buckets = new Map();
+  for (const session of sessions) {
+    let key;
+    let label;
+    if (by === "project") {
+      const path = String(session.projectPath || "").trim();
+      key = path || "__none__";
+      label = path ? projectBasename(path) : t("noProject");
+    } else {
+      const bucket = dateBucket(session.updatedAt);
+      key = bucket.key;
+      label = bucket.label;
+    }
+    if (!buckets.has(key)) buckets.set(key, { key, label, sessions: [] });
+    buckets.get(key).sessions.push(session);
+  }
+  return [...buckets.values()];
+}
+
+function projectBasename(projectPath) {
+  const parts = String(projectPath).replace(/\\/g, "/").split("/").filter(Boolean);
+  return parts[parts.length - 1] || projectPath;
+}
+
+function dateBucket(iso) {
+  const date = iso ? new Date(iso) : null;
+  if (!date || Number.isNaN(date.getTime())) return { key: "earlier", label: t("earlier") };
+  const now = new Date();
+  const startToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const startThat = new Date(date.getFullYear(), date.getMonth(), date.getDate());
+  const dayDiff = Math.round((startToday - startThat) / 86400000);
+  if (dayDiff <= 0) return { key: "today", label: t("today") };
+  if (dayDiff === 1) return { key: "yesterday", label: t("yesterday") };
+  return { key: "earlier", label: t("earlier") };
+}
+
+function closeSessionMenu({ restoreFocus = false } = {}) {
+  if (openSessionMenu) {
+    openSessionMenu.remove();
+    openSessionMenu = null;
+  }
+  document.querySelectorAll(".session-more[aria-expanded='true']").forEach((btn) => btn.setAttribute("aria-expanded", "false"));
+  if (restoreFocus) openSessionMenuAnchor?.focus();
+  openSessionMenuAnchor = null;
+}
+
+function onSessionMenuKeydown(event) {
+  const items = [...openSessionMenu.querySelectorAll("[role='menuitem']")];
+  const currentIndex = items.indexOf(document.activeElement);
+  if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+    event.preventDefault();
+    const delta = event.key === "ArrowDown" ? 1 : -1;
+    items[(currentIndex + delta + items.length) % items.length]?.focus();
+  } else if (event.key === "Escape") {
+    event.preventDefault();
+    closeSessionMenu({ restoreFocus: true });
+  } else if (event.key === "Tab") {
+    // A borderless popup menu isn't part of the page's tab order — Tab closes it.
+    closeSessionMenu();
+  }
+}
+
+function toggleSessionMenu(anchor, session) {
+  if (openSessionMenu && openSessionMenu.dataset.sessionId === session.id) {
+    closeSessionMenu();
+    return;
+  }
+  closeSessionMenu();
+  const menu = document.createElement("div");
+  menu.className = "session-menu";
+  menu.dataset.sessionId = session.id;
+  menu.setAttribute("role", "menu");
+  const renameBtn = document.createElement("button");
+  renameBtn.type = "button";
+  renameBtn.setAttribute("role", "menuitem");
+  renameBtn.textContent = t("renameSession");
+  renameBtn.onclick = () => { closeSessionMenu(); openRenameSessionModal(session); };
+  const deleteBtn = document.createElement("button");
+  deleteBtn.type = "button";
+  deleteBtn.className = "is-danger";
+  deleteBtn.setAttribute("role", "menuitem");
+  deleteBtn.textContent = t("deleteSession");
+  deleteBtn.onclick = () => { closeSessionMenu(); void confirmDeleteSession(session); };
+  menu.append(renameBtn, deleteBtn);
+  menu.addEventListener("keydown", onSessionMenuKeydown);
+  document.body.appendChild(menu);
+  openSessionMenu = menu;
+  openSessionMenuAnchor = anchor;
+  anchor.setAttribute("aria-expanded", "true");
+  const rect = anchor.getBoundingClientRect();
+  const menuWidth = menu.offsetWidth;
+  const left = Math.min(window.innerWidth - menuWidth - 8, Math.max(8, rect.left));
+  menu.style.top = `${Math.min(window.innerHeight - menu.offsetHeight - 8, rect.bottom + 4)}px`;
+  menu.style.left = `${left}px`;
+  renameBtn.focus();
+}
+
+function openRenameSessionModal(session) {
+  renameTargetId = session.id;
+  $("renameSessionInput").value = session.title || "";
+  $("renameSessionError").textContent = "";
+  $("renameSessionError").classList.add("hidden");
+  openManagedModal($("renameSessionModal"), { initialFocus: $("renameSessionInput"), dismiss: closeRenameSessionModal });
+}
+
+function closeRenameSessionModal() {
+  renameTargetId = null;
+  closeManagedModal($("renameSessionModal"));
+}
+
+async function saveRenameSession() {
+  if (!renameTargetId) return;
+  const title = $("renameSessionInput").value.trim();
+  const err = $("renameSessionError");
+  if (!title) {
+    err.textContent = t("errorTitleRequired");
+    err.classList.remove("hidden");
+    return;
+  }
+  try {
+    const result = await api(`/api/sessions/${renameTargetId}`, { method: "PATCH", body: JSON.stringify({ title }) });
+    if (currentSessionId === renameTargetId && currentSession) {
+      currentSession.title = result.title;
+      loadSessionMeta();
+    }
+    closeRenameSessionModal();
+    await refreshSessions();
+  } catch (error) {
+    err.textContent = localizedFailure(error);
+    err.classList.remove("hidden");
+  }
+}
+
+async function confirmDeleteSession(session) {
+  if (!window.confirm(t("deleteSessionConfirm"))) return;
+  try {
+    await api(`/api/sessions/${session.id}`, { method: "DELETE" });
+    if (currentSessionId === session.id) {
+      if (eventSource) { eventSource.close(); eventSource = null; }
+      currentSessionId = null;
+      currentSession = null;
+      sessionRequests.invalidate();
+      connectorRequests.invalidate();
+      $("sessionView").hidden = true;
+      $("emptyState").hidden = false;
+      $("contextCol").innerHTML = "";
+      clearAttachments();
+    }
+    await refreshSessions();
+  } catch (error) {
+    $("liveStatus").textContent = localizedFailure(error);
+  }
+}
+
+function applyShellChrome() {
+  const railCollapsed = localStorage.getItem("agent-room-rail-collapsed") === "1";
+  const contextHidden = localStorage.getItem("agent-room-context-hidden") === "1";
+  document.documentElement.classList.toggle("rail-collapsed", railCollapsed);
+  document.documentElement.classList.toggle("context-hidden", contextHidden);
+  const railBtn = $("toggleRail");
+  if (railBtn) {
+    railBtn.setAttribute("aria-pressed", String(railCollapsed));
+    railBtn.title = t("toggleRail");
+    railBtn.setAttribute("aria-label", t("toggleRail"));
+  }
+  const contextBtn = $("toggleContext");
+  if (contextBtn) {
+    contextBtn.classList.toggle("is-active", !contextHidden);
+    contextBtn.setAttribute("aria-pressed", String(!contextHidden));
+    contextBtn.title = t("toggleContext");
+    contextBtn.setAttribute("aria-label", t("toggleContext"));
+  }
+  const groupSelect = $("sessionGroupBy");
+  if (groupSelect) groupSelect.value = sessionGroupBy;
+}
+
+function toggleRailCollapsed() {
+  const next = !document.documentElement.classList.contains("rail-collapsed");
+  localStorage.setItem("agent-room-rail-collapsed", next ? "1" : "0");
+  applyShellChrome();
+}
+
+function toggleContextColumn() {
+  const next = !document.documentElement.classList.contains("context-hidden");
+  localStorage.setItem("agent-room-context-hidden", next ? "1" : "0");
+  applyShellChrome();
+  // Below the responsive breakpoint the column is an overlay gated by `.open` (not
+  // `context-hidden`, which only drives the desktop grid-column layout). Tie it to this
+  // explicit toggle rather than the persisted state, so it never auto-opens on load.
+  $("contextCol")?.classList.toggle("open", next);
 }
 
 /* ---------------- session open / focused view ---------------- */
@@ -418,6 +652,7 @@ async function openSession(id) {
     $("sessionMeta").textContent = "";
     $("messageInput").value = "";
     autoGrow($("messageInput"));
+    clearAttachments();
     $("execTask").value = "";
     $("execStatus").textContent = "";
     $("liveStatus").textContent = t("ready");
@@ -504,7 +739,7 @@ function renderMessages() {
   renderedMessageIds = new Set(messages.map((message) => message.id).filter(Boolean));
   chat.setAttribute("aria-busy", "true");
   chat.innerHTML = "";
-  renderSessionInsights(chat);
+  renderRouteSuggestion(chat);
   for (const msg of messages) {
     const meta = msg.meta || {};
     const isPartial = meta.status === "partial";
@@ -528,15 +763,17 @@ function renderMessages() {
       el.innerHTML =
         `<div class="msg-head"><span class="agent-avatar ${esc(info.id)}" aria-hidden="true">${esc(name.slice(0, 1))}</span>` +
         `<span class="msg-name">${bdi(name)}</span>${badges}<span class="msg-time">${bdi(time)}</span></div>` +
-        `<div class="msg-body"><div class="msg-content" dir="auto">${esc(msg.content)}</div>${footer}${techHtml}</div>`;
+        `<div class="msg-body"><div class="msg-content md">${renderMarkdown(msg.content)}</div>${footer}${techHtml}</div>`;
     } else if (msg.author === "user") {
-      el.innerHTML = `<div class="msg-body"><div class="msg-content" dir="auto">${esc(msg.content)}</div></div>`;
+      el.innerHTML = `<div class="msg-body"><div class="msg-content md">${renderMarkdown(msg.content)}</div></div>`;
     } else {
       el.innerHTML = `<div class="msg-body" dir="auto">${appError ? esc(msg.phase === "exec_error" ? t("executionFailed") : t("runFailed")) : esc(msg.content)}</div>${techHtml}`;
     }
     chat.appendChild(el);
   }
   renderExecutions();
+  renderContextColumn();
+  renderDecisionRoom();
   // Completed sessions open at the first message (read from the top); live runs follow the newest.
   chat.scrollTop = running ? chat.scrollHeight : 0;
   chat.setAttribute("aria-busy", "false");
@@ -547,6 +784,23 @@ function renderMessages() {
     announcement.textContent = "";
     requestAnimationFrame(() => { announcement.textContent = `${t("newMessageFrom")(speaker)}: ${String(latest.content || "").slice(0, 500)}`; });
   }
+}
+
+function renderRouteSuggestion(chat) {
+  if (!routeSuggestion) return;
+  const card = document.createElement("section");
+  card.className = "session-insight route-suggestion";
+  card.innerHTML = `<p>${esc(t(errorMessageKey(routeSuggestion)))}</p><button class="btn-primary">${esc(t("routeAction"))}</button>`;
+  card.querySelector("button").onclick = () => {
+    $("execDrawer").hidden = false;
+    $("execToggle").setAttribute("aria-expanded", "true");
+    $("setupDrawer").hidden = true;
+    $("setupToggle").setAttribute("aria-expanded", "false");
+    if (routeSuggestion.action === "open_execution") $("execTask").value = $("messageInput").value.trim();
+    routeSuggestion = null;
+    renderMessages();
+  };
+  chat.appendChild(card);
 }
 
 const OUTCOME_LABEL_KEYS = {
@@ -570,6 +824,8 @@ function officialOutcomeFrom(message) {
     : null;
 }
 
+// Messages from the latest round only, so a stale outcome/report from a prior run
+// (before the newest user message) never gets shown as the current one.
 function latestRunMessages() {
   const messages = currentSession?.messages || [];
   let latestUserIndex = -1;
@@ -612,50 +868,59 @@ function correctionsMarkup(corrections) {
   return `<p><b>${esc(t("corrections"))}:</b> ${entries}</p>`;
 }
 
-function legacyOpenPointsMarkup(openPoints) {
-  if (!openPoints.length) return "";
-  const entries = openPoints.map((point) => `<span dir="auto">${esc(point)}</span>`).join(" · ");
-  return `<p><b>${esc(t("unresolved"))}:</b> ${entries}</p>`;
-}
-
 function roundMetricsMarkup(requested, completed) {
   return `<div class="insight-metrics"><span>${esc(t("requested"))}: <b>${bdi(formatLocaleNumber(lang, requested))}</b></span><span>${esc(t("completed"))}: <b>${bdi(formatLocaleNumber(lang, completed))}</b></span></div>`;
 }
 
-function decisionCardMarkup({ requested, completed, outcome, finalReport, corrections, openPoints }) {
+// Body-only markup (no heading) — the caller wraps this in a contextCard(), which
+// already renders the title in its own <summary>.
+function decisionCardBody({ requested, completed, outcome, finalReport, corrections }) {
   const officialOutcome = outcome
     ? `${outcomeStatusMarkup(outcome)}${pendingItemsMarkup(outcome)}${nextStepsMarkup(outcome)}`
     : "";
   const legacyReport = !outcome && finalReport ? `<p dir="auto">${esc(finalReport.content)}</p>` : "";
   return [
-    `<h2>${esc(t("roundTracker"))}</h2>`,
     roundMetricsMarkup(requested, completed),
     officialOutcome,
     legacyReport,
     correctionsMarkup(corrections),
-    legacyOpenPointsMarkup(openPoints),
   ].join("");
 }
 
-function renderSessionInsights(chat) {
+function renderContextColumn() {
+  const col = $("contextCol");
+  if (!col) return;
+  col.innerHTML = "";
   if (!currentSession) return;
+
   const runMessages = latestRunMessages();
   const discussion = runMessages.filter((message) => message.author === "agent" && ["collaboration", "opening", "rebuttal"].includes(message.phase));
   const finalReport = [...runMessages].reverse().find((message) => ["converged", "needs_user", "blocked_external", "needs_more_rounds"].includes(message.phase));
   const outcome = officialOutcomeFrom(finalReport);
   const completed = Number(outcome?.completedRounds) || Math.max(0, ...discussion.map((message) => Number(message.round) || 0));
   const requested = Number(outcome?.requestedRounds) || Number(currentSession.settings?.rounds) || 0;
+  // The official outcome already classifies open items via pendingItemsMarkup above;
+  // the legacy openPoints list only matters as a fallback when there's no outcome yet.
   const openPoints = outcome ? [] : [...new Set(discussion.flatMap((message) => message.control?.openPoints || []).filter(Boolean))];
   const corrections = discussion.filter((message) => message.control?.substantiveDelta).map((message) => ({ agent: message.agent, content: String(message.content || "").slice(0, 140) }));
-  if (requested || completed) {
-    const card = document.createElement("section");
-    card.className = "session-insight";
-    card.innerHTML = decisionCardMarkup({ requested, completed, outcome, finalReport, corrections, openPoints });
-    chat.appendChild(card);
+
+  if (requested || completed || outcome || openPoints.length || corrections.length || finalReport) {
+    col.appendChild(contextCard("goal", t("roundTracker"), decisionCardBody({ requested, completed, outcome, finalReport, corrections }), true));
   }
+
+  if (openPoints.length) {
+    const riskBody = `<ul>${openPoints.map((point) => `<li dir="auto">${esc(point)}</li>`).join("")}</ul>`;
+    col.appendChild(contextCard("risk", t("contextRisks"), riskBody, false));
+  }
+
+  if (currentSession.project?.path) {
+    const trusted = currentSession.project.trusted === true;
+    const trustLabel = trusted ? t("attached") : t("untrustedProject");
+    const body = `<p class="context-path">${esc(currentSession.project.path)}</p><p class="context-meta">${esc(trustLabel)}</p>`;
+    col.appendChild(contextCard("project", t("contextProject"), body, true));
+  }
+
   if (currentSession.decisions?.length) {
-    const card = document.createElement("section");
-    card.className = "session-insight";
     const items = currentSession.decisions.slice(-8).map((decision) => {
       const type = localizedMarkup(decisionTypeKey(decision.type), decision.type);
       const outcome = localizedMarkup(decisionOutcomeKey(decision.outcome), decision.outcome);
@@ -667,42 +932,117 @@ function renderSessionInsights(chat) {
         : connectorId ? localizedMarkup(connectorLabelKey(connectorId), connectorId) : "";
       return `<li><b>${outcome}</b> · ${type}${context ? ` (${context})` : ""}</li>`;
     }).join("");
-    card.innerHTML = `<h2>${esc(t("decisionLog"))}</h2><ul>${items}</ul>`;
-    chat.appendChild(card);
+    col.appendChild(contextCard("log", t("decisionLog"), `<ul>${items}</ul>`, false));
   }
-  if (routeSuggestion) {
-    const card = document.createElement("section");
-    card.className = "session-insight route-suggestion";
-    card.innerHTML = `<p>${esc(t(errorMessageKey(routeSuggestion)))}</p><button class="btn-primary">${esc(t("routeAction"))}</button>`;
-    card.querySelector("button").onclick = () => {
-      $("execDrawer").hidden = false;
-      $("execToggle").setAttribute("aria-expanded", "true");
-      $("setupDrawer").hidden = true;
-      $("setupToggle").setAttribute("aria-expanded", "false");
-      if (routeSuggestion.action === "open_execution") $("execTask").value = $("messageInput").value.trim();
-      routeSuggestion = null;
-      renderMessages();
-    };
-    chat.appendChild(card);
+
+  if (!col.children.length) {
+    const empty = document.createElement("div");
+    empty.className = "context-empty";
+    empty.innerHTML = `<span class="context-empty-mark" aria-hidden="true">◔</span><p>${esc(t("contextEmpty"))}</p>`;
+    col.appendChild(empty);
   }
 }
-function autoGrow(el) { el.style.height = "auto"; el.style.height = Math.min(el.scrollHeight, 200) + "px"; }
+
+function contextCard(id, title, bodyHtml, open) {
+  const details = document.createElement("details");
+  details.className = "context-card";
+  details.dataset.contextCard = id;
+  details.open = open;
+  details.innerHTML = `<summary>${esc(title)}</summary><div class="context-card-body">${bodyHtml}</div>`;
+  return details;
+}
+
+let attachGeneration = 0;
+// Invalidates any in-flight file.text() reads (e.g. from a session switch mid-read) so
+// their result can't land in pendingAttachments after the list has moved on.
+function clearAttachments() {
+  attachGeneration += 1;
+  pendingAttachments = [];
+  renderAttachChips();
+}
+
+function renderAttachChips() {
+  const host = $("attachChips");
+  if (!host) return;
+  host.innerHTML = "";
+  host.hidden = pendingAttachments.length === 0;
+  pendingAttachments.forEach((file, index) => {
+    const chip = document.createElement("div");
+    chip.className = "attach-chip";
+    const name = document.createElement("span");
+    name.textContent = file.name;
+    name.title = file.name;
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.setAttribute("aria-label", t("clear"));
+    remove.textContent = "×";
+    remove.onclick = () => {
+      pendingAttachments.splice(index, 1);
+      renderAttachChips();
+    };
+    chip.append(name, remove);
+    host.appendChild(chip);
+  });
+}
+
+async function handleAttachFiles(fileList) {
+  const files = [...(fileList || [])];
+  const requestedGeneration = attachGeneration;
+  for (const file of files) {
+    if (requestedGeneration !== attachGeneration) return; // a clear/switch happened mid-read
+
+    if (pendingAttachments.length >= ATTACH_MAX_FILES) {
+      $("liveStatus").textContent = t("attachTooMany");
+      break;
+    }
+    if (file.size > ATTACH_MAX_BYTES) {
+      $("liveStatus").textContent = `${t("attachTooLarge")}: ${file.name}`;
+      continue;
+    }
+    const used = pendingAttachments.reduce((sum, item) => sum + item.bytes, 0);
+    if (used + file.size > ATTACH_MAX_TOTAL_BYTES) {
+      $("liveStatus").textContent = t("attachTooLarge");
+      break;
+    }
+    try {
+      const content = await file.text();
+      if (requestedGeneration !== attachGeneration) return; // superseded while awaiting the read
+      const name = String(file.name || "file").replace(/[\r\n]+/g, " ").slice(0, 180);
+      pendingAttachments.push({ name, content, bytes: file.size });
+    } catch {
+      if (requestedGeneration === attachGeneration) $("liveStatus").textContent = `${t("attachReadFailed")}: ${file.name}`;
+    }
+  }
+  renderAttachChips();
+  $("attachInput").value = "";
+}
+
+function contentWithAttachments(base) {
+  if (!pendingAttachments.length) return base;
+  const blocks = pendingAttachments.map((file) => {
+    const safeName = String(file.name || "file").replace(/[\r\n]+/g, " ").slice(0, 180);
+    return `--- ${safeName} ---\n${file.content}`;
+  }).join("\n\n");
+  return `${base}\n\n[Attached files]\n${blocks}`.trim();
+}
+function autoGrow(el) { el.style.height = "auto"; el.style.height = Math.min(el.scrollHeight, 120) + "px"; }
 
 /* ---------------- SSE ---------------- */
 function handleEvent(event) {
   if (event.type === "session_updated") loadSession();
-  if (event.type === "run_started") setRunning(true, `${discussionModeLabel(event.mode)} · ${formatLocaleNumber(lang, event.rounds)} ${t("roundsShort")}`);
-  if (event.type === "agent_start") { setAgentState(event.agent, `${phaseLabel(event.phase)} · ${t("roundWord")} ${formatLocaleNumber(lang, event.round)}`, "running"); $("liveStatus").textContent = t("working")(event.label); }
-  if (event.type === "agent_activity" && event.event?.text) setAgentState(event.agent, event.event.text.slice(0, 90), "running");
-  if (event.type === "agent_complete") setAgentState(event.agent, t("replied"), "done");
+  if (event.type === "run_started") { liveAgents = {}; renderLiveStrip(); setRunning(true, `${discussionModeLabel(event.mode)} · ${formatLocaleNumber(lang, event.rounds)} ${t("roundsShort")}`); }
+  if (event.type === "agent_start") { const s = `${phaseLabel(event.phase)} · ${t("roundWord")} ${formatLocaleNumber(lang, event.round)}`; liveAgents[event.agent] = s; renderLiveStrip(); setAgentState(event.agent, s, "running"); $("liveStatus").textContent = t("working")(event.label); }
+  if (event.type === "agent_activity" && event.event?.text) { const s = event.event.text.slice(0, 90); if (event.agent in liveAgents) { liveAgents[event.agent] = s; renderLiveStrip(); } setAgentState(event.agent, s, "running"); }
+  if (event.type === "agent_complete") { liveAgents[event.agent] = t("replied"); renderLiveStrip(); setAgentState(event.agent, t("replied"), "done"); }
   if (["run_complete","run_stopped","run_error"].includes(event.type)) {
+    liveAgents = {}; renderLiveStrip();
     setRunning(false, event.type === "run_complete" ? t("runDone") : event.type === "run_stopped" ? t("runStopped") : localizedFailure({ code: event.code, detail: event.error }));
     loadSession(); refreshSessions();
   }
   if (event.type === "exec_started") setRunning(true, t("starting"), "execution");
-  if (event.type === "exec_phase") { const s = event.phase === "executing" ? t("execExecuting")(event.agent) : t("execReviewing")(event.agent); $("execStatus").textContent = s; $("liveStatus").textContent = s; }
-  if (event.type === "exec_ready") { setRunning(false, t("execAwaiting")); $("execStopBtn").hidden = true; $("execRun").disabled = false; $("execTask").value = ""; loadSession(); refreshSessions(); }
-  if (event.type === "exec_error") { setRunning(false, localizedFailure({ code: event.code, detail: event.error })); $("execStopBtn").hidden = true; $("execRun").disabled = false; loadSession(); refreshSessions(); }
+  if (event.type === "exec_phase") { const s = event.phase === "executing" ? t("execExecuting")(event.agent) : t("execReviewing")(event.agent); liveAgents = { [event.agent]: s }; renderLiveStrip(); $("execStatus").textContent = s; $("liveStatus").textContent = s; }
+  if (event.type === "exec_ready") { liveAgents = {}; renderLiveStrip(); setRunning(false, t("execAwaiting")); $("execStopBtn").hidden = true; $("execRun").disabled = false; $("execTask").value = ""; loadSession(); refreshSessions(); }
+  if (event.type === "exec_error") { liveAgents = {}; renderLiveStrip(); setRunning(false, localizedFailure({ code: event.code, detail: event.error })); $("execStopBtn").hidden = true; $("execRun").disabled = false; loadSession(); refreshSessions(); }
 }
 function setAgentState(agent, text, cls = "") { const el = $(`${agent}RunState`); if (el) { el.textContent = text; el.className = `run-state ${cls}`; } }
 function setRunning(value, status, kind = "orchestration") {
@@ -710,6 +1050,7 @@ function setRunning(value, status, kind = "orchestration") {
   const controls = activityControls(value, kind);
   $("messageInput").disabled = value || !currentSessionId;
   $("sendBtn").disabled = value || !currentSessionId;
+  if ($("attachBtn")) $("attachBtn").disabled = value || !currentSessionId;
   $("stopBtn").disabled = controls.mainStopDisabled;
   $("execStopBtn").hidden = controls.executionStopHidden;
   $("execRun").disabled = controls.executionRunDisabled;
@@ -718,8 +1059,9 @@ function setRunning(value, status, kind = "orchestration") {
 
 /* ---------------- send ---------------- */
 function payload() {
+  const content = contentWithAttachments($("messageInput").value.trim());
   return {
-    content: $("messageInput").value.trim(), mode, rounds: Number($("rounds").value), finalizer: $("finalizer").value,
+    content, mode, rounds: Number($("rounds").value), finalizer: $("finalizer").value,
     agents: providerPayload(true),
   };
 }
@@ -745,6 +1087,7 @@ async function sendMessage() {
     await api(`/api/sessions/${requestedId}/message`, { method: "POST", body: JSON.stringify(body) });
     if (!isCurrentSessionView(requestedId, requestedEpoch)) return;
     $("messageInput").value = "";
+    clearAttachments();
     autoGrow($("messageInput"));
   } catch (error) {
     if (!isCurrentSessionView(requestedId, requestedEpoch)) return;
@@ -1365,6 +1708,315 @@ async function rejectExec(taskId) {
   }
 }
 
+/* ---------------- mission-control decision room ---------------- */
+const ROOM_PHASES = {
+  plan: { pill: "roomPhasePlan", heading: "roomHeadingPlan", sub: "roomSubPlan" },
+  collaboration: { pill: "roomPhaseCollaboration", heading: "roomHeadingCollaboration", sub: "roomSubCollaboration" },
+  decision: { pill: "roomPhaseDecision", heading: "roomHeadingDecision", sub: "roomSubDecision" },
+  execute: { pill: "roomPhaseExecute", heading: "roomHeadingExecute", sub: "roomSubExecute" },
+};
+const STAGE_KEYS = ["stagePlan", "stageCollab", "stageDecision", "stageExecute", "stageReview", "stageAccept"];
+const STAGE_INDEX = { plan: 0, collaboration: 1, decision: 2, execute: 3 };
+let liveAgents = {};
+
+const TERMINAL_EXEC = new Set(["merged", "pr_opened", "rejected", "blocked_secret"]);
+function pendingExecution() {
+  return (currentSession?.executions ?? []).find((item) => item.status === "awaiting_user");
+}
+// An execution that still needs the user (awaiting a decision) or is stuck mid-accept/reject
+// after an interruption (the *_pending retry states) — anything not yet in a terminal state.
+function unresolvedExecution() {
+  return (currentSession?.executions ?? []).find((item) => !TERMINAL_EXEC.has(item.status));
+}
+// Read-only phase derived from real session state; the mockup's manual switch is never authoritative.
+function derivePhase() {
+  if (!currentSession) return "plan";
+  if (currentSession.executing || unresolvedExecution()) return "execute";
+  if (currentSession.running || currentSession.status === "running") return "collaboration";
+  // A fresh session with no agent replies yet hasn't reached a decision — keep it at Plan.
+  const hasAgentReply = (currentSession.messages ?? []).some((message) => message.author === "agent");
+  return hasAgentReply ? "decision" : "plan";
+}
+// Highest workflow stage the session has actually reached, from history — so the tracker
+// never regresses (e.g. a merged execution keeps Execute/Accept marked done even though the
+// live phase falls back to "decision" once nothing is in flight).
+function furthestStageReached() {
+  const executions = currentSession?.executions ?? [];
+  // A successfully accepted execution completes every stage (index has no
+  // "active" stage past the last one, so Accept stops showing as still in-progress).
+  if (executions.some((item) => ["merged", "pr_opened"].includes(item.status))) return STAGE_KEYS.length;
+  if (executions.length) return 3;
+  if (latestFinalReport()) return 2;
+  if ((currentSession?.messages ?? []).some((message) => message.author === "agent")) return 1;
+  return 0;
+}
+function applyPhase() {
+  const phase = derivePhase();
+  document.documentElement.dataset.phase = phase;
+  const keys = ROOM_PHASES[phase];
+  $("statusPill").textContent = t(keys.pill);
+  $("mainHeading").textContent = t(keys.heading);
+  $("mainSub").textContent = t(keys.sub);
+  $("gateTag").hidden = phase !== "decision";
+}
+function formatClock(iso) {
+  if (!iso) return "";
+  const date = new Date(iso);
+  return Number.isNaN(date.getTime()) ? "" : date.toLocaleTimeString(localeId(lang), { hour: "2-digit", minute: "2-digit" });
+}
+function latestFinalReport() {
+  return [...latestRunMessages()].reverse().find((message) => ["converged", "needs_user", "blocked_external", "needs_more_rounds"].includes(message.phase));
+}
+// Stage timestamps derived from real events only; stages with no honest source (Plan, Review) stay blank.
+function stageTimes() {
+  const executions = currentSession?.executions ?? [];
+  const firstAgent = (currentSession?.messages ?? []).find((message) => message.author === "agent");
+  const finalReport = latestFinalReport();
+  const firstExec = executions.find((execution) => execution.createdAt);
+  const accepted = [...executions].reverse().find((execution) => ["merged", "pr_opened"].includes(execution.status) && execution.decidedAt);
+  return {
+    1: firstAgent?.createdAt,   // Collaborate
+    2: finalReport?.createdAt,  // Decision
+    3: firstExec?.createdAt,    // Execute
+    5: accepted?.decidedAt,     // Accept (most recent accepted cycle)
+  };
+}
+function renderStages() {
+  const host = $("stageList");
+  if (!host) return;
+  const activeIndex = Math.max(STAGE_INDEX[derivePhase()] ?? 2, furthestStageReached());
+  const times = stageTimes();
+  host.setAttribute("role", "list");
+  host.innerHTML = "";
+  STAGE_KEYS.forEach((key, index) => {
+    const done = index < activeIndex;
+    const active = index === activeIndex;
+    const stage = document.createElement("div");
+    stage.className = `stage${done ? " is-done" : ""}${active ? " is-active" : ""}`;
+    stage.setAttribute("role", "listitem");
+    if (active) stage.setAttribute("aria-current", "step");
+    const clock = formatClock(times[index]);
+    const clockHtml = clock ? `<time class="stage-time" datetime="${esc(times[index])}">${bdi(clock)}</time>` : "";
+    stage.innerHTML = `<span class="stage-dot" aria-hidden="true">${done ? "✓" : bdi(formatLocaleNumber(lang, index + 1))}</span><strong>${esc(t(key))}</strong>${clockHtml}`;
+    host.appendChild(stage);
+  });
+}
+function latestAgentMessage(providerId) {
+  const messages = currentSession?.messages ?? [];
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (messages[index].author === "agent" && messages[index].agent === providerId) return messages[index];
+  }
+  return null;
+}
+function enabledProviders() {
+  const enabled = providers.filter((item) => $(`${item.id}Enabled`)?.checked ?? true);
+  return enabled.length ? enabled : providers;
+}
+function renderDecisionCards() {
+  const host = $("agentGrid");
+  if (!host) return;
+  host.innerHTML = "";
+  for (const provider of enabledProviders()) {
+    const message = latestAgentMessage(provider.id);
+    const nameId = `dcard-${provider.id}-name`;
+    const card = document.createElement("article");
+    card.className = `dcard ${esc(provider.id)}`;
+    card.setAttribute("aria-labelledby", nameId);
+    const badge = message ? phaseLabel(message.phase) : "";
+    const head = `<div class="dcard-head"><div class="dcard-id"><span class="agent-avatar ${esc(provider.id)}" aria-hidden="true">${esc(String(provider.label).slice(0, 1))}</span><strong id="${esc(nameId)}">${bdi(provider.label)}</strong></div>${badge ? `<span class="badge">${esc(badge)}</span>` : ""}</div>`;
+    let body;
+    if (message) {
+      const meta = message.meta || {};
+      const footParts = [
+        meta.requestedModel ? bdi(meta.requestedModel, "ltr") : "",
+        meta.requestedEffort ? bdi(meta.requestedEffort, "ltr") : "",
+        fmtDuration(meta.durationMs) ? esc(fmtDuration(meta.durationMs)) : "",
+        message.round ? `${esc(t("roundWord"))} ${bdi(formatLocaleNumber(lang, message.round))}` : "",
+      ].filter(Boolean);
+      const foot = footParts.length ? `<div class="dcard-foot">${footParts.join(" · ")}</div>` : "";
+      body = `<div class="dcard-body md">${renderMarkdown(String(message.content || "").slice(0, 600))}${foot}</div>`;
+    } else {
+      body = `<div class="dcard-body"><p class="dcard-empty">${esc(t("dcardEmpty"))}</p></div>`;
+    }
+    card.innerHTML = head + body;
+    host.appendChild(card);
+  }
+}
+function renderApprovalGate() {
+  const host = $("approvalHost");
+  if (!host) return;
+  host.innerHTML = "";
+  const execution = pendingExecution();
+  if (!execution) {
+    // A prior accept/reject stuck mid-flight after an interruption still needs the user —
+    // surface its retry here rather than the "Start execution" CTA, so nothing is stranded.
+    const stuck = unresolvedExecution();
+    if (stuck) { renderExecStuck(host, stuck); return; }
+    // Otherwise, once the room actually converged on an outcome, offer a one-click bridge
+    // into the Execute drawer. "needs_more_rounds" means the discussion did NOT reach
+    // agreement — don't offer to execute an unresolved report.
+    if (derivePhase() === "decision" && latestFinalReport()?.phase === "converged") renderProceedToExecute(host);
+    return;
+  }
+  const executor = bdi(providerInfo(execution.executor).label, "ltr");
+  const card = document.createElement("div");
+  card.className = "approval";
+  card.innerHTML = `<div class="approval-lock" aria-hidden="true">🔒</div><div><strong>${esc(t("execAwaiting"))}</strong><p>${t("approvalGateSummary")(executor)}</p></div><div class="approval-actions"></div>`;
+  const actions = card.querySelector(".approval-actions");
+  const addButton = (className, label, handler) => {
+    const button = document.createElement("button");
+    button.className = className;
+    button.textContent = label;
+    button.onclick = () => { actions.querySelectorAll("button").forEach((item) => { item.disabled = true; }); handler(); };
+    actions.appendChild(button);
+  };
+  addButton("btn-primary", t("mergeLocal"), () => acceptExec(execution.taskId, "merge"));
+  if (currentSession.project?.canOpenPr) addButton("btn-ghost", t("openPr"), () => acceptExec(execution.taskId, "pr"));
+  addButton("btn-danger", t("reject"), () => rejectExec(execution.taskId));
+  host.appendChild(card);
+}
+// A crash/interruption can leave an execution mid-accept or mid-reject. Surface the
+// retry (or the in-progress status) in the Decision view so it isn't only reachable
+// from the Conversation tab.
+function renderExecStuck(host, ex) {
+  const card = document.createElement("div");
+  card.className = "approval";
+  card.innerHTML = `<div class="approval-lock" aria-hidden="true">⟳</div><div><strong>${esc(t("execAwaiting"))}</strong><p>${esc(execStatusLabel(ex.status))}</p></div><div class="approval-actions"></div>`;
+  const retry = {
+    accepted_pending_merge: () => acceptExec(ex.taskId, "merge"),
+    accepted_pending_pr: () => acceptExec(ex.taskId, "pr"),
+    rejected_cleanup_pending: () => rejectExec(ex.taskId),
+  }[ex.status];
+  if (retry) {
+    const button = document.createElement("button");
+    button.className = "btn-primary";
+    button.textContent = execStatusLabel(ex.status);
+    button.onclick = () => { button.disabled = true; retry(); };
+    card.querySelector(".approval-actions").appendChild(button);
+  }
+  host.appendChild(card);
+}
+function renderProceedToExecute(host) {
+  const card = document.createElement("div");
+  card.className = "proceed";
+  card.innerHTML = `<div><strong>${esc(t("proceedTitle"))}</strong><p>${esc(t("proceedSub"))}</p></div><div class="proceed-actions"></div>`;
+  const button = document.createElement("button");
+  button.className = "btn-primary";
+  button.textContent = t("proceedExecute");
+  button.onclick = proceedToExecute;
+  card.querySelector(".proceed-actions").appendChild(button);
+  host.appendChild(card);
+}
+// Bridge from a converged discussion into execution: open the Execute drawer and
+// seed the task with the agreed outcome. The user still reviews and runs it, then
+// the normal execution approval gate (merge / PR / reject) follows.
+function proceedToExecute() {
+  const report = latestFinalReport();
+  const conclusion = report ? String(report.content || "").trim() : "";
+  $("execDrawer").hidden = false;
+  $("execToggle").setAttribute("aria-expanded", "true");
+  $("setupDrawer").hidden = true;
+  $("setupToggle").setAttribute("aria-expanded", "false");
+  if (conclusion && !$("execTask").value.trim()) $("execTask").value = `${t("proceedTaskPrefix")}\n\n${conclusion}`;
+  $("execTask").focus();
+}
+function renderLiveStrip() {
+  const strip = $("liveStrip");
+  if (!strip) return;
+  const ids = Object.keys(liveAgents);
+  if (!ids.length) { strip.hidden = true; strip.innerHTML = ""; return; }
+  strip.hidden = false;
+  strip.innerHTML = ids.map((id) => {
+    const info = providerInfo(id);
+    return `<div class="live-actor"><span class="agent-avatar ${esc(info.id)}" aria-hidden="true">${esc(String(info.label).slice(0, 1))}</span><div><strong>${bdi(info.label)}</strong><span dir="auto">${esc(liveAgents[id])}</span></div></div>`;
+  }).join("");
+}
+// Single re-render entry point, called from renderMessages() so it tracks every session/SSE update.
+function renderDecisionRoom() {
+  if (!$("stageList")) return;
+  applyPhase();
+  renderStages();
+  renderDecisionCards();
+  renderApprovalGate();
+}
+
+/* ---------------- theme / preset / view ---------------- */
+function applyTheme(theme) {
+  const value = theme === "light" ? "light" : "dark";
+  if (value === "light") document.documentElement.dataset.theme = "light";
+  else delete document.documentElement.dataset.theme;
+  const button = $("themeBtn");
+  if (button) {
+    button.setAttribute("aria-pressed", String(value === "light"));
+    button.textContent = value === "light" ? "☾" : "☼";
+  }
+  localStorage.setItem("agent-room-theme", value);
+}
+function toggleTheme() { applyTheme(document.documentElement.dataset.theme === "light" ? "dark" : "light"); }
+
+function applyPreset(id) {
+  const value = ["simple", "builder", "mission"].includes(id) ? id : "mission";
+  document.documentElement.dataset.preset = value;
+  document.querySelectorAll(".preset").forEach((button) => {
+    const active = button.dataset.preset === value;
+    button.classList.toggle("is-active", active);
+    button.setAttribute("aria-pressed", String(active));
+  });
+  localStorage.setItem("agent-room-preset", value);
+}
+
+const VIEW_TABS = ["tabDecision", "tabConversation"];
+function setView(view) {
+  const value = view === "conversation" ? "conversation" : "decision";
+  $("decisionPanel").hidden = value !== "decision";
+  $("conversationPanel").hidden = value !== "conversation";
+  for (const id of VIEW_TABS) {
+    const tab = $(id);
+    const selected = tab.dataset.view === value;
+    tab.setAttribute("aria-selected", String(selected));
+    tab.tabIndex = selected ? 0 : -1; // roving tabindex per the ARIA tabs pattern
+  }
+  localStorage.setItem("agent-room-view", value);
+}
+function onViewTabKeydown(event) {
+  const currentIndex = VIEW_TABS.indexOf(event.currentTarget.id);
+  if (currentIndex === -1) return;
+  let nextIndex = null;
+  if (event.key === "ArrowRight" || event.key === "ArrowLeft") {
+    const forward = (event.key === "ArrowRight") !== (document.documentElement.dir === "rtl");
+    nextIndex = (currentIndex + (forward ? 1 : -1) + VIEW_TABS.length) % VIEW_TABS.length;
+  } else if (event.key === "Home") {
+    nextIndex = 0;
+  } else if (event.key === "End") {
+    nextIndex = VIEW_TABS.length - 1;
+  }
+  if (nextIndex === null) return;
+  event.preventDefault();
+  const tab = $(VIEW_TABS[nextIndex]);
+  setView(tab.dataset.view);
+  tab.focus();
+}
+
+// The presets drawer reuses the app's managed-modal machinery (focus trap +
+// appShell inert + Escape), then layers the slide/backdrop chrome on top.
+function openPresets() {
+  const drawer = $("presetsDrawer");
+  const backdrop = $("backdrop");
+  backdrop.hidden = false;
+  drawer.setAttribute("aria-hidden", "false");
+  openManagedModal(drawer, { initialFocus: $("closePresets"), dismiss: closePresets });
+  requestAnimationFrame(() => { backdrop.classList.add("open"); drawer.classList.add("open"); });
+}
+function closePresets() {
+  const drawer = $("presetsDrawer");
+  const backdrop = $("backdrop");
+  drawer.classList.remove("open");
+  backdrop.classList.remove("open");
+  backdrop.hidden = true;
+  drawer.setAttribute("aria-hidden", "true");
+  closeManagedModal(drawer);
+}
+
 /* ---------------- wiring ---------------- */
 document.querySelectorAll(".lang-btn").forEach((b) => b.onclick = () => applyLang(b.dataset.lang));
 document.querySelectorAll(".mode-btn").forEach((b) => b.onclick = () => setMode(b.dataset.mode));
@@ -1397,9 +2049,46 @@ $("execStopBtn").onclick = async () => { if (currentSessionId) await api(`/api/s
 $("approveGo").onclick = confirmExec;
 $("approveCancel").onclick = cancelExecApproval;
 $("approveModal").addEventListener("click", (e) => { if (e.target === $("approveModal")) cancelExecApproval(); });
+$("toggleRail").onclick = toggleRailCollapsed;
+$("toggleContext").onclick = toggleContextColumn;
+$("themeBtn").onclick = toggleTheme;
+$("presetsBtn").onclick = openPresets;
+$("closePresets").onclick = closePresets;
+$("closePresets2").onclick = closePresets;
+$("backdrop").onclick = closePresets;
+document.querySelectorAll(".preset").forEach((button) => { button.onclick = () => applyPreset(button.dataset.preset); });
+$("tabDecision").onclick = () => setView("decision");
+$("tabConversation").onclick = () => setView("conversation");
+VIEW_TABS.forEach((id) => { $(id).addEventListener("keydown", onViewTabKeydown); });
+$("sessionGroupBy").onchange = () => {
+  sessionGroupBy = $("sessionGroupBy").value === "project" ? "project" : "date";
+  localStorage.setItem("agent-room-session-group", sessionGroupBy);
+  refreshSessions();
+};
+$("attachBtn").onclick = () => $("attachInput").click();
+$("attachInput").addEventListener("change", () => handleAttachFiles($("attachInput").files));
+$("renameSessionSave").onclick = saveRenameSession;
+$("renameSessionCancel").onclick = closeRenameSessionModal;
+$("renameSessionModal").addEventListener("click", (e) => { if (e.target === $("renameSessionModal")) closeRenameSessionModal(); });
+$("renameSessionInput").addEventListener("keydown", (e) => { if (e.key === "Enter") saveRenameSession(); });
+document.addEventListener("click", (event) => {
+  if (openSessionMenu && !openSessionMenu.contains(event.target) && !event.target.closest?.(".session-more")) {
+    closeSessionMenu();
+  }
+});
+document.addEventListener("keydown", (event) => {
+  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "b" && !activeModal) {
+    event.preventDefault();
+    toggleRailCollapsed();
+  }
+});
 
 async function initialize() {
+  applyShellChrome();
   applyLang(localStorage.getItem("agent-room-lang") || "ar");
+  applyTheme(localStorage.getItem("agent-room-theme") || "dark");
+  applyPreset(localStorage.getItem("agent-room-preset") || "mission");
+  setView(localStorage.getItem("agent-room-view") || "decision");
   try {
     await loadProviderCatalog();
     loadSettings();

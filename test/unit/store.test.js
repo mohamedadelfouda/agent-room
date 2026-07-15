@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { readFile, rm, stat, writeFile, utimes } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { createSession, saveSession, getSession, addMessage, listSessions } from "../../server/store.js";
+import { createSession, saveSession, getSession, addMessage, listSessions, renameSession, deleteSession } from "../../server/store.js";
 
 const sessionsDir = join(dirname(fileURLToPath(import.meta.url)), "../../data/sessions");
 const cleanup = (id) => Promise.all([
@@ -94,4 +94,102 @@ test("history retention never drops a terminal execution whose cleanup is pendin
     assert.ok(saved.executions.some((record) => record.taskId === "pending-cleanup"));
     assert.equal(saved.executions.filter((record) => record.taskId.startsWith("clean-")).length, 50);
   } finally { await cleanup(session.id); }
+});
+test('renameSession updates title and keeps the same id', async () => {
+  const session = await createSession('rename-before');
+  try {
+    const renamed = await renameSession(session.id, 'rename-after');
+    assert.equal(renamed.id, session.id);
+    assert.equal(renamed.title, 'rename-after');
+    const loaded = await getSession(session.id);
+    assert.equal(loaded.id, session.id);
+    assert.equal(loaded.title, 'rename-after');
+    const listed = await listSessions();
+    assert.equal(listed.find((item) => item.id === session.id)?.title, 'rename-after');
+  } finally {
+    await cleanup(session.id);
+  }
+});
+
+test('renameSession rejects an empty or whitespace-only title', async () => {
+  const session = await createSession('rename-guard');
+  try {
+    for (const blank of ['', '   ', '\n\t']) {
+      await assert.rejects(() => renameSession(session.id, blank), (error) => error.code === 'title_required');
+    }
+    const loaded = await getSession(session.id);
+    assert.equal(loaded.title, 'rename-guard');
+  } finally {
+    await cleanup(session.id);
+  }
+});
+
+test('renameSession truncates a title past the 160-code-point limit without splitting a surrogate pair', async () => {
+  const session = await createSession('rename-long');
+  try {
+    const emoji = '\u{1F600}'; // a surrogate pair — must never be split by truncation
+    const longTitle = 'x'.repeat(159) + emoji + 'y'.repeat(10);
+    const renamed = await renameSession(session.id, longTitle);
+    assert.equal([...renamed.title].length, 160);
+    assert.equal(renamed.title, 'x'.repeat(159) + emoji);
+    assert.ok(!renamed.title.includes('�'), 'no unpaired-surrogate replacement character');
+  } finally {
+    await cleanup(session.id);
+  }
+});
+
+test('deleteSession removes transcript and summary without breaking listSessions', async () => {
+  const session = await createSession('delete-me');
+  try {
+    await saveSession(session); // ensure the sidecar .summary.json actually exists before deleting
+    const summaryFile = join(sessionsDir, `${session.id}.summary.json`);
+    await stat(summaryFile); // sanity check: the summary was created
+    await deleteSession(session.id);
+    await assert.rejects(() => getSession(session.id), /ENOENT|no such file/i);
+    await assert.rejects(() => stat(summaryFile), /ENOENT/);
+    const listed = await listSessions();
+    assert.equal(listed.find((item) => item.id === session.id), undefined);
+  } finally {
+    await cleanup(session.id);
+  }
+});
+
+test('deleteSession refuses sessions with recoverable executions', async () => {
+  const session = await createSession('delete-blocked');
+  try {
+    session.executions = [{ taskId: 'open', status: 'awaiting_decision', cleanupPending: true }];
+    await saveSession(session);
+    await assert.rejects(() => deleteSession(session.id), (error) => error.code === 'pending_execution_decisions');
+    const loaded = await getSession(session.id);
+    assert.equal(loaded.id, session.id);
+  } finally {
+    await cleanup(session.id);
+  }
+});
+
+for (const activeStatus of ['pending', 'executing_unknown']) {
+  test(`deleteSession refuses sessions with a connector action in status "${activeStatus}"`, async () => {
+    const session = await createSession(`delete-blocked-connector-${activeStatus}`);
+    try {
+      session.connectorActions = [{ id: 'a1', connector: 'gmail', action: 'send_message', status: activeStatus }];
+      await saveSession(session);
+      await assert.rejects(() => deleteSession(session.id), (error) => error.code === 'pending_execution_decisions');
+      const loaded = await getSession(session.id);
+      assert.equal(loaded.id, session.id);
+    } finally {
+      await cleanup(session.id);
+    }
+  });
+}
+
+test('deleteSession allows sessions whose connector actions are all terminal', async () => {
+  const session = await createSession('delete-ok-connector');
+  try {
+    session.connectorActions = [{ id: 'a1', connector: 'gmail', action: 'send_message', status: 'completed' }];
+    await saveSession(session);
+    await deleteSession(session.id);
+    await assert.rejects(() => getSession(session.id), /ENOENT|no such file/i);
+  } finally {
+    await cleanup(session.id);
+  }
 });

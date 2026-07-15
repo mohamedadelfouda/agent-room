@@ -15,6 +15,7 @@
           <strong>Agent Room</strong>
           <small data-i18n="brandSubtitle">جلسة ذكاء اصطناعي مشتركة</small>
         </div>
+        <button id="toggleContext" type="button" class="icon-btn" title="Context" aria-label="Context" aria-pressed="true" data-i18n-title="toggleContext" data-i18n-aria-label="toggleContext">◫</button>
         <button id="openOnboard" type="button" class="icon-btn" title="Setup" aria-label="Setup" data-i18n-title="setup" data-i18n-aria-label="setup">⚙</button>
         <div class="lang-toggle" role="group" aria-label="Language" data-i18n-aria-label="language">
           <button type="button" class="lang-btn is-active" data-lang="ar" aria-label="Arabic" data-i18n-aria-label="arabicLanguage" aria-pressed="true">ع</button>
@@ -22,15 +23,29 @@
         </div>
       </div>
 
-      <button id="newSessionBtn" class="btn-primary rail-new" data-i18n="newSession">جلسة جديدة</button>
+      <div class="rail-tools">
+        <button id="newSessionBtn" class="btn-primary rail-new" data-i18n="newSession">جلسة جديدة</button>
+        <div class="rail-filters">
+          <label class="rail-filter">
+            <span class="sr-only" data-i18n="groupBy">تجميع حسب</span>
+            <select id="sessionGroupBy" aria-label="Group by" data-i18n-aria-label="groupBy">
+              <option value="date" data-i18n="groupByDate">بالتاريخ</option>
+              <option value="project" data-i18n="groupByProject">بالمشروع</option>
+            </select>
+          </label>
+        </div>
+      </div>
 
       <div class="rail-label" data-i18n="sessions">الجلسات</div>
       <nav id="sessionList" class="session-list" aria-label="Sessions" data-i18n-aria-label="sessions"></nav>
 
-      <button id="connFooter" class="conn" title="">
-        <span id="serverStatus" class="conn-dot" aria-hidden="true"></span>
-        <span id="connText" role="status" aria-live="polite" data-i18n="connected">متصل</span>
-      </button>
+      <div class="rail-foot">
+        <button id="connFooter" class="conn" title="">
+          <span id="serverStatus" class="conn-dot" aria-hidden="true"></span>
+          <span id="connText" role="status" aria-live="polite" data-i18n="connected">متصل</span>
+        </button>
+        <button id="toggleRail" type="button" class="icon-btn rail-collapse" title="Collapse sessions" aria-label="Collapse sessions" aria-pressed="false" data-i18n-title="toggleRail" data-i18n-aria-label="toggleRail">◂</button>
+      </div>
     </aside>
 
     <main class="main">
@@ -50,6 +65,7 @@
             <p id="sessionMeta"></p>
           </div>
           <div class="topbar-actions">
+            <span class="pill" id="statusPill" role="status" aria-live="polite">—</span>
             <button id="setupToggle" class="btn-ghost setup-toggle" aria-expanded="false" aria-controls="setupDrawer">
               <span id="setupSummary" class="setup-summary"></span>
               <span class="chevron" aria-hidden="true">⌄</span>
@@ -57,6 +73,8 @@
             <button id="execToggle" class="btn-ghost" data-i18n="execute" aria-expanded="false" aria-controls="execDrawer">تنفيذ</button>
             <button id="exportBtn" class="btn-ghost" data-i18n="export" disabled>تصدير</button>
             <button id="stopBtn" class="btn-danger" data-i18n="stop" disabled>إيقاف</button>
+            <button id="themeBtn" type="button" class="icon-btn" title="Theme" aria-label="Theme" data-i18n-title="theme" data-i18n-aria-label="theme">☼</button>
+            <button id="presetsBtn" type="button" class="icon-btn" title="Customize" aria-label="Customize workspace" aria-haspopup="dialog" data-i18n-title="customize" data-i18n-aria-label="customize">▦</button>
           </div>
         </header>
 
@@ -118,11 +136,46 @@
           </div>
         </section>
 
-        <div id="chat" class="conversation" role="log" aria-live="off" aria-label="Conversation" data-i18n-aria-label="conversation"></div>
+        <div class="workspace">
+          <aside class="workflow" id="workflow" aria-label="Room flow" data-i18n-aria-label="workflowNav">
+            <h2 data-i18n="workflow">مسار الغرفة</h2>
+            <div class="stage-list" id="stageList"></div>
+          </aside>
+
+          <div class="main-inner" id="mainInner">
+            <div class="decision-bar">
+              <div>
+                <h2 id="mainHeading">—</h2>
+                <p class="tiny" id="mainSub"></p>
+              </div>
+              <span class="gate-tag" id="gateTag" hidden data-i18n="gateTag">بوابة القرار</span>
+            </div>
+
+            <div class="view-tabs" role="tablist" aria-label="View" data-i18n-aria-label="viewTabs">
+              <button class="view-tab" id="tabDecision" type="button" data-view="decision" role="tab" aria-selected="true" aria-controls="decisionPanel" data-i18n="tabDecision">القرار</button>
+              <button class="view-tab" id="tabConversation" type="button" data-view="conversation" role="tab" aria-selected="false" aria-controls="conversationPanel" data-i18n="tabConversation">المحادثة</button>
+            </div>
+
+            <section id="decisionPanel" data-view-panel="decision" role="tabpanel" aria-labelledby="tabDecision">
+              <div class="live-strip" id="liveStrip" hidden></div>
+              <div class="agent-grid" id="agentGrid"></div>
+              <div id="approvalHost"></div>
+            </section>
+
+            <section id="conversationPanel" data-view-panel="conversation" role="tabpanel" aria-labelledby="tabConversation">
+              <div id="chat" class="conversation" role="log" aria-live="off" aria-label="Conversation" data-i18n-aria-label="conversation"></div>
+            </section>
+          </div>
+
+          <aside id="contextCol" class="context-col" aria-label="Context" data-i18n-aria-label="contextColumn"></aside>
+        </div>
         <div id="conversationAnnouncements" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></div>
 
         <footer class="composer">
+          <div id="attachChips" class="attach-chips" hidden></div>
           <div class="composer-box">
+            <button id="attachBtn" type="button" class="attach-btn" title="Attach file" aria-label="Attach file" data-i18n-title="attachFile" data-i18n-aria-label="attachFile">📎</button>
+            <input id="attachInput" type="file" class="sr-only" multiple accept=".txt,.md,.markdown,.json,.js,.ts,.tsx,.jsx,.css,.html,.csv,.log,.yml,.yaml,.toml,.xml,.py,.go,.rs,.java,.c,.h,.cpp,.rb,.php,.sh,.env,.gitignore,text/plain,text/markdown,application/json" aria-label="Attach text file" data-i18n-aria-label="attachFile" />
             <label for="messageInput" class="sr-only" data-i18n="composerLabel">الرسالة</label>
             <textarea id="messageInput" rows="1" placeholder="اكتب الفكرة أو السؤال..." data-i18n-ph="composerPh"></textarea>
             <button id="sendBtn" class="send-btn" title="ابدأ الجولة" aria-label="ابدأ الجولة" data-i18n-title="send" data-i18n-aria-label="send" disabled>↑</button>
@@ -193,6 +246,35 @@
       </div>
     </div>
   </div>
+
+  <div id="renameSessionModal" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="renameSessionModalTitle">
+    <div class="modal" tabindex="-1">
+      <h2 id="renameSessionModalTitle" data-i18n="renameSession">إعادة تسمية الجلسة</h2>
+      <div class="field"><label for="renameSessionInput" data-i18n="nameLabel">اسم الجلسة</label>
+        <input id="renameSessionInput" type="text" /></div>
+      <div id="renameSessionError" class="modal-error hidden" role="alert" aria-live="assertive"></div>
+      <div class="modal-actions">
+        <button id="renameSessionCancel" class="btn-ghost" data-i18n="cancel">إلغاء</button>
+        <button id="renameSessionSave" class="btn-primary" data-i18n="save">حفظ</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="backdrop" id="backdrop" hidden></div>
+  <aside class="drawer hidden" id="presetsDrawer" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="presetsTitle">
+    <header class="drawer-head">
+      <div><h2 id="presetsTitle" class="drawer-title" data-i18n="customize">تخصيص مساحة العمل</h2><div class="tiny" data-i18n="customizeSub">٣ أوضاع جاهزة</div></div>
+      <button id="closePresets" type="button" class="icon-btn" aria-label="Close" data-i18n-aria-label="close">×</button>
+    </header>
+    <div class="drawer-body">
+      <div class="preset-grid">
+        <button class="preset" type="button" data-preset="simple" aria-pressed="false"><strong data-i18n="presetSimple">بسيط</strong><span data-i18n="presetSimpleDesc">القرار + الموافقة + الهدف</span></button>
+        <button class="preset" type="button" data-preset="builder" aria-pressed="false"><strong data-i18n="presetBuilder">مطوّر</strong><span data-i18n="presetBuilderDesc">+ مسار العمل والسياق</span></button>
+        <button class="preset is-active" type="button" data-preset="mission" aria-pressed="true"><strong data-i18n="presetMission">مركز التحكم</strong><span data-i18n="presetMissionDesc">الوضع الكامل + السجل</span></button>
+      </div>
+    </div>
+    <footer class="drawer-foot"><button id="closePresets2" type="button" class="btn btn-primary" data-i18n="done">تم</button></footer>
+  </aside>
 
   <script type="module" src="/app.js"></script>
 </body>
