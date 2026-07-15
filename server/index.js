@@ -5,7 +5,7 @@ import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import os from "node:os";
 import { listSessions, createSession, getSession, mutateSession, rootPath } from "./store.js";
-import { approveProviderCommand, approvedProviderCommand, checkCommand, resolveAllowedCommand, runProcess } from "./process.js";
+import { approveProviderCommand, approvedProviderCommand, checkCommand, resolveAllowedCommand, runProcess, configureTrustedCliStore, hydrateTrustedProviderCommands } from "./process.js";
 import { discoverProviderCommands } from "./cli-discovery.js";
 import { runOrchestration, stopRun, isRunning, abortAllRuns } from "./orchestrator.js";
 import { runExecuteAndReview, acceptExecution, rejectExecution, isExecuting, stopExec, abortAllExecutions, reconcileExecutionWorktrees } from "./exec-orchestrator.js";
@@ -454,23 +454,31 @@ const server = http.createServer(async (req, res) => {
 
 export const serverReady = new Promise((resolve, reject) => {
   server.once("error", reject);
-  server.listen(PORT, "127.0.0.1", () => {
-    const address = server.address();
-    const actualPort = typeof address === "object" && address ? address.port : PORT;
-    activePort = actualPort;
-    const url = `http://127.0.0.1:${actualPort}`;
-    setMcpBridgeUrl(url);
-    void reconcileExecutionWorktrees()
-      .catch((error) => logError("execution workspace reconciliation failed", error.message))
-      .finally(() => { startupReconciled = true; });
-    console.log(`\nAgent Room is running at ${url}\nData folder: ${path.join(rootPath(), "data")}\n`);
-    if (process.env.NO_OPEN !== "1") {
-      const command = process.platform === "win32" ? "cmd" : process.platform === "darwin" ? "open" : "xdg-open";
-      const args = process.platform === "win32" ? ["/c", "start", "", url] : [url];
-      try { spawn(command, args, { detached: true, stdio: "ignore" }).unref(); } catch {}
-    }
-    resolve({ port: actualPort, url });
-  });
+  void (async () => {
+    // Restore Trust & check approvals from the previous run before accepting
+    // traffic, so detectAgents and absolute command paths keep working after a
+    // restart without asking the user to set up again.
+    configureTrustedCliStore(path.join(rootPath(), "data", "trusted-cli.json"));
+    try { await hydrateTrustedProviderCommands(); }
+    catch (error) { logError("trusted CLI hydrate failed", redact(error.message)); }
+    server.listen(PORT, "127.0.0.1", () => {
+      const address = server.address();
+      const actualPort = typeof address === "object" && address ? address.port : PORT;
+      activePort = actualPort;
+      const url = `http://127.0.0.1:${actualPort}`;
+      setMcpBridgeUrl(url);
+      void reconcileExecutionWorktrees()
+        .catch((error) => logError("execution workspace reconciliation failed", error.message))
+        .finally(() => { startupReconciled = true; });
+      console.log(`\nAgent Room is running at ${url}\nData folder: ${path.join(rootPath(), "data")}\n`);
+      if (process.env.NO_OPEN !== "1") {
+        const command = process.platform === "win32" ? "cmd" : process.platform === "darwin" ? "open" : "xdg-open";
+        const args = process.platform === "win32" ? ["/c", "start", "", url] : [url];
+        try { spawn(command, args, { detached: true, stdio: "ignore" }).unref(); } catch {}
+      }
+      resolve({ port: actualPort, url });
+    });
+  })().catch(reject);
 });
 
 if (directEntry) {

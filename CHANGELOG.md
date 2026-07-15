@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Trusted CLI paths from in-app Setup / Trust & check now persist across server restarts, and onboarding Setup discovers and trusts a found executable without closing the checklist dialog.
 - Added in-app CLI setup: read-only discovery of native provider executables hidden behind npm/pnpm shims (such as a global Codex install on Windows), one-click Trust & check from a discovered path, and per-provider install guidance in the settings drawer and onboarding checklist.
 
 ## 0.2.1 — 2026-07-15

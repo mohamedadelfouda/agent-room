@@ -4,7 +4,7 @@ import { mkdtempSync, realpathSync, symlinkSync, writeFileSync, rmSync } from "n
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync, spawn } from "node:child_process";
-import { allowedCommand, approveProviderCommand, approvedProviderCommand, parsePosixProcessGroupLiveness, resolveAllowedCommand, runProcess, sanitizedAgentEnv, sanitizedGithubEnv, sanitizedPublicationEnv, terminateProcess } from "../../server/process.js";
+import { allowedCommand, approveProviderCommand, approvedProviderCommand, configureTrustedCliStore, hydrateTrustedProviderCommands, parsePosixProcessGroupLiveness, resolveAllowedCommand, runProcess, sanitizedAgentEnv, sanitizedGithubEnv, sanitizedPublicationEnv, terminateProcess } from "../../server/process.js";
 
 // Run node against a temp .js file so large scripts stay readable and cross-platform.
 function withScript(body, fn) {
@@ -105,6 +105,34 @@ test("an explicitly approved CLI symlink resolves consistently on later launches
       realpathSync(process.execPath),
     );
   } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("trusted CLI approvals persist to disk and reload in a fresh process", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "ar-trusted-cli-"));
+  const store = join(dir, "trusted-cli.json");
+  const binary = join(dir, process.platform === "win32" ? "codex.exe" : "codex");
+  writeFileSync(binary, "placeholder");
+  if (process.platform !== "win32") {
+    const { chmodSync } = await import("node:fs");
+    chmodSync(binary, 0o755);
+  }
+  try {
+    configureTrustedCliStore(store);
+    const approved = await approveProviderCommand("codex", binary, new Set(["codex"]));
+    assert.equal(approvedProviderCommand("codex"), approved);
+    const processModule = new URL("../../server/process.js", import.meta.url).href;
+    const script = `
+      import { configureTrustedCliStore, hydrateTrustedProviderCommands, approvedProviderCommand } from ${JSON.stringify(processModule)};
+      configureTrustedCliStore(${JSON.stringify(store)});
+      await hydrateTrustedProviderCommands({ allowed: new Set(["codex"]) });
+      process.stdout.write(approvedProviderCommand("codex"));
+    `;
+    const reloaded = execFileSync(process.execPath, ["--input-type=module", "-e", script], { encoding: "utf8" });
+    assert.equal(reloaded, approved);
+  } finally {
+    configureTrustedCliStore("");
     rmSync(dir, { recursive: true, force: true });
   }
 });

@@ -680,6 +680,9 @@ function toggleCliSetup(agent) {
   const panel = $(`${agent}CliSetup`);
   const button = document.querySelector(`.setup-cli[data-agent="${agent}"]`);
   if (!panel.hidden) {
+    // Ignore clicks while discovery is in flight — closing mid-search made
+    // users hammer Setup until a later click happened to land after results.
+    if (cliSetupInFlight.has(agent)) return;
     panel.hidden = true;
     button?.setAttribute("aria-expanded", "false");
     return;
@@ -690,6 +693,13 @@ function toggleCliSetup(agent) {
 }
 
 const cliSetupInFlight = new Set();
+
+async function applyDiscoveredCommand(agent, candidate) {
+  $(`${agent}Command`).value = candidate;
+  saveSettings();
+  return checkCli(agent);
+}
+
 async function runCliSetup(agent) {
   if (cliSetupInFlight.has(agent)) return;
   cliSetupInFlight.add(agent);
@@ -703,6 +713,14 @@ async function runCliSetup(agent) {
     return;
   } finally {
     cliSetupInFlight.delete(agent);
+  }
+  // One clear native binary: trust it immediately so Setup is one click, not
+  // discover → choose → trust. Multiple candidates still need an explicit pick.
+  if (!result.resolved && result.candidates?.length === 1) {
+    const ok = await applyDiscoveredCommand(agent, result.candidates[0]);
+    if (ok) {
+      result = await api("/api/cli/discover", { method: "POST", body: JSON.stringify({ provider: agent }) }).catch(() => result);
+    }
   }
   // Built offline and inserted in one mutation so the polite live region
   // announces the result as one coherent message, not fragment by fragment.
@@ -731,10 +749,8 @@ async function runCliSetup(agent) {
       use.textContent = t("useThisPath");
       use.setAttribute("aria-label", `${t("useThisPath")}: ${candidate}`);
       use.onclick = async () => {
-        $(`${agent}Command`).value = candidate;
-        saveSettings();
         use.disabled = true;
-        const ok = await checkCli(agent);
+        const ok = await applyDiscoveredCommand(agent, candidate);
         use.disabled = false;
         if (ok) runCliSetup(agent);
       };
@@ -873,16 +889,49 @@ async function loadOnboard() {
   } catch (e) { list.textContent = localizedFailure(e); }
 }
 function openCliSetupFromOnboard(agent) {
-  // Close without the modal's focus restore: focus must land on the setup
-  // button, and the restore RAF would otherwise override a synchronous focus.
-  closeManagedModal($("onboardModal"), { restoreFocus: false });
-  localStorage.setItem("agent-room-onboarded", "1");
-  if ($("setupDrawer").hidden) toggleSetup();
-  const panel = $(`${agent}CliSetup`);
-  if (panel.hidden) toggleCliSetup(agent);
-  else runCliSetup(agent);
-  document.querySelector(`.agent-card[data-agent="${agent}"]`)?.scrollIntoView({ block: "nearest" });
-  requestAnimationFrame(() => document.querySelector(`.setup-cli[data-agent="${agent}"]`)?.focus());
+  // Keep the onboarding dialog open: closing it felt like Setup "broke" the
+  // screen. Discover + trust in place, then refresh the checklist.
+  void (async () => {
+    const list = $("onboardList");
+    const prior = list.innerHTML;
+    list.textContent = t("setupSearching");
+    try {
+      const result = await api("/api/cli/discover", { method: "POST", body: JSON.stringify({ provider: agent }) });
+      if (result.resolved) {
+        await loadOnboard();
+        return;
+      }
+      if (result.candidates?.length) {
+        const ok = await applyDiscoveredCommand(agent, result.candidates[0]);
+        await loadOnboard();
+        if (!ok) {
+          // Fall through to the drawer only when trust failed.
+          closeManagedModal($("onboardModal"), { restoreFocus: false });
+          localStorage.setItem("agent-room-onboarded", "1");
+          if ($("setupDrawer").hidden) toggleSetup();
+          const panel = $(`${agent}CliSetup`);
+          if (panel.hidden) toggleCliSetup(agent);
+          else runCliSetup(agent);
+        }
+        return;
+      }
+      // Nothing on disk — close the dialog and open install guidance in Setup.
+      closeManagedModal($("onboardModal"), { restoreFocus: false });
+      localStorage.setItem("agent-room-onboarded", "1");
+      if ($("setupDrawer").hidden) toggleSetup();
+      const panel = $(`${agent}CliSetup`);
+      if (panel.hidden) toggleCliSetup(agent);
+      else runCliSetup(agent);
+      document.querySelector(`.agent-card[data-agent="${agent}"]`)?.scrollIntoView({ block: "nearest" });
+      requestAnimationFrame(() => document.querySelector(`.setup-cli[data-agent="${agent}"]`)?.focus());
+    } catch (error) {
+      list.innerHTML = prior;
+      const note = document.createElement("p");
+      note.className = "ob-detail";
+      note.textContent = localizedFailure(error);
+      list.prepend(note);
+    }
+  })();
 }
 async function updateAgentCli(agent, btn) {
   btn.disabled = true; btn.textContent = t("updating");
@@ -1267,6 +1316,13 @@ async function initialize() {
     loadSettings();
     syncExecModes();
     updateSetupSummary();
+    // Absolute command paths from a previous session still need Trust & check
+    // on a fresh server (or after hydrate). Re-check quietly so health badges
+    // match what the user already configured.
+    await Promise.all(providers.map(async (item) => {
+      const command = $(`${item.id}Command`)?.value.trim() || "";
+      if (command && /[\\/]/.test(command)) await checkCli(item.id);
+    }));
   } catch (error) {
     setConnected(false);
     $("connText").textContent = localizedFailure(error);
