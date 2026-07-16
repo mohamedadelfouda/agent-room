@@ -290,7 +290,9 @@ async function ensureRecoveryRecord(fileName, error) {
   try {
     return JSON.parse(await fs.readFile(recordPath, "utf8"));
   } catch (readError) {
-    if (readError?.code !== "ENOENT") throw readError;
+    // ENOENT → create it below. A truncated/corrupt record (SyntaxError) is rebuilt instead of
+    // left to break export/retry/delete; any other IO error is genuinely fatal and propagates.
+    if (readError?.code !== "ENOENT" && !(readError instanceof SyntaxError)) throw readError;
   }
   const record = {
     recoveryId,
@@ -298,13 +300,11 @@ async function ensureRecoveryRecord(fileName, error) {
     category: recoveryCategory(error),
     detectedAt: new Date().toISOString(),
   };
-  try {
-    await fs.writeFile(recordPath, JSON.stringify(record, null, 2), { encoding: "utf8", flag: "wx", mode: 0o600 });
-    return record;
-  } catch (writeError) {
-    if (writeError?.code !== "EEXIST") throw writeError;
-    return JSON.parse(await fs.readFile(recordPath, "utf8"));
-  }
+  // Atomic temp-file + rename (via replaceJson) so a crash mid-write can never leave a
+  // half-written JSON record behind. The record is deterministic for a given file+category,
+  // so an overwriting last-writer-wins race is harmless.
+  await replaceJson(recordPath, record);
+  return record;
 }
 
 function recoverySummary(record) {
@@ -337,7 +337,9 @@ function summaryPath(filePath) {
 
 async function doWrite(filePath, data) {
   boundSession(data);
-  validateSessionDocument(data, data.id);
+  // Validate the document id against the file it is being written to (not against itself),
+  // so a mutated in-memory id can never be persisted to a filename it no longer matches.
+  validateSessionDocument(data, path.basename(filePath, ".json"));
   await replaceJson(filePath, data);
   // The transcript is the transaction. The compact sidebar summary is only a
   // cache: a cache write failure must never make callers retry a durable action.

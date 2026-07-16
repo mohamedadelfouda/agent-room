@@ -5,6 +5,7 @@ import { join } from "node:path";
 import {
   buildDiscussionOutcome,
   discussionOutcomeReport,
+  isRunning,
   mergeOrchestrationContent,
   reconcileInterruptedRuns,
   runOrchestration,
@@ -13,6 +14,7 @@ import {
 } from "../../server/orchestrator.js";
 import { createSession, getSession, mutateSession, rootPath } from "../../server/store.js";
 import { provider } from "../../server/providers/registry.js";
+import { claimSessionActivity } from "../../server/session-activity.js";
 
 function controlBlock(goalStatus, itemProposals) {
   return `<agent-control>${JSON.stringify({
@@ -353,6 +355,44 @@ test("first collaboration opinions start independently before either provider re
   try {
     await runOrchestration(session.id, collaborationRequest("Collect independent opinions"), () => {});
     assert.doesNotMatch(codexPrompt, new RegExp(claudeOpening));
+  } finally {
+    await cleanupSession(session.id);
+  }
+});
+
+test("2026-07-16 regression: a stop finalizes a run whose providers never settle", async (t) => {
+  const session = await createSession("stop-settle-timeout");
+  const bothStarted = deferred();
+  const neverSettles = new Promise(() => {});
+  const events = [];
+  let starts = 0;
+
+  t.mock.method(provider("claude"), "run", async () => { await neverSettles; return providerResult("unreachable"); });
+  t.mock.method(provider("codex"), "run", async () => { await neverSettles; return providerResult("unreachable"); });
+
+  // Provider promises never resolve, so the run body's Promise.allSettled would hang forever;
+  // deliberately do NOT await runPromise here — the stop path must finalize the session anyway.
+  const runPromise = runOrchestration(session.id, chatRequest("Stop a stalled run"), (event) => {
+    events.push(event);
+    if (event.type === "agent_start" && ++starts === 2) bothStarted.resolve();
+  });
+  runPromise.catch(() => {});
+
+  try {
+    await bothStarted.promise;
+    // The settle wait must give up quickly and force-finalize instead of leaving it "running".
+    assert.equal(await stopRun(session.id, { settleTimeoutMs: 50 }), true);
+
+    const saved = await getSession(session.id);
+    assert.equal(saved.status, "stopped");
+    assert.equal(saved.activeRun.status, "stopped");
+    assert.equal(isRunning(session.id), false);
+    // The activity claim must also be released, or the session stays wedged as 409 "busy" forever
+    // even though it reads "stopped". Claiming + immediately releasing proves it is usable again.
+    assert.doesNotThrow(() => claimSessionActivity(session.id, "post-stop-check")());
+    assert.equal(events.filter((event) => event.type === "run_stopped").length, 1);
+    assert.equal(events.some((event) => event.type === "agent_complete"), false);
+    assertSingleRunIdentity(events);
   } finally {
     await cleanupSession(session.id);
   }

@@ -14,14 +14,14 @@ try {
   const { url } = await serverModule.serverReady;
   assert.match(url, /^http:\/\/127\.0\.0\.1:\d+$/);
 
-  const landing = await fetch(url);
+  const landing = await fetch(url, { signal: AbortSignal.timeout(10000) });
   const html = await landing.text();
   assert.equal(landing.status, 200);
   assert.match(html, /Agent Room/);
 
   const cookie = landing.headers.get("set-cookie")?.split(";", 1)[0];
   assert.ok(cookie);
-  const health = await fetch(`${url}/api/health`, { headers: { Cookie: cookie, Origin: url } });
+  const health = await fetch(`${url}/api/health`, { headers: { Cookie: cookie, Origin: url }, signal: AbortSignal.timeout(10000) });
   const payload = await health.json();
   assert.equal(health.status, 200);
   assert.equal(typeof payload.ok, "boolean");

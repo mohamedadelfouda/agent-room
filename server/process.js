@@ -189,6 +189,12 @@ export async function resolveAllowedCommand(input, allowed = ALLOWED_CLI, option
     if (options.verifyApprovedIdentity !== false && approved && await executableFingerprint(resolved) !== approved.fingerprint) {
       throw new Error("Trusted command identity changed; Trust & check this executable again");
     }
+    // Accepted residual (see SOURCE_RUN_REMEDIATION_PLAN.md): an unavoidable TOCTOU exists between
+    // this identity check and the eventual spawn of `resolved`, because there is no portable way to
+    // exec a verified file handle (no fexecve). Callers spawn `resolved` immediately with no
+    // intervening await, so the window is microscopic, and exploiting it already requires write
+    // access to the trusted CLI path — a stronger foothold than the swap itself. A copy-and-exec
+    // from a private path would be disproportionate to that risk.
     return resolved;
   }
   const command = allowedCommand(raw, allowed, options);

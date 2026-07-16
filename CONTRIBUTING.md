@@ -26,12 +26,13 @@ Use `pnpm start` for the browser-facing source server. Run `pnpm test:browser` w
 
 ## Review gate
 
-This repository uses `.review-gate/GATE.md`. Before every commit or push:
+This repository uses `.review-gate/GATE.md`. Follow the same ordered sequence before every push (`push` is always the final step):
 
 1. Review the diff with the required review agents and relevant guard checklists.
 2. Fix real findings.
 3. Commit the reviewed change.
-4. Attest the exact commit with `.review-gate/review-gate.sh attest --ran ...` as described in the gate file.
+4. Attest the exact `HEAD` commit with `.review-gate/review-gate.sh attest --ran ...` as described in the gate file.
+5. Push.
 
 Never bypass the hooks with `--no-verify`.
 

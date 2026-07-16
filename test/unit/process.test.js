@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, realpathSync, symlinkSync, writeFileSync, rmSync } from "node:fs";
+import { realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync, spawn } from "node:child_process";
@@ -157,7 +158,10 @@ test("a trusted CLI is rejected after the executable at that path changes", asyn
       /identity changed/,
     );
     await approveProviderCommand(providerId, binary, new Set(["codex"]));
-    assert.equal(await resolveAllowedCommand(binary, new Set(["codex"]), { trustedPaths: [approvedProviderCommand(providerId)] }), realpathSync(binary));
+    // Compare against the SAME canonicalizer the code uses (async fs.realpath). On Windows,
+    // realpathSync keeps an 8.3 short path (e.g. MOHAM_~1) while promises.realpath expands it,
+    // so the sync form would spuriously mismatch when os.tmpdir() sits under a short-name parent.
+    assert.equal(await resolveAllowedCommand(binary, new Set(["codex"]), { trustedPaths: [approvedProviderCommand(providerId)] }), await realpath(binary));
   } finally {
     configureTrustedCliStore("");
     rmSync(dir, { recursive: true, force: true });

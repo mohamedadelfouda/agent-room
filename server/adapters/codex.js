@@ -106,12 +106,22 @@ async function copyCodexAuth(isolatedHome, sourceEnv) {
       throw new Error("Codex auth.json changed before it could be isolated");
     }
     if (openedStat.size > MAX_CODEX_AUTH_BYTES) throw new Error("Codex auth.json is unexpectedly large");
-    const auth = await handle.readFile();
+    // Read at most the size captured after the limit check. A plain handle.readFile() would
+    // buffer whatever the file grew to at read time, so a concurrent write could exceed the
+    // cap before the afterStat identity check below rejects it.
+    const expectedSize = openedStat.size;
+    const buffer = Buffer.alloc(expectedSize);
+    let read = 0;
+    while (read < expectedSize) {
+      const { bytesRead } = await handle.read(buffer, read, expectedSize - read, read);
+      if (bytesRead === 0) break;
+      read += bytesRead;
+    }
     const afterStat = await handle.stat();
-    if (afterStat.size !== openedStat.size || afterStat.mtimeMs !== openedStat.mtimeMs) {
+    if (read !== expectedSize || afterStat.size !== expectedSize || afterStat.mtimeMs !== openedStat.mtimeMs) {
       throw new Error("Codex auth.json changed while it was being isolated");
     }
-    await fs.writeFile(path.join(isolatedHome, "auth.json"), auth, { mode: 0o600 });
+    await fs.writeFile(path.join(isolatedHome, "auth.json"), buffer, { mode: 0o600 });
   } catch (error) {
     if (error.code !== "ENOENT") throw error;
   } finally { await handle?.close().catch(() => {}); }
@@ -137,7 +147,6 @@ export async function runCodex({ prompt, config, cwd, onEvent, registerChild }) 
   // execution path, not only the diagnostic endpoints. Argument boundaries remain intact.
   const trustedCommand = process.env.AGENT_ROOM_CODEX_COMMAND || "";
   const requestedCommand = config.command || trustedCommand || "codex";
-  const command = await resolveAllowedCommand(requestedCommand, new Set(["codex"]), { trustedPaths: [trustedCommand, approvedProviderCommand("codex")] });
   const model = validateOption(config.model || "", "Codex model");
   const effort = validateOption(config.effort || "high", "Codex effort", { allowEmpty: false });
   if (!new Set(["minimal", "low", "medium", "high", "xhigh"]).has(effort)) {
@@ -169,6 +178,11 @@ export async function runCodex({ prompt, config, cwd, onEvent, registerChild }) 
     ];
     if (model) args.push("--model", model);
     args.push("-");
+    // Resolve + fingerprint-verify the trusted executable as the LAST step before spawn so the
+    // check-to-exec TOCTOU window stays minimal. The isolated-home prep above performs several
+    // awaits, so resolving earlier would leave a real multi-syscall window on every Codex turn
+    // (the accepted-residual note in process.js relies on the resolved path being spawned at once).
+    const command = await resolveAllowedCommand(requestedCommand, new Set(["codex"]), { trustedPaths: [trustedCommand, approvedProviderCommand("codex")] });
     processResult = await runProcess({
       command,
       args,

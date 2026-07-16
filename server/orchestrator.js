@@ -271,12 +271,41 @@ async function runParallel(factories, state) {
   return outcomes.map((outcome) => outcome.value);
 }
 
-export async function stopRun(sessionId) {
+export async function stopRun(sessionId, { settleTimeoutMs = 5000 } = {}) {
   const state = activeRuns.get(sessionId);
   if (!state || !requestRunCancellation(state)) return false;
   const results = await terminateRunChildren(state);
-  await settlePendingProviders(state);
+  if (!(await settlePendingProviders(state, settleTimeoutMs))) {
+    // Providers did not settle after cancellation (e.g. a stall in the un-timed setup phase,
+    // before any child process exists to kill). Finalize the session now so it can't hang in
+    // "running"; if a straggler promise settles later, the run body's terminal claim no-ops.
+    await finalizeStalledStop(sessionId, state);
+  }
   return results.every(Boolean);
+}
+
+async function finalizeStalledStop(sessionId, state) {
+  if (!claimRunTerminal(state, "stopped", "stop_timeout")) return;
+  const emit = state.emit || (() => {});
+  try {
+    const session = await getSession(sessionId);
+    session.status = "stopped";
+    session.messages.push(makeMessage({ author: "system", content: "Run stopped by user.", phase: "stopped", mode: session.mode }));
+    await persistRunTerminal(session, state, emit);
+    emit({ type: "run_stopped", sessionId, runId: state.runId });
+  } catch (error) {
+    // Match the success-path handling: on a persist failure surface run_error (not a false
+    // run_stopped); startup reconciliation repairs the on-disk status on the next run.
+    logError("failed to finalize stalled stopped run", redact(error?.message || String(error)));
+    emit({ type: "run_error", sessionId, runId: state.runId, error: redact(error?.message || String(error)) });
+  } finally {
+    // The suspended run body's own finally will not run while its provider promise is stuck, so
+    // release its held claims here. Both closures are idempotent, so if the straggler ever settles
+    // and the run body's finally runs too, the second release is a safe no-op.
+    state.releaseProjectScope?.();
+    state.releaseActivity?.();
+    if (activeRuns.get(sessionId) === state) activeRuns.delete(sessionId);
+  }
 }
 
 export function isRunning(sessionId) {
@@ -359,6 +388,12 @@ export function runOrchestration(sessionId, request, emit) {
 
 async function runOrchestrationClaimed({ sessionId, request, validatedRequest, emit, releaseActivity }) {
   const state = createRunAttempt(validatedRequest.mode);
+  // Keep the run's emitter and resource releasers on the attempt so a stop that has to
+  // force-finalize a stalled run (see stopRun) can deliver the terminal SSE event AND release the
+  // activity/project-scope claims — the suspended run body's own finally never runs in that case,
+  // which would otherwise leave the session wedged as "busy" (409) until the process restarts.
+  state.emit = emit;
+  state.releaseActivity = releaseActivity;
   let releaseProjectScope = null;
   activeRuns.set(sessionId, state);
   const registerChild = (child) => {
@@ -381,7 +416,10 @@ async function runOrchestrationClaimed({ sessionId, request, validatedRequest, e
       catch (error) { throw new Error(`Attached project is unavailable: ${error.message}`); }
     }
     const projSnapshot = projectPath ? await projectSnapshot(projectPath) : "";
-    if (projectPath) releaseProjectScope = await registerProjectScope(session.id, projectPath);
+    if (projectPath) {
+      releaseProjectScope = await registerProjectScope(session.id, projectPath);
+      state.releaseProjectScope = releaseProjectScope;
+    }
 
     const connectorSessionId = Object.values(session.connectors || {}).some((item) => item.enabled) ? session.id : "";
 
@@ -627,7 +665,17 @@ async function runOrchestrationClaimed({ sessionId, request, validatedRequest, e
     const terminalStatus = runWasCancelled(state) ? "stopped" : "completed";
     if (claimRunTerminal(state, terminalStatus)) {
       session.status = terminalStatus;
-      await persistRunTerminal(session, state, emit);
+      try {
+        await persistRunTerminal(session, state, emit);
+      } catch (persistError) {
+        // We already own the terminal transition, so the outer catch can no longer re-claim it
+        // (claimRunTerminal is one-shot). Surface the durable-write failure as run_error here so
+        // the client still gets a terminal event; startup reconciliation repairs the on-disk
+        // status on the next run instead of the session appearing to hang.
+        logError("failed to persist completed discussion state", redact(persistError?.message || String(persistError)));
+        emit({ type: "run_error", sessionId, runId: state.runId, error: redact(persistError?.message || String(persistError)) });
+        return;
+      }
       emit({
         type: terminalStatus === "stopped" ? "run_stopped" : "run_complete",
         sessionId,

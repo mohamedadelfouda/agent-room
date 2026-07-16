@@ -90,7 +90,12 @@ function supabaseConfig() {
   const rawUrl = process.env.AGENT_ROOM_SUPABASE_URL;
   const key = process.env.AGENT_ROOM_SUPABASE_KEY;
   if (!rawUrl || !key) throw connectorError("connector_auth_unavailable", "Supabase connector is not configured", 503);
-  const url = new URL(rawUrl);
+  let url;
+  try {
+    url = new URL(rawUrl);
+  } catch {
+    throw connectorError("invalid_connector_configuration", "Supabase URL is not a valid URL", 400);
+  }
   const loopback = ["127.0.0.1", "localhost", "::1"].includes(url.hostname);
   if (url.protocol !== "https:" && !(loopback && url.protocol === "http:")) throw connectorError("invalid_connector_configuration", "Supabase URL must use HTTPS (except loopback development)", 400);
   return { url: url.toString().replace(/\/$/, ""), key };

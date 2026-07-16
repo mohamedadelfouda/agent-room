@@ -1,6 +1,6 @@
 # Agent Room Source-Run Remediation Plan
 
-**Status:** Implementation plan executed on `codex/source-run-remediation`; this document remains the acceptance and scope record.
+**Status:** Implemented on `codex/source-run-remediation` and under PR review. The §16 acceptance matrix is the sign-off checklist: its automated rows are backed by the CI gates (`pnpm check` / `test` / `lint` / `test:coverage` / `test:smoke` / `test:browser`), and each box is checked only as it is verified during review rather than assumed complete. This document remains the scope and acceptance record.
 
 **Baseline:** Start implementation from a new clean branch based on the current `origin/main`. The convergence and decision work from PR #21 must already be present.
 **Operating model:** Users clone the repository and run the browser-facing loopback server from source. Native installers and published application releases are intentionally outside this plan.
@@ -1092,6 +1092,8 @@ Proposed modules, subject to final code-shape review:
 ### Accepted residual risks
 
 Large files that remain coherent and well tested are maintenance concerns, not launch defects. They do not block completion of this plan if the risky mutable state has been extracted and no duplicate logic remains.
+
+The trusted-CLI identity check in `server/process.js` keeps an accepted time-of-check/time-of-use gap between fingerprint verification and process spawn. There is no portable way to exec a verified file handle (no `fexecve`), callers spawn the resolved path immediately (a microscopic window with no intervening await), and exploiting the gap already requires write access to the trusted CLI path — a stronger foothold than the swap itself. A copy-and-exec from a private path would be disproportionate to that risk.
 
 ### Exit gate
 

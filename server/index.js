@@ -377,7 +377,7 @@ const server = http.createServer(async (req, res) => {
     }
     if (parts[0] === "api" && parts[1] === "sessions" && parts[2] && parts[3] === "connector-actions" && parts[4] && parts[5] === "decide" && req.method === "POST") {
       const body = await readJson(req);
-      try { return json(res, 200, await decideConnectorAction(parts[2], parts[4], body.approve === true)); }
+      try { return json(res, 200, await decideConnectorAction(parts[2], parts[4], body.approve)); }
       catch (error) { return json(res, error.apiStatus || 500, apiErrorPayload(error.apiCode || "connector_action_decision_failed", error)); }
     }
     if (parts[0] === "api" && parts[1] === "sessions" && parts[2] && parts[3] === "message" && req.method === "POST") {
@@ -547,23 +547,46 @@ const server = http.createServer(async (req, res) => {
 });
 
 export const serverReady = new Promise((resolve, reject) => {
-  server.once("error", (error) => {
+  // Bail out of startup if a shutdown was requested while we were preparing. Releasing the lock
+  // here (rather than only in shutdownServer) is required because shutdownServer may have run
+  // before this async body acquired the lock, so it would not have seen it.
+  const abortIfShuttingDown = async () => {
+    if (!shuttingDown) return false;
+    await runtimeLock?.release().catch(() => {});
+    runtimeLock = null;
+    return true;
+  };
+  // Startup-only guard: covers a pre-listen failure such as EADDRINUSE. It is removed the moment
+  // the server is listening; from then on a server error must STOP the server (below), never
+  // release the lock and leave a lock-less server still serving traffic.
+  const onStartupError = (error) => {
     void Promise.resolve(runtimeLock?.release()).finally(() => {
       runtimeLock = null;
       reject(error);
     });
-  });
+  };
+  server.once("error", onStartupError);
   void (async () => {
+    if (shuttingDown) throw new Error("server_shutting_down");
     runtimeLock = await acquireRuntimeLock(rootPath(), {
       onOwnershipLost(error) { void gracefulShutdown("runtime_lock_lost", error); },
     });
+    if (await abortIfShuttingDown()) throw new Error("server_shutting_down");
     // Restore Trust & check approvals from the previous run before accepting
     // traffic, so detectAgents and absolute command paths keep working after a
     // restart without asking the user to set up again.
     configureTrustedCliStore(path.join(rootPath(), "data", "trusted-cli.json"));
     try { await hydrateTrustedProviderCommands(); }
     catch (error) { logError("trusted CLI hydrate failed", redact(error.message)); }
+    if (await abortIfShuttingDown()) throw new Error("server_shutting_down");
     server.listen(PORT, "127.0.0.1", () => {
+      // Now listening: replace the startup guard with a fatal handler. Any later operational
+      // server error goes through gracefulShutdown, which stops the server AND releases the lock,
+      // instead of the old behavior that released the lock but kept the process serving.
+      server.removeListener("error", onStartupError);
+      server.on("error", (error) => { void gracefulShutdown("server_error", error); });
+      // A shutdown that landed between the last guard and here: tear down instead of announcing ready.
+      if (shuttingDown) { void gracefulShutdown("server_shutting_down"); reject(new Error("server_shutting_down")); return; }
       const address = server.address();
       const actualPort = typeof address === "object" && address ? address.port : PORT;
       activePort = actualPort;
@@ -584,6 +607,7 @@ export const serverReady = new Promise((resolve, reject) => {
       });
     });
   })().catch(async (error) => {
+    server.removeListener("error", onStartupError);
     await runtimeLock?.release().catch(() => {});
     runtimeLock = null;
     reject(error);

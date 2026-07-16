@@ -33,15 +33,38 @@ async function linuxProcessStartToken(pid) {
   return token;
 }
 
-async function processOwnsRecordedLock(owner) {
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, Math.max(0, ms)));
+}
+
+function heartbeatFresh(stat) {
+  return Boolean(stat && Date.now() - stat.mtimeMs < CORRUPT_LOCK_STALE_MS);
+}
+
+async function processOwnsRecordedLock(owner, stat, lockPath, staleConfirmMs) {
   if (!processIsAlive(owner?.pid)) return false;
-  if (!owner.processStartToken || process.platform !== "linux") return true;
-  try {
-    return await linuxProcessStartToken(owner.pid) === owner.processStartToken;
-  } catch (error) {
-    if (error?.code === "ENOENT" && !processIsAlive(owner.pid)) return false;
-    throw runtimeLockError("runtime_lock_uncertain", "Runtime lock owner identity could not be verified");
+  if (owner.processStartToken && process.platform === "linux") {
+    try {
+      return await linuxProcessStartToken(owner.pid) === owner.processStartToken;
+    } catch (error) {
+      if (error?.code === "ENOENT" && !processIsAlive(owner.pid)) return false;
+      throw runtimeLockError("runtime_lock_uncertain", "Runtime lock owner identity could not be verified");
+    }
   }
+  // No strong identity proof (non-Linux, or a legacy record without a start token). A live PID is
+  // NOT proof of ownership: after a crash the OS can reuse the dead server's PID for an unrelated
+  // process, which would otherwise wedge the data folder until that stranger exits. Fall back to
+  // heartbeat freshness — the owner rewrites the lock file's mtime every HEARTBEAT_INTERVAL_MS.
+  if (heartbeatFresh(stat)) return true;
+  // The heartbeat looks stale but the PID is alive. Before stealing the lock from an owner that may
+  // merely have been paused (e.g. host sleep/wake, where its heartbeat timer has not fired yet),
+  // give it one more heartbeat window and re-read the mtime: a live Agent Room owner refreshes it
+  // within that window, a dead one (or an unrelated reused PID) does not. This preserves the
+  // "one writer per data directory" invariant against a bounded double-writer race.
+  await delay(staleConfirmMs);
+  if (!processIsAlive(owner.pid)) return false;
+  const confirmed = await fs.stat(lockPath).catch(() => null);
+  return heartbeatFresh(confirmed);
 }
 
 async function readLock(lockPath) {
@@ -137,6 +160,9 @@ async function createOwnedLock(lockPath, { onOwnershipLost, heartbeatIntervalMs 
 export async function acquireRuntimeLock(runtimeRoot, options = {}) {
   const requestedRoot = String(runtimeRoot || "").trim();
   if (!requestedRoot) throw runtimeLockError("runtime_lock_invalid", "Runtime directory is required");
+  // How long to wait before confirming a stale-but-alive owner is really gone (one heartbeat + a
+  // margin). Configurable so tests don't pay the full window.
+  const staleConfirmMs = options.staleConfirmMs ?? HEARTBEAT_INTERVAL_MS + 1000;
   const root = path.resolve(requestedRoot);
   await fs.mkdir(root, { recursive: true });
   const lockPath = path.join(root, LOCK_FILE_NAME);
@@ -159,7 +185,7 @@ export async function acquireRuntimeLock(runtimeRoot, options = {}) {
       observed = { owner: null, stat };
     }
 
-    if (observed.owner && await processOwnsRecordedLock(observed.owner)) {
+    if (observed.owner && await processOwnsRecordedLock(observed.owner, observed.stat, lockPath, staleConfirmMs)) {
       throw runtimeLockError("runtime_locked", "Another Agent Room server is using this data folder");
     }
 
