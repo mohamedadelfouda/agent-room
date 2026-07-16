@@ -367,6 +367,11 @@ test("2026-07-16 regression: a stop finalizes a run whose providers never settle
   // un-timed setup phase. Using a resolvable deferred (not an un-resolvable promise) lets the run
   // body unwind at the end, so the node:test runner is not left with a dangling promise.
   const releaseProviders = deferred();
+  // stopRun's settle-timeout timer is unref'd so it can't hold a shutting-down process open; in
+  // production the running HTTP server keeps the loop alive. This test has no such handle, so hold
+  // the loop open ourselves — otherwise it drains during the settle wait and node:test cancels the
+  // test with "Promise resolution is still pending" (seen on the Node 22 CI runner, not Node 24).
+  const keepLoopAlive = setInterval(() => {}, 25);
   const events = [];
   let starts = 0;
 
@@ -395,6 +400,7 @@ test("2026-07-16 regression: a stop finalizes a run whose providers never settle
     assert.equal(events.some((event) => event.type === "agent_complete"), false);
     assertSingleRunIdentity(events);
   } finally {
+    clearInterval(keepLoopAlive);
     // Release the stalled providers so the run body unwinds (their late results are discarded
     // because the run is already terminal), then await it so no pending promise outlives the test.
     releaseProviders.resolve();

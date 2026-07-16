@@ -63,8 +63,13 @@ async function processOwnsRecordedLock(owner, stat, lockPath, staleConfirmMs) {
   // "one writer per data directory" invariant against a bounded double-writer race.
   await delay(staleConfirmMs);
   if (!processIsAlive(owner.pid)) return false;
-  const confirmed = await fs.stat(lockPath).catch(() => null);
-  return heartbeatFresh(confirmed);
+  const confirmed = await readLock(lockPath).catch(() => null);
+  if (!confirmed) return false;
+  // A different token means another server already took over between our read and now — treat the
+  // lock as owned rather than stealing it. The same token with a refreshed mtime means the original
+  // owner resumed and is alive. Only a same-owner, still-stale lock is genuinely recoverable.
+  if (confirmed.owner?.token !== owner.token) return true;
+  return heartbeatFresh(confirmed.stat);
 }
 
 async function readLock(lockPath) {
@@ -189,6 +194,12 @@ export async function acquireRuntimeLock(runtimeRoot, options = {}) {
       throw runtimeLockError("runtime_locked", "Another Agent Room server is using this data folder");
     }
 
+    // Tie the takeover to the identity we just inspected: if the lock file changed between the
+    // ownership decision and here (another server refreshed or replaced it), do not move that new
+    // snapshot aside — restart the loop and re-evaluate the current owner.
+    const beforeRename = await fs.stat(lockPath).catch(() => null);
+    if (!beforeRename) continue;
+    if (observed.stat && (beforeRename.ino !== observed.stat.ino || beforeRename.mtimeMs !== observed.stat.mtimeMs)) continue;
     const stalePath = `${lockPath}.${crypto.randomUUID()}.stale`;
     try {
       await fs.rename(lockPath, stalePath);

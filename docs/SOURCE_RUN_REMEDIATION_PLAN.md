@@ -1095,6 +1095,8 @@ Large files that remain coherent and well tested are maintenance concerns, not l
 
 The trusted-CLI identity check in `server/process.js` keeps an accepted time-of-check/time-of-use gap between fingerprint verification and process spawn. There is no portable way to exec a verified file handle (no `fexecve`), callers spawn the resolved path immediately (a microscopic window with no intervening await), and exploiting the gap already requires write access to the trusted CLI path — a stronger foothold than the swap itself. A copy-and-exec from a private path would be disproportionate to that risk.
 
+The single-runtime lock in `server/runtime-lock.js` is a portable, advisory heartbeat lock, not an OS-enforced one. On Linux it verifies process identity with a start token; on Windows/macOS, where no portable start token exists, ownership falls back to heartbeat freshness plus a confirm-twice window that re-reads the lock's token before taking over, and takeover is tied to the observed lock identity (inode + mtime) so a lock another server just created is never renamed aside. The one residual is a live owner paused *longer* than the confirm window (e.g. host sleep) that resumes and writes before its own next heartbeat detects the loss and triggers `gracefulShutdown` — a bounded, self-healing window. Eliminating it entirely would require an OS advisory lock (native code) or a fencing token validated on every session write; both are disproportionate for a local, single-user, zero-dependency source server and are deferred rather than added here.
+
 ### Exit gate
 
 - mutable run/schema/lock state has one owner each;
