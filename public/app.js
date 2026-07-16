@@ -129,6 +129,17 @@ function localizeProviderRoles() {
   });
 }
 
+// First-run default: honor a saved choice, otherwise follow the browser's PRIMARY
+// language and fall back to English. Only a browser whose top preference is Arabic
+// opens in Arabic — everyone else (the open-source default audience) gets English.
+// (We deliberately read navigator.language, not navigator.languages: an English-first
+// user who merely lists Arabic as a secondary locale should still default to English.)
+function detectDefaultLang() {
+  const saved = localStorage.getItem("agent-room-lang");
+  if (STRINGS[saved]) return saved;
+  return String(navigator.language || "").toLowerCase().startsWith("ar") ? "ar" : "en";
+}
+
 function applyLang(next) {
   lang = STRINGS[next] ? next : "ar";
   document.documentElement.lang = lang;
@@ -2516,7 +2527,7 @@ document.addEventListener("keydown", (event) => {
 
 async function initialize() {
   applyShellChrome();
-  applyLang(localStorage.getItem("agent-room-lang") || "ar");
+  applyLang(detectDefaultLang());
   applyTheme(localStorage.getItem("agent-room-theme") || "dark");
   applyPreset(localStorage.getItem("agent-room-preset") || "mission");
   setView(localStorage.getItem("agent-room-view") || "decision");

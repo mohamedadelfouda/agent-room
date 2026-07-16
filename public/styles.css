@@ -453,6 +453,8 @@ details.tech pre { margin-top: 8px; background: var(--bg); border: 1px solid var
 .modal-error { color: var(--danger); font-size: 12px; }
 .modal-lg { width: min(560px, 100%); }
 .modal-sub { color: var(--muted); font-size: 13px; margin-top: -4px; }
+.onboard-lang { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 12px 0; padding: 10px 14px; border: 1px solid var(--line-soft); border-radius: 11px; background: var(--bg); }
+.onboard-lang .field-label { font-weight: 600; color: var(--text); }
 .onboard-list { display: flex; flex-direction: column; gap: 8px; }
 .onboard-row { display: flex; align-items: center; gap: 11px; padding: 12px 14px; border: 1px solid var(--line-soft); border-radius: 11px; background: var(--bg); }
 .onboard-dot { width: 10px; height: 10px; border-radius: 50%; background: var(--faint); flex: none; }
