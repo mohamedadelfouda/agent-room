@@ -1,6 +1,6 @@
 # Session Convergence and Decision Experience Stabilization
 
-Status: implemented on `codex/session-convergence-main-compatible`, based on `origin/main` at `6781be0`; validated and ready for review.
+Status: implemented and merged into the current mainline behavior. This file is a decision and implementation record, not a branch handoff.
 
 This stabilization is the prerequisite for the provider and protocol work proposed in `docs/MULTI_AGENT_SESSION_MODES_PLAN.md`.
 

@@ -49,6 +49,8 @@ test("locale formatters use explicit Arabic and English locales", () => {
 
 test("known API, connector, and decision identifiers resolve to catalog keys", () => {
   assert.equal(errorMessageKey({ code: "session_busy" }), "errorSessionBusy");
+  assert.equal(errorMessageKey({ code: "invalid_finalizer" }), "errorInvalidFinalizer");
+  assert.equal(errorMessageKey({ code: "provider_unavailable" }), "errorProviderUnavailable");
   assert.equal(errorMessageKey({ route: { reasonCode: "project_trust_required" } }), "routeProjectTrustRequired");
   assert.equal(errorMessageKey({ code: "future_error" }), "errorUnexpected");
   assert.equal(connectorLabelKey("gmail"), "connectorGmail");
@@ -60,6 +62,8 @@ test("known API, connector, and decision identifiers resolve to catalog keys", (
 
   const mappedKeys = [
     errorMessageKey({ code: "session_busy" }),
+    errorMessageKey({ code: "invalid_finalizer" }),
+    errorMessageKey({ code: "provider_unavailable" }),
     errorMessageKey({ route: { reasonCode: "project_trust_required" } }),
     connectorLabelKey("gmail"),
     ...Object.values(connectorActionKeys("gmail", "send_message")),

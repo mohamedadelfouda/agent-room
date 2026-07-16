@@ -13,8 +13,12 @@
     "package": "electron-forge package",
     "make": "electron-forge make",
     "check": "node scripts/check-syntax.mjs",
-    "test": "node --test",
-    "ci": "node scripts/check-syntax.mjs && node --test"
+    "lint": "npx --yes eslint@9.39.2 \"server/**/*.js\" \"public/**/*.js\" \"scripts/**/*.mjs\" \"test/**/*.{js,mjs}\"",
+    "test": "node --test \"test/unit/*.test.js\" \"test/git/*.test.js\"",
+    "test:coverage": "node --test --experimental-test-coverage --test-coverage-lines=75 --test-coverage-branches=70 --test-coverage-functions=70 \"test/unit/*.test.js\" \"test/git/*.test.js\"",
+    "test:browser": "node test/browser/responsive-shell.mjs",
+    "test:smoke": "node test/smoke/source-server.mjs",
+    "ci": "node scripts/check-syntax.mjs && node --test \"test/unit/*.test.js\" \"test/git/*.test.js\""
   },
   "engines": {
     "node": ">=22"
@@ -40,7 +44,6 @@
     "@electron-forge/maker-squirrel": "7.11.2",
     "@electron-forge/maker-zip": "7.11.2",
     "electron": "43.1.0",
-    "electron-winstaller": "5.4.4",
-    "lodash": "4.18.1"
+    "electron-winstaller": "5.4.4"
   }
 }

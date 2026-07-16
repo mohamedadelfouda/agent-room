@@ -138,6 +138,52 @@ test("trusted CLI approvals persist to disk and reload in a fresh process", asyn
   }
 });
 
+test("a trusted CLI is rejected after the executable at that path changes", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "ar-trusted-cli-swap-"));
+  const store = join(dir, "trusted-cli.json");
+  const binary = join(dir, process.platform === "win32" ? "codex.exe" : "codex");
+  const providerId = "swap_test";
+  writeFileSync(binary, "first executable identity");
+  if (process.platform !== "win32") {
+    const { chmodSync } = await import("node:fs");
+    chmodSync(binary, 0o755);
+  }
+  try {
+    configureTrustedCliStore(store);
+    await approveProviderCommand(providerId, binary, new Set(["codex"]));
+    writeFileSync(binary, "different executable identity");
+    await assert.rejects(
+      () => resolveAllowedCommand(binary, new Set(["codex"]), { trustedPaths: [approvedProviderCommand(providerId)] }),
+      /identity changed/,
+    );
+    await approveProviderCommand(providerId, binary, new Set(["codex"]));
+    assert.equal(await resolveAllowedCommand(binary, new Set(["codex"]), { trustedPaths: [approvedProviderCommand(providerId)] }), realpathSync(binary));
+  } finally {
+    configureTrustedCliStore("");
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("legacy path-only trusted CLI records are not hydrated", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "ar-trusted-cli-legacy-"));
+  const store = join(dir, "trusted-cli.json");
+  const binary = join(dir, process.platform === "win32" ? "codex.exe" : "codex");
+  writeFileSync(binary, "legacy executable");
+  writeFileSync(store, JSON.stringify({ legacy_test: binary }));
+  if (process.platform !== "win32") {
+    const { chmodSync } = await import("node:fs");
+    chmodSync(binary, 0o755);
+  }
+  try {
+    configureTrustedCliStore(store);
+    await hydrateTrustedProviderCommands({ allowed: new Set(["codex"]) });
+    assert.equal(approvedProviderCommand("legacy_test"), "");
+  } finally {
+    configureTrustedCliStore("");
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("a failed trusted-cli persist rolls back in-memory approval", async () => {
   const dir = mkdtempSync(join(tmpdir(), "ar-trusted-cli-rb-"));
   const binary = join(dir, process.platform === "win32" ? "codex.exe" : "codex");

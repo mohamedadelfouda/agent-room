@@ -1,4 +1,4 @@
-import { getSession, mutateSession, scratchWorkspacePath } from "./store.js";
+import { getSession, listSessions, mutateSession, scratchWorkspacePath, SKIP_SESSION_WRITE } from "./store.js";
 import { terminateProcess } from "./process.js";
 import { provider, providerIds } from "./providers/registry.js";
 import { collaborationPrompt, debatePrompt, synthesisPrompt, chatPrompt } from "./prompts.js";
@@ -6,11 +6,108 @@ import { parseAgentControl, stripAgentControl, assessRound } from "./convergence
 import { assertTrustedProject, projectSnapshot } from "./project.js";
 import fs from "node:fs/promises";
 import { CappedText } from "./output-limits.js";
-import { redact } from "./logger.js";
+import { logError, redact } from "./logger.js";
 import { registerProjectScope } from "./project-tools.js";
 import { claimSessionActivity } from "./session-activity.js";
+import { expectedApiError } from "./api-errors.js";
+import {
+  assertRunAcceptsOutput as assertAttemptAcceptsOutput,
+  claimRunTerminal,
+  createRunAttempt,
+  requestRunCancellation,
+  requestRunFailure,
+  runAcceptsOutput as attemptAcceptsOutput,
+  runAttemptRecord,
+  runInactiveError,
+  runWasCancelled,
+} from "./run-state.js";
 
 const activeRuns = new Map();
+const DISCUSSION_MODES = new Set(["chat", "collaboration", "debate"]);
+const MAX_ROLE_CODEPOINTS = 180;
+
+function invalidRequest(code, message) {
+  throw expectedApiError(code, message, 400);
+}
+
+function orchestrationMode(rawMode) {
+  const mode = String(rawMode || "collaboration").trim().toLowerCase();
+  if (!DISCUSSION_MODES.has(mode)) invalidRequest("invalid_mode", "Unsupported discussion mode");
+  return mode;
+}
+
+function orchestrationRounds(rawRounds) {
+  const rounds = rawRounds === undefined || rawRounds === "" ? 2 : Number(rawRounds);
+  if (!Number.isInteger(rounds) || rounds < 1 || rounds > 5) {
+    invalidRequest("invalid_rounds", "Rounds must be an integer from 1 to 5");
+  }
+  return rounds;
+}
+
+function orchestrationTask(content) {
+  const userTask = String(content || "").trim();
+  if (!userTask) invalidRequest("message_required", "Write a message first");
+  return userTask;
+}
+
+function orchestrationAgents(agents) {
+  if (!agents || typeof agents !== "object" || Array.isArray(agents)) {
+    invalidRequest("invalid_participants", "Agent configuration must be an object");
+  }
+  for (const [providerId, config] of Object.entries(agents)) {
+    if (config?.enabled === false) continue;
+    if (!provider(providerId)) invalidRequest("invalid_provider", `Unknown provider: ${providerId}`);
+    if (!config || typeof config !== "object" || Array.isArray(config)) {
+      invalidRequest("invalid_participants", `Invalid configuration for provider: ${providerId}`);
+    }
+  }
+  return agents;
+}
+
+function orchestrationParticipants(agents, mode) {
+  const selected = providerIds().filter((providerId) => Boolean(agents[providerId]) && agents[providerId].enabled !== false);
+  if (selected.length < 2) invalidRequest("invalid_participants", "Enable at least two providers for this mode");
+  if (mode === "debate" && selected.length !== 2) {
+    invalidRequest("invalid_debate_participants", "Debate mode requires exactly two providers");
+  }
+  for (const providerId of selected) {
+    const role = String(agents[providerId].role || "");
+    if ([...role].length > MAX_ROLE_CODEPOINTS) {
+      invalidRequest("invalid_agent_role", `Role is too long for provider: ${providerId}`);
+    }
+  }
+  return selected;
+}
+
+function orchestrationFinalizer(rawFinalizer, selected) {
+  const finalizer = String(rawFinalizer || "none").trim().toLowerCase();
+  if (finalizer !== "none" && !selected.includes(finalizer)) {
+    invalidRequest("invalid_finalizer", "Finalizer must be none or one of the selected providers");
+  }
+  return finalizer;
+}
+
+export function validateOrchestrationRequest(request) {
+  if (!request || typeof request !== "object" || Array.isArray(request)) {
+    invalidRequest("invalid_orchestration_request", "Request body must be an object");
+  }
+  const mode = orchestrationMode(request.mode);
+  const rounds = orchestrationRounds(request.rounds);
+  const userTask = orchestrationTask(request.content);
+  const agents = orchestrationAgents(request.agents);
+  const selected = orchestrationParticipants(agents, mode);
+  const finalizer = orchestrationFinalizer(request.finalizer, selected);
+  return { mode, rounds, userTask, selected, finalizer };
+}
+
+function runAcceptsOutput(sessionId, state) {
+  return attemptAcceptsOutput(activeRuns.get(sessionId), state);
+}
+
+function assertRunAcceptsOutput(sessionId, state) {
+  assertAttemptAcceptsOutput(activeRuns.get(sessionId), state);
+}
+
 function makeMessage({ author, agent, role, content, round, phase, mode }) {
   return {
     id: crypto.randomUUID(),
@@ -97,7 +194,7 @@ export function discussionOutcomeReport(outcome) {
   return terminalOutcomeReport(outcome) || unfinishedOutcomeReport(outcome);
 }
 
-export function mergeOrchestrationState(latest, session) {
+export function mergeOrchestrationContent(latest, session) {
   // Connector MCP calls and user approvals can update the same session while an
   // agent is running. Merge messages by id instead of replacing those concurrent
   // connector/decision updates with this orchestration's older snapshot.
@@ -107,24 +204,78 @@ export function mergeOrchestrationState(latest, session) {
     const time = String(a.createdAt || "").localeCompare(String(b.createdAt || ""));
     return time || String(a.id || "").localeCompare(String(b.id || ""));
   });
-  latest.status = session.status;
   latest.mode = session.mode;
   latest.settings = structuredClone(session.settings || {});
   return latest;
 }
 
-async function persistAndEmit(session, emit) {
-  await mutateSession(session.id, (latest) => {
-    mergeOrchestrationState(latest, session);
+async function persistRunProgress(session, state, emit) {
+  const persisted = await mutateSession(session.id, (latest) => {
+    if (!runAcceptsOutput(session.id, state)) return SKIP_SESSION_WRITE;
+    mergeOrchestrationContent(latest, session);
+    latest.status = session.status;
+    latest.activeRun = runAttemptRecord(state);
+    return true;
   });
-  emit({ type: "session_updated", sessionId: session.id });
+  if (persisted) emit({ type: "session_updated", sessionId: session.id, runId: state.runId });
+  return persisted;
+}
+
+async function persistRunTerminal(session, state, emit) {
+  const persisted = await mutateSession(session.id, (latest) => {
+    if (activeRuns.get(session.id) !== state || state.status !== session.status) return SKIP_SESSION_WRITE;
+    mergeOrchestrationContent(latest, session);
+    latest.status = session.status;
+    latest.activeRun = runAttemptRecord(state);
+    return true;
+  });
+  if (persisted) emit({ type: "session_updated", sessionId: session.id, runId: state.runId });
+  return persisted;
+}
+
+async function terminateRunChildren(state, options) {
+  return Promise.all([...state.children].map((child) => terminateProcess(child, options)));
+}
+
+async function settlePendingProviders(state, timeoutMs = 5000) {
+  if (state.pending.size === 0) return true;
+  let timeoutHandle;
+  const settled = Promise.allSettled([...state.pending]).then(() => true);
+  const timedOut = new Promise((resolve) => {
+    timeoutHandle = setTimeout(() => resolve(false), timeoutMs);
+    timeoutHandle.unref?.();
+  });
+  const completed = await Promise.race([settled, timedOut]);
+  clearTimeout(timeoutHandle);
+  return completed;
+}
+
+async function runParallel(factories, state) {
+  let primaryError = null;
+  const tasks = factories.map(async (factory) => {
+    try {
+      return await factory();
+    } catch (error) {
+      if (!error.runInactive && requestRunFailure(state)) {
+        primaryError = error;
+        await terminateRunChildren(state);
+      }
+      throw error;
+    }
+  });
+  const outcomes = await Promise.allSettled(tasks);
+  if (runWasCancelled(state)) throw runInactiveError(state);
+  if (primaryError) throw primaryError;
+  const rejected = outcomes.find((outcome) => outcome.status === "rejected");
+  if (rejected) throw rejected.reason;
+  return outcomes.map((outcome) => outcome.value);
 }
 
 export async function stopRun(sessionId) {
   const state = activeRuns.get(sessionId);
-  if (!state) return false;
-  state.cancelled = true;
-  const results = await Promise.all([...state.children].map((child) => terminateProcess(child)));
+  if (!state || !requestRunCancellation(state)) return false;
+  const results = await terminateRunChildren(state);
+  await settlePendingProviders(state);
   return results.every(Boolean);
 }
 
@@ -136,13 +287,16 @@ export function isRunning(sessionId) {
 // so we never leave a session stuck in "running" after the process exits.
 export async function abortAllRuns(reason = "server_shutdown") {
   for (const [sessionId, state] of activeRuns) {
-    state.cancelled = true;
+    requestRunCancellation(state);
     // Shutdown path: SIGKILL now (see terminateProcess) so a detached agent can't outlive the
     // server's ~1500ms exit, which would otherwise beat the SIGTERM→SIGKILL escalation timer.
-    await Promise.all([...state.children].map((child) => terminateProcess(child, { immediate: true })));
+    await terminateRunChildren(state, { immediate: true });
+    if (!claimRunTerminal(state, "interrupted", reason)) continue;
     try {
       await mutateSession(sessionId, (session) => {
+        if (activeRuns.get(sessionId) !== state) return;
         session.status = "interrupted";
+        session.activeRun = runAttemptRecord(state);
         session.messages.push(makeMessage({
           author: "system",
           content: `تم إيقاف التشغيل بشكل مفاجئ: ${reason}`,
@@ -150,17 +304,61 @@ export async function abortAllRuns(reason = "server_shutdown") {
           mode: session.mode,
         }));
       });
-    } catch {}
+    } catch (error) {
+      logError("failed to mark interrupted discussion", redact(error?.message || String(error)));
+    }
   }
 }
 
-export function runOrchestration(sessionId, request, emit) {
-  const releaseActivity = claimSessionActivity(sessionId, "orchestration");
-  return runOrchestrationClaimed(sessionId, request, emit, releaseActivity);
+export async function reconcileInterruptedRuns(reason = "server_restart") {
+  const summaries = await listSessions();
+  let recovered = 0;
+  for (const summary of summaries) {
+    if (summary.status !== "running") continue;
+    try {
+      const didRecover = await mutateSession(summary.id, (session) => {
+        if (session.status !== "running") return SKIP_SESSION_WRITE;
+        const now = new Date().toISOString();
+        const priorRun = session.activeRun?.runId
+          ? session.activeRun
+          : {
+              runId: crypto.randomUUID(),
+              mode: session.mode || "collaboration",
+              startedAt: session.updatedAt || now,
+            };
+        session.status = "interrupted";
+        session.activeRun = {
+          ...priorRun,
+          status: "interrupted",
+          endedAt: now,
+          interruptionReason: reason,
+        };
+        const message = makeMessage({
+          author: "system",
+          content: "The previous discussion was interrupted because the server stopped.",
+          phase: "interrupted",
+          mode: session.mode,
+        });
+        message.meta = { recovery: true, runId: priorRun.runId };
+        session.messages.push(message);
+        return true;
+      });
+      if (didRecover) recovered += 1;
+    } catch (error) {
+      logError(`failed to reconcile interrupted discussion ${summary.id}`, redact(error?.message || String(error)));
+    }
+  }
+  return recovered;
 }
 
-async function runOrchestrationClaimed(sessionId, request, emit, releaseActivity) {
-  const state = { cancelled: false, children: new Set() };
+export function runOrchestration(sessionId, request, emit) {
+  const validatedRequest = validateOrchestrationRequest(request);
+  const releaseActivity = claimSessionActivity(sessionId, "orchestration");
+  return runOrchestrationClaimed({ sessionId, request, validatedRequest, emit, releaseActivity });
+}
+
+async function runOrchestrationClaimed({ sessionId, request, validatedRequest, emit, releaseActivity }) {
+  const state = createRunAttempt(validatedRequest.mode);
   let releaseProjectScope = null;
   activeRuns.set(sessionId, state);
   const registerChild = (child) => {
@@ -170,10 +368,7 @@ async function runOrchestrationClaimed(sessionId, request, emit, releaseActivity
 
   try {
     const session = await getSession(sessionId);
-    const mode = request.mode === "debate" ? "debate" : request.mode === "chat" ? "chat" : "collaboration";
-    const rounds = Math.max(1, Math.min(5, Number(request.rounds) || 2));
-    const userTask = String(request.content || "").trim();
-    if (!userTask) throw new Error("Write a message first");
+    const { mode, rounds, userTask, selected, finalizer } = validatedRequest;
 
     // When a project is attached, planning turns read it (read-only) from its git root,
     // grounded by one shared snapshot given to BOTH agents so they start from the same view.
@@ -188,9 +383,6 @@ async function runOrchestrationClaimed(sessionId, request, emit, releaseActivity
     const projSnapshot = projectPath ? await projectSnapshot(projectPath) : "";
     if (projectPath) releaseProjectScope = await registerProjectScope(session.id, projectPath);
 
-    const selected = providerIds().filter((key) => request.agents?.[key] && request.agents[key].enabled !== false);
-    if (selected.length < 2) throw new Error("Enable at least two providers for this mode");
-    if (mode === "debate" && selected.length !== 2) throw new Error("Debate mode requires exactly two providers");
     const connectorSessionId = Object.values(session.connectors || {}).some((item) => item.enabled) ? session.id : "";
 
     session.status = "running";
@@ -203,11 +395,11 @@ async function runOrchestrationClaimed(sessionId, request, emit, releaseActivity
       phase: "mode_change",
       mode,
     }));
-    await persistAndEmit(session, emit);
-    emit({ type: "run_started", sessionId, mode, rounds });
+    if (!(await persistRunProgress(session, state, emit))) throw runInactiveError(state);
+    emit({ type: "run_started", sessionId, runId: state.runId, mode, rounds });
 
     const callAgent = async (agent, prompt, round, phase) => {
-      if (state.cancelled) throw new Error("Run stopped by user");
+      assertRunAcceptsOutput(sessionId, state);
       // Planning turns run inside the attached project (read-only) so they can read its
       // files; chat stays in the scratch workspace; unattached planning is text-only.
       const isDiscussion = phase === "collaboration" || phase === "opening" || phase === "rebuttal" || phase === "synthesis";
@@ -225,29 +417,33 @@ async function runOrchestrationClaimed(sessionId, request, emit, releaseActivity
       const role = String(cfg.role || (mode === "debate" ? "Debater" : "Collaborator"));
       const contextChars = prompt.length;
       const contextMessages = session.messages.length;
-      emit({ type: "agent_start", sessionId, agent, label: provider(agent).label, role, round, phase });
+      emit({ type: "agent_start", sessionId, runId: state.runId, agent, label: provider(agent).label, role, round, phase });
       const deltaBuffer = new CappedText();
       let result;
+      let providerPromise;
       try {
-        result = await provider(agent).run({
+        providerPromise = Promise.resolve().then(() => definition.run({
           prompt,
           config: cfg,
           cwd,
           registerChild,
           onEvent(event) {
+            if (!runAcceptsOutput(sessionId, state)) return;
             if (event.kind === "delta") {
               deltaBuffer.append(event.text);
             } else {
               const visibleEvent = event?.text ? { ...event, text: redact(event.text) } : event;
-              emit({ type: "agent_activity", sessionId, agent, event: visibleEvent, round, phase });
+              emit({ type: "agent_activity", sessionId, runId: state.runId, agent, event: visibleEvent, round, phase });
             }
           },
-        });
+        }));
+        state.pending.add(providerPromise);
+        result = await providerPromise;
       } catch (error) {
         const safeError = redact(error?.message || String(error));
         // Save any partial output, clearly labeled — never treat it as a final result.
         const partial = redact(String(error.partial || deltaBuffer.toString())).trim();
-        if (partial) {
+        if (partial && runAcceptsOutput(sessionId, state)) {
           const partialMsg = makeMessage({ author: "agent", agent, role, content: partial, round, phase, mode });
           partialMsg.meta = {
             requestedModel: cfg.model || "(default)", requestedEffort: cfg.effort || "",
@@ -256,11 +452,14 @@ async function runOrchestrationClaimed(sessionId, request, emit, releaseActivity
             outputTruncated: Boolean(error.outputTruncated),
           };
           session.messages.push(partialMsg);
-          await persistAndEmit(session, emit);
+          await persistRunProgress(session, state, emit);
         }
         error.agentLabel = provider(agent).label;
         throw error;
+      } finally {
+        if (providerPromise) state.pending.delete(providerPromise);
       }
+      assertRunAcceptsOutput(sessionId, state);
       // The CONVERGENCE control line is only requested (and only meaningful) in the
       // collaboration/debate turns — parse it for early-stop and strip it there. Chat and
       // synthesis replies never ask for it, so they're left exactly as the agent wrote them
@@ -279,8 +478,8 @@ async function runOrchestrationClaimed(sessionId, request, emit, releaseActivity
         outputTruncated: Boolean(result.outputTruncated),
       };
       session.messages.push(message);
-      await persistAndEmit(session, emit);
-      emit({ type: "agent_complete", sessionId, agent, message, providerSessionId: result.sessionId || null });
+      if (!(await persistRunProgress(session, state, emit))) throw runInactiveError(state);
+      emit({ type: "agent_complete", sessionId, runId: state.runId, agent, message, providerSessionId: result.sessionId || null });
       return message;
     };
 
@@ -293,7 +492,7 @@ async function runOrchestrationClaimed(sessionId, request, emit, releaseActivity
     if (mode === "chat") {
       // Simple chat: each agent answers the user independently, in parallel, one pass.
       const snapshot = structuredClone(session);
-      await Promise.all(selected.map((agent) => {
+      await runParallel(selected.map((agent) => () => {
         const prompt = chatPrompt({
           session: snapshot,
           agentLabel: provider(agent).label,
@@ -307,13 +506,14 @@ async function runOrchestrationClaimed(sessionId, request, emit, releaseActivity
           projectSnapshot: projSnapshot,
         });
         return callAgent(agent, prompt, 1, "chat");
-      }));
+      }), state);
     } else if (mode === "collaboration") {
       for (let round = 1; round <= rounds; round += 1) {
         if (round === 1) {
-          for (const agent of selected) {
+          const openingSession = structuredClone(session);
+          await runParallel(selected.map((agent) => () => {
             const prompt = collaborationPrompt({
-              session,
+              session: openingSession,
               agentLabel: provider(agent).label,
               role: request.agents[agent].role,
               round,
@@ -321,14 +521,14 @@ async function runOrchestrationClaimed(sessionId, request, emit, releaseActivity
               userTask,
               projectSnapshot: projSnapshot,
             });
-            await callAgent(agent, prompt, round, "collaboration");
-          }
+            return callAgent(agent, prompt, round, "collaboration");
+          }), state);
           completedRounds = round;
           continue;
         }
         const snapshot = structuredClone(session);
         const targetVersion = proposalVersion;
-        const roundMessages = await Promise.all(selected.map((agent) => {
+        const roundMessages = await runParallel(selected.map((agent) => () => {
           const prompt = collaborationPrompt({
             session: snapshot,
             agentLabel: provider(agent).label,
@@ -341,7 +541,7 @@ async function runOrchestrationClaimed(sessionId, request, emit, releaseActivity
             itemRegistry,
           });
           return callAgent(agent, prompt, round, "collaboration");
-        }));
+        }), state);
         const assessment = assessRound(roundMessages.map((message) => message.control), targetVersion, itemRegistry);
         lastAssessment = assessment;
         itemRegistry = assessment.itemRegistry;
@@ -351,7 +551,7 @@ async function runOrchestrationClaimed(sessionId, request, emit, releaseActivity
       }
     } else {
       const openingSession = structuredClone(session);
-      await Promise.all(selected.map((agent) => {
+      await runParallel(selected.map((agent) => () => {
         const opponent = selected.find((key) => key !== agent);
         const prompt = debatePrompt({
           session: openingSession,
@@ -365,13 +565,13 @@ async function runOrchestrationClaimed(sessionId, request, emit, releaseActivity
           projectSnapshot: projSnapshot,
         });
         return callAgent(agent, prompt, 1, "opening");
-      }));
+      }), state);
       completedRounds = 1;
 
       for (let round = 2; round <= rounds; round += 1) {
         const snapshot = structuredClone(session);
         const targetVersion = proposalVersion;
-        const roundMsgs = await Promise.all(selected.map((agent) => {
+        const roundMsgs = await runParallel(selected.map((agent) => () => {
           const opponent = selected.find((key) => key !== agent);
           const prompt = debatePrompt({
             session: snapshot,
@@ -387,7 +587,7 @@ async function runOrchestrationClaimed(sessionId, request, emit, releaseActivity
             itemRegistry,
           });
           return callAgent(agent, prompt, round, "rebuttal");
-        }));
+        }), state);
         const assessment = assessRound(roundMsgs.map((message) => message.control), targetVersion, itemRegistry);
         lastAssessment = assessment;
         itemRegistry = assessment.itemRegistry;
@@ -398,7 +598,7 @@ async function runOrchestrationClaimed(sessionId, request, emit, releaseActivity
     }
 
     // Persist the deterministic outcome before asking the finalizer to explain it.
-    if (!state.cancelled && mode !== "chat" && rounds >= 2 && lastAssessment) {
+    if (!runWasCancelled(state) && mode !== "chat" && rounds >= 2 && lastAssessment) {
       officialOutcome = buildDiscussionOutcome(lastAssessment, rounds, completedRounds);
       const outcomeMessage = makeMessage({
         author: "system",
@@ -408,11 +608,10 @@ async function runOrchestrationClaimed(sessionId, request, emit, releaseActivity
       });
       outcomeMessage.meta = { outcome: officialOutcome };
       session.messages.push(outcomeMessage);
-      await persistAndEmit(session, emit);
+      if (!(await persistRunProgress(session, state, emit))) throw runInactiveError(state);
     }
 
-    const finalizer = request.finalizer;
-    if (mode !== "chat" && finalizer && finalizer !== "none" && selected.includes(finalizer) && !state.cancelled) {
+    if (mode !== "chat" && finalizer && finalizer !== "none" && selected.includes(finalizer) && !runWasCancelled(state)) {
       const prompt = synthesisPrompt({
         session,
         agentLabel: provider(finalizer).label,
@@ -425,39 +624,56 @@ async function runOrchestrationClaimed(sessionId, request, emit, releaseActivity
       await callAgent(finalizer, prompt, completedRounds + 1, "synthesis");
     }
 
-    session.status = state.cancelled ? "stopped" : "completed";
-    await persistAndEmit(session, emit);
-    emit({ type: state.cancelled ? "run_stopped" : "run_complete", sessionId });
+    const terminalStatus = runWasCancelled(state) ? "stopped" : "completed";
+    if (claimRunTerminal(state, terminalStatus)) {
+      session.status = terminalStatus;
+      await persistRunTerminal(session, state, emit);
+      emit({
+        type: terminalStatus === "stopped" ? "run_stopped" : "run_complete",
+        sessionId,
+        runId: state.runId,
+      });
+    }
   } catch (error) {
     const safeError = redact(error?.message || String(error));
-    try {
-      const session = await getSession(sessionId);
-      session.status = state.cancelled ? "stopped" : "error";
-      const failMsg = makeMessage({
-        author: "system",
-        content: state.cancelled ? "Run stopped by user." : `فشل التشغيل: ${safeError}`,
-        phase: state.cancelled ? "stopped" : "error",
-        mode: session.mode,
-      });
-      if (!state.cancelled) {
-        failMsg.meta = {
-          status: "error",
-          error: safeError,
-          agent: error.agentLabel || null,
-          durationMs: error.durationMs ?? null,
-          technical: error.technical ? redact(String(error.technical)).slice(0, 6000) : null,
-        };
+    const terminalStatus = runWasCancelled(state) ? "stopped" : "error";
+    if (claimRunTerminal(state, terminalStatus)) {
+      try {
+        const session = await getSession(sessionId);
+        session.status = terminalStatus;
+        const failMsg = makeMessage({
+          author: "system",
+          content: terminalStatus === "stopped" ? "Run stopped by user." : `فشل التشغيل: ${safeError}`,
+          phase: terminalStatus,
+          mode: session.mode,
+        });
+        if (terminalStatus !== "stopped") {
+          failMsg.meta = {
+            status: "error",
+            error: safeError,
+            agent: error.agentLabel || null,
+            durationMs: error.durationMs ?? null,
+            technical: error.technical ? redact(String(error.technical)).slice(0, 6000) : null,
+          };
+        }
+        session.messages.push(failMsg);
+        await persistRunTerminal(session, state, emit);
+      } catch (persistenceError) {
+        logError("failed to persist terminal discussion state", redact(persistenceError?.message || String(persistenceError)));
       }
-      session.messages.push(failMsg);
-      await persistAndEmit(session, emit);
-    } catch {}
-    emit({ type: state.cancelled ? "run_stopped" : "run_error", sessionId, error: safeError });
+      emit({
+        type: terminalStatus === "stopped" ? "run_stopped" : "run_error",
+        sessionId,
+        runId: state.runId,
+        error: safeError,
+      });
+    }
   } finally {
     try {
       releaseProjectScope?.();
       await Promise.all([...state.children].map((child) => terminateProcess(child)));
     } finally {
-      activeRuns.delete(sessionId);
+      if (activeRuns.get(sessionId) === state) activeRuns.delete(sessionId);
       releaseActivity();
     }
   }

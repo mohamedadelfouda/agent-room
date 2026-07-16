@@ -1,4 +1,5 @@
 import fs from "node:fs/promises";
+import { constants as fsConstants } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { approvedProviderCommand, runProcess, validateOption, resolveAllowedCommand } from "../process.js";
@@ -95,15 +96,25 @@ function isolatedCodexConfig(cwd, projectRoot) {
 
 async function copyCodexAuth(isolatedHome, sourceEnv) {
   const sourceAuth = path.join(codexHomeFrom(sourceEnv), "auth.json");
+  let handle;
   try {
-    const stat = await fs.stat(sourceAuth);
-    if (!stat.isFile()) throw new Error("Codex auth.json is not a regular file");
-    if (stat.size > MAX_CODEX_AUTH_BYTES) throw new Error("Codex auth.json is unexpectedly large");
-    const auth = await fs.readFile(sourceAuth);
+    const pathStat = await fs.lstat(sourceAuth);
+    if (!pathStat.isFile() || pathStat.isSymbolicLink()) throw new Error("Codex auth.json is not a regular file");
+    handle = await fs.open(sourceAuth, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW || 0));
+    const openedStat = await handle.stat();
+    if (!openedStat.isFile() || openedStat.dev !== pathStat.dev || openedStat.ino !== pathStat.ino) {
+      throw new Error("Codex auth.json changed before it could be isolated");
+    }
+    if (openedStat.size > MAX_CODEX_AUTH_BYTES) throw new Error("Codex auth.json is unexpectedly large");
+    const auth = await handle.readFile();
+    const afterStat = await handle.stat();
+    if (afterStat.size !== openedStat.size || afterStat.mtimeMs !== openedStat.mtimeMs) {
+      throw new Error("Codex auth.json changed while it was being isolated");
+    }
     await fs.writeFile(path.join(isolatedHome, "auth.json"), auth, { mode: 0o600 });
   } catch (error) {
     if (error.code !== "ENOENT") throw error;
-  }
+  } finally { await handle?.close().catch(() => {}); }
 }
 
 export async function prepareIsolatedCodexHome({ tempDir, cwd, sourceEnv = process.env }) {

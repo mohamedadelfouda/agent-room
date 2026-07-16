@@ -1,8 +1,12 @@
 # Mission Control UI — Handoff
 
-Branch: `ui/mission-control` · Base: `main` · Status: **JS wiring complete — decision room is live and verified**
+> Archived 2026-07-16. This document records an earlier implementation handoff.
+> It is not a current source of truth; see [Architecture](../ARCHITECTURE.md) and
+> the live code under `public/` for current behavior.
 
-This document is the single source of truth for the "Mission Control" UI. The
+Historical branch: `ui/mission-control` · Historical base: `main`
+
+This document was the working handoff for the "Mission Control" UI. The
 "Remaining work" section below has been superseded by **"Completion log"** at the
 end — read that first. Read the rest for the binding map and design decisions.
 

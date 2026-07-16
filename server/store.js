@@ -2,12 +2,21 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
+import {
+  CURRENT_SESSION_SCHEMA_VERSION,
+  migrateSessionDocument,
+  validateSessionDocument,
+} from "./session-schema.js";
+import { expectedApiError } from "./api-errors.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, "..");
 const RUNTIME_ROOT = process.env.AGENT_ROOM_RUNTIME_DIR ? path.resolve(process.env.AGENT_ROOM_RUNTIME_DIR) : ROOT;
 const DATA_DIR = path.join(RUNTIME_ROOT, "data");
 const SESSIONS_DIR = path.join(DATA_DIR, "sessions");
+const SESSION_BACKUPS_DIR = path.join(DATA_DIR, "session-backups");
+const SESSION_RECOVERY_DIR = path.join(DATA_DIR, "session-recovery");
+const SESSION_BACKUP_LIMIT = 3;
 const TITLE_MAX_CODEPOINTS = 160;
 
 // `String.slice` counts UTF-16 code units, which can split a surrogate pair (e.g. an
@@ -22,8 +31,10 @@ const MAX_MESSAGE_CHARS = 100000;
 const MAX_DECISIONS = 200;
 const MAX_EXECUTIONS = 50;
 const MAX_CONNECTOR_ACTIONS = 100;
+const MAX_CONNECTOR_READ_AUDITS = 200;
 const MAX_SESSION_BYTES = 24 * 1024 * 1024;
 const TERMINAL_EXECUTION_STATUSES = new Set(["merged", "pr_opened", "rejected", "blocked_secret"]);
+export const SKIP_SESSION_WRITE = Symbol("skip-session-write");
 
 function executionNeedsRecovery(record) {
   return !TERMINAL_EXECUTION_STATUSES.has(record.status) || record.cleanupPending !== false || !record.cleanupCompletedAt;
@@ -116,6 +127,9 @@ function boundSession(session) {
       (record) => ["pending", "executing_unknown"].includes(record.status),
     ).map(boundConnectorAction);
   }
+  if (Array.isArray(session.connectorReadAudits)) {
+    session.connectorReadAudits = session.connectorReadAudits.slice(-MAX_CONNECTOR_READ_AUDITS).map(boundConnectorReadAudit);
+  }
   session.settings = boundedJson(session.settings, 100000, (preview) => ({ truncated: true, preview }));
   session.connectors = boundedJson(session.connectors, 50000, (preview) => ({ truncated: true, preview }));
   if (Buffer.byteLength(JSON.stringify(session, null, 2), "utf8") > MAX_SESSION_BYTES) {
@@ -138,6 +152,9 @@ function boundSession(session) {
     if (Array.isArray(session.connectorActions)) {
       session.connectorActions = retainTerminalHistory(session.connectorActions, 20, (record) => ["pending", "executing_unknown"].includes(record.status)).map((record) => ({ ...record, result: boundedText(record.result, 10000) }));
     }
+    if (Array.isArray(session.connectorReadAudits)) {
+      session.connectorReadAudits = session.connectorReadAudits.slice(-50).map(boundConnectorReadAudit);
+    }
     if (Array.isArray(session.messages)) session.messages = session.messages.slice(-100);
   }
   const storedBytes = Buffer.byteLength(JSON.stringify(session, null, 2), "utf8");
@@ -150,6 +167,7 @@ function boundSession(session) {
 function sessionSummary(session) {
   return {
     id: session.id,
+    sessionSchemaVersion: session.sessionSchemaVersion,
     title: session.title,
     status: session.status,
     mode: session.mode,
@@ -162,7 +180,22 @@ function sessionSummary(session) {
 }
 
 async function ensureDirs() {
-  await fs.mkdir(SESSIONS_DIR, { recursive: true });
+  await Promise.all([
+    fs.mkdir(SESSIONS_DIR, { recursive: true }),
+    fs.mkdir(SESSION_BACKUPS_DIR, { recursive: true }),
+    fs.mkdir(SESSION_RECOVERY_DIR, { recursive: true }),
+  ]);
+}
+
+function boundConnectorReadAudit(record) {
+  return {
+    ...record,
+    connector: boundedText(record.connector, 100),
+    action: boundedText(record.action, 200),
+    status: boundedText(record.status, 40),
+    errorCode: boundedText(record.errorCode, 120),
+    inputSummary: boundedJson(record.inputSummary, 20000, (preview) => ({ truncated: true, preview })),
+  };
 }
 
 function sessionPath(id) {
@@ -197,12 +230,114 @@ async function replaceJson(filePath, data) {
   }
 }
 
+async function retainRecentBackups(sessionId) {
+  const prefix = `${sessionId}.`;
+  const backups = (await fs.readdir(SESSION_BACKUPS_DIR))
+    .filter((name) => name.startsWith(prefix) && name.endsWith(".json"))
+    .sort()
+    .reverse();
+  await Promise.all(backups.slice(SESSION_BACKUP_LIMIT).map((name) => fs.rm(path.join(SESSION_BACKUPS_DIR, name), { force: true })));
+}
+
+async function backUpSessionSource(sessionId, rawText, fromVersion) {
+  await fs.mkdir(SESSION_BACKUPS_DIR, { recursive: true });
+  const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const backupPath = path.join(
+    SESSION_BACKUPS_DIR,
+    `${sessionId}.${timestamp}.v${fromVersion}.${crypto.randomUUID()}.json`,
+  );
+  await fs.writeFile(backupPath, rawText, { encoding: "utf8", flag: "wx", mode: 0o600 });
+  return backupPath;
+}
+
+async function readSessionFile(filePath, sessionId) {
+  const rawText = await fs.readFile(filePath, "utf8");
+  let parsed;
+  try {
+    parsed = JSON.parse(rawText);
+  } catch (error) {
+    error.code = "invalid_session_json";
+    throw error;
+  }
+  const migrated = migrateSessionDocument(parsed, sessionId);
+  if (migrated.migrated) {
+    await backUpSessionSource(sessionId, rawText, migrated.fromVersion);
+    await replaceJson(filePath, migrated.session);
+    await retainRecentBackups(sessionId);
+  }
+  return migrated.session;
+}
+
+function recoveryIdFor(fileName) {
+  return crypto.createHash("sha256").update(fileName).digest("hex").slice(0, 32);
+}
+
+function recoveryCategory(error) {
+  if (error?.code === "invalid_session_json") return "invalid_json";
+  if (error?.code === "unsupported_session_schema") return "unsupported_schema";
+  if (error?.code === "invalid_session_schema") return "invalid_schema";
+  return "read_error";
+}
+
+function recoveryRecordPath(recoveryId) {
+  if (!/^[a-f0-9]{32}$/.test(recoveryId)) throw new Error("Invalid recovery id");
+  return path.join(SESSION_RECOVERY_DIR, `${recoveryId}.json`);
+}
+
+async function ensureRecoveryRecord(fileName, error) {
+  const recoveryId = recoveryIdFor(fileName);
+  const recordPath = recoveryRecordPath(recoveryId);
+  try {
+    return JSON.parse(await fs.readFile(recordPath, "utf8"));
+  } catch (readError) {
+    if (readError?.code !== "ENOENT") throw readError;
+  }
+  const record = {
+    recoveryId,
+    fileName: path.basename(fileName),
+    category: recoveryCategory(error),
+    detectedAt: new Date().toISOString(),
+  };
+  try {
+    await fs.writeFile(recordPath, JSON.stringify(record, null, 2), { encoding: "utf8", flag: "wx", mode: 0o600 });
+    return record;
+  } catch (writeError) {
+    if (writeError?.code !== "EEXIST") throw writeError;
+    return JSON.parse(await fs.readFile(recordPath, "utf8"));
+  }
+}
+
+function recoverySummary(record) {
+  return {
+    id: `recovery-${record.recoveryId}`,
+    recoveryId: record.recoveryId,
+    recoveryNeeded: true,
+    title: "Session needs recovery",
+    status: "recovery_needed",
+    mode: "recovery",
+    updatedAt: record.detectedAt,
+    messageCount: 0,
+    recoveryCategory: record.category,
+  };
+}
+
+function recoverySourcePath(record) {
+  const sourcePath = path.resolve(SESSIONS_DIR, record.fileName);
+  if (path.dirname(sourcePath) !== path.resolve(SESSIONS_DIR)) throw new Error("Invalid recovery source");
+  return sourcePath;
+}
+
+async function clearRecoveryRecord(fileName) {
+  await fs.rm(recoveryRecordPath(recoveryIdFor(fileName)), { force: true });
+}
+
 function summaryPath(filePath) {
   return filePath.replace(/\.json$/i, ".summary.json");
 }
 
 async function doWrite(filePath, data) {
   boundSession(data);
+  validateSessionDocument(data, data.id);
   await replaceJson(filePath, data);
   // The transcript is the transaction. The compact sidebar summary is only a
   // cache: a cache write failure must never make callers retry a durable action.
@@ -237,18 +372,88 @@ export async function listSessions() {
         const [mainStat, summaryStat] = await Promise.all([fs.stat(mainPath, { bigint: true }), fs.stat(cachedPath, { bigint: true })]);
         if (summaryStat.mtimeNs <= mainStat.mtimeNs) throw new Error("stale summary cache");
         summary = JSON.parse(await fs.readFile(cachedPath, "utf8"));
+        if (summary.sessionSchemaVersion !== CURRENT_SESSION_SCHEMA_VERSION) throw new Error("stale summary schema");
       }
       catch {
-        const session = JSON.parse(await fs.readFile(mainPath, "utf8"));
+        const sessionId = file.replace(/\.json$/i, "");
+        const session = await runExclusive(mainPath, () => readSessionFile(mainPath, sessionId));
         summary = sessionSummary(session);
         await replaceJson(summaryPath(mainPath), summary).catch(() => {});
       }
+      await clearRecoveryRecord(file).catch(() => {});
       sessions.push(summary);
-    } catch {
-      // Ignore a partially copied/corrupt file and leave it for manual recovery.
+    } catch (error) {
+      let record;
+      try { record = await ensureRecoveryRecord(file, error); }
+      catch {
+        record = {
+          recoveryId: recoveryIdFor(file),
+          fileName: path.basename(file),
+          category: recoveryCategory(error),
+          detectedAt: new Date().toISOString(),
+        };
+      }
+      sessions.push(recoverySummary(record));
     }
   }
   return sessions.sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
+}
+
+export async function listSessionRecoveries() {
+  await ensureDirs();
+  const files = (await fs.readdir(SESSION_RECOVERY_DIR)).filter((file) => /^[a-f0-9]{32}\.json$/.test(file));
+  const records = [];
+  for (const file of files) {
+    try { records.push(JSON.parse(await fs.readFile(path.join(SESSION_RECOVERY_DIR, file), "utf8"))); }
+    catch { /* Keep an unreadable recovery record isolated from healthy sessions. */ }
+  }
+  return records.sort((a, b) => String(b.detectedAt).localeCompare(String(a.detectedAt)));
+}
+
+async function readRecoveryRecord(recoveryId) {
+  try { return JSON.parse(await fs.readFile(recoveryRecordPath(recoveryId), "utf8")); }
+  catch (error) {
+    if (error?.code === "ENOENT") throw expectedApiError("not_found", "Recovery record not found", 404);
+    throw error;
+  }
+}
+
+export async function exportSessionRecovery(recoveryId) {
+  await ensureDirs();
+  const record = await readRecoveryRecord(recoveryId);
+  const sourcePath = recoverySourcePath(record);
+  const info = await fs.stat(sourcePath);
+  return { fileName: record.fileName, sourcePath, size: info.size };
+}
+
+export async function retrySessionRecovery(recoveryId) {
+  await ensureDirs();
+  const recordPath = recoveryRecordPath(recoveryId);
+  return runExclusive(recordPath, async () => {
+    const record = await readRecoveryRecord(recoveryId);
+    const sessionId = record.fileName.replace(/\.json$/i, "");
+    const sourcePath = recoverySourcePath(record);
+    return runExclusive(sourcePath, async () => {
+      const session = await readSessionFile(sourcePath, sessionId);
+      await clearRecoveryRecord(record.fileName);
+      return sessionSummary(session);
+    });
+  });
+}
+
+export async function deleteSessionRecovery(recoveryId) {
+  await ensureDirs();
+  const recordPath = recoveryRecordPath(recoveryId);
+  return runExclusive(recordPath, async () => {
+    const record = await readRecoveryRecord(recoveryId);
+    const sourcePath = recoverySourcePath(record);
+    return runExclusive(sourcePath, async () => {
+      await fs.rm(sourcePath, { force: true });
+      await fs.rm(summaryPath(sourcePath), { force: true });
+      await fs.rm(recordPath, { force: true });
+      return { recoveryId, deleted: true };
+    });
+  });
 }
 
 export async function createSession(title = "جلسة جديدة") {
@@ -256,6 +461,7 @@ export async function createSession(title = "جلسة جديدة") {
   const now = new Date().toISOString();
   const session = {
     id: crypto.randomUUID(),
+    sessionSchemaVersion: CURRENT_SESSION_SCHEMA_VERSION,
     title: truncateTitle(String(title || "جلسة جديدة").trim()),
     status: "idle",
     mode: "collaboration",
@@ -264,6 +470,7 @@ export async function createSession(title = "جلسة جديدة") {
     messages: [],
     decisions: [],
     settings: {},
+    activeRun: null,
   };
   await atomicWrite(sessionPath(session.id), session);
   return session;
@@ -271,8 +478,8 @@ export async function createSession(title = "جلسة جديدة") {
 
 export async function getSession(id) {
   await ensureDirs();
-  const raw = await fs.readFile(sessionPath(id), "utf8");
-  return JSON.parse(raw);
+  const filePath = sessionPath(id);
+  return runExclusive(filePath, () => readSessionFile(filePath, id));
 }
 
 export async function saveSession(session) {
@@ -292,7 +499,7 @@ export async function addMessage(id, message) {
   // addMessage calls can't both read the same state and clobber each other's message.
   // (Use doWrite, not saveSession, inside the lock to avoid re-entering runExclusive.)
   await runExclusive(filePath, async () => {
-    const session = await getSession(id);
+    const session = await readSessionFile(filePath, id);
     session.messages.push(saved);
     session.updatedAt = new Date().toISOString();
     await doWrite(filePath, session);
@@ -314,8 +521,9 @@ export async function mutateSession(id, mutate) {
   const filePath = sessionPath(id);
   return runExclusive(filePath, async () => {
     await ensureDirs();
-    const session = JSON.parse(await fs.readFile(filePath, "utf8"));
+    const session = await readSessionFile(filePath, id);
     const result = await mutate(session);
+    if (result === SKIP_SESSION_WRITE) return false;
     session.updatedAt = new Date().toISOString();
     await doWrite(filePath, session);
     return result === undefined ? session : result;
@@ -340,7 +548,7 @@ export async function deleteSession(id, { isBusy } = {}) {
   return runExclusive(filePath, async () => {
     let session;
     try {
-      session = JSON.parse(await fs.readFile(filePath, "utf8"));
+      session = await readSessionFile(filePath, id);
     } catch (error) {
       if (error.code === "ENOENT") {
         const missing = new Error("Session not found");

@@ -3,8 +3,14 @@ import { getSession, mutateSession } from "../store.js";
 import { connector, executeConnectorAction } from "./registry.js";
 import { recordDecision } from "../decisions.js";
 import { logError, redact } from "../logger.js";
+import { expectedApiError } from "../api-errors.js";
 
 const CREDENTIAL_FIELD_PARTS = new Set(["auth", "authorization", "credential", "credentials", "key", "password", "secret", "token"]);
+const OMITTED_AUDIT_FIELDS = new Set(["body", "content", "html", "message", "raw", "text"]);
+
+function connectorError(code, message, status) {
+  return expectedApiError(code, message, status);
+}
 
 function credentialField(name) {
   const separated = String(name).replace(/([a-z0-9])([A-Z])/g, "$1_$2").toLowerCase();
@@ -27,44 +33,95 @@ function safeStoredResult(result, maxChars = 100000) {
   return (JSON.stringify(safeStructuredResult(result)) ?? "null").slice(0, maxChars);
 }
 
+function auditInputSummary(value, fieldName = "", depth = 0) {
+  if (fieldName && credentialField(fieldName)) return "<redacted>";
+  if (fieldName && OMITTED_AUDIT_FIELDS.has(fieldName.toLowerCase())) {
+    let serialized;
+    try { serialized = typeof value === "string" ? value : JSON.stringify(value); }
+    catch { serialized = ""; }
+    return `<omitted:${Buffer.byteLength(serialized ?? "", "utf8")}>`;
+  }
+  if (depth > 5) return "<omitted:depth>";
+  if (typeof value === "string") {
+    return redact(value).slice(0, 500);
+  }
+  if (Array.isArray(value)) return value.slice(0, 20).map((entry) => auditInputSummary(entry, "", depth + 1));
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value).slice(0, 30).map(([key, entry]) => [key, auditInputSummary(entry, key, depth + 1)]));
+  }
+  return value;
+}
+
 function enabledConnector(session, connectorId) {
   const definition = connector(connectorId);
-  if (!definition) throw new Error("Unknown connector");
-  if (session.connectors?.[connectorId]?.enabled !== true) throw new Error(`${definition.label} connector is not enabled for this session`);
-  if (session.project?.path && session.project.trusted !== true) throw new Error("Connectors stay disabled while the attached project is untrusted");
+  if (!definition) throw connectorError("invalid_connector", "Unknown connector", 400);
+  if (session.connectors?.[definition.id]?.enabled !== true) throw connectorError("connector_disabled", `${definition.label} connector is not enabled for this session`, 409);
+  if (session.project?.path && session.project.trusted !== true) throw connectorError("connector_project_untrusted", "Connectors stay disabled while the attached project is untrusted", 409);
   return definition;
 }
 
 export async function setConnectorEnabled(sessionId, connectorId, enabled) {
   const definition = connector(connectorId);
-  if (!definition) throw new Error("Unknown connector");
+  if (!definition) throw connectorError("invalid_connector", "Unknown connector", 400);
   return mutateSession(sessionId, (session) => {
     session.connectors ||= {};
-    session.connectors[connectorId] = { enabled: enabled === true, changedAt: new Date().toISOString() };
-    recordDecision(session, { type: "connector", outcome: enabled === true ? "enabled" : "disabled", metadata: { connector: connectorId } });
-    return structuredClone(session.connectors[connectorId]);
+    session.connectors[definition.id] = { enabled: enabled === true, changedAt: new Date().toISOString() };
+    recordDecision(session, { type: "connector", outcome: enabled === true ? "enabled" : "disabled", metadata: { connector: definition.id } });
+    return structuredClone(session.connectors[definition.id]);
   });
 }
 
 export async function requestConnectorAction(sessionId, connectorId, actionId, input = {}) {
-  const serializedInput = JSON.stringify(input);
-  if (Buffer.byteLength(serializedInput, "utf8") > 65536) throw new Error("Connector input exceeds the 64 KiB approval limit");
+  let serializedInput;
+  try { serializedInput = JSON.stringify(input); }
+  catch { throw connectorError("invalid_connector_input", "Connector input must be JSON serializable", 400); }
+  if (serializedInput === undefined) throw connectorError("invalid_connector_input", "Connector input must be a JSON value", 400);
+  if (Buffer.byteLength(serializedInput, "utf8") > 65536) throw connectorError("connector_input_too_large", "Connector input exceeds the 64 KiB approval limit", 400);
   const session = await getSession(sessionId);
   const definition = enabledConnector(session, connectorId);
-  if (!Object.hasOwn(definition.actions, actionId)) throw new Error("Unknown connector action");
+  const canonicalConnectorId = definition.id;
+  if (!Object.hasOwn(definition.actions, actionId)) throw connectorError("connector_action_not_found", "Unknown connector action", 404);
   const action = definition.actions[actionId];
   if (!action.stateChanging) {
-    const result = await executeConnectorAction(connectorId, actionId, input);
-    return { status: "completed", result: safeStructuredResult(result) };
+    const audit = {
+      id: crypto.randomUUID(), sessionId, connector: canonicalConnectorId, action: actionId,
+      status: "running", requestedAt: new Date().toISOString(), inputSummary: auditInputSummary(input),
+    };
+    await mutateSession(sessionId, (latest) => {
+      enabledConnector(latest, canonicalConnectorId);
+      latest.connectorReadAudits ||= [];
+      latest.connectorReadAudits.push(audit);
+    });
+    try {
+      const result = await executeConnectorAction(canonicalConnectorId, actionId, input);
+      await mutateSession(sessionId, (latest) => {
+        const record = latest.connectorReadAudits?.find((item) => item.id === audit.id);
+        if (record) Object.assign(record, { status: "completed", completedAt: new Date().toISOString() });
+      });
+      return { status: "completed", auditId: audit.id, result: safeStructuredResult(result) };
+    } catch (error) {
+      try {
+        await mutateSession(sessionId, (latest) => {
+          const record = latest.connectorReadAudits?.find((item) => item.id === audit.id);
+          if (record) Object.assign(record, {
+            status: "failed", completedAt: new Date().toISOString(),
+            errorCode: error?.apiCode || "connector_dependency_unavailable",
+          });
+        });
+      } catch (stateError) {
+        logError("connector read audit failure could not be saved", stateError.message);
+      }
+      throw error;
+    }
   }
   return mutateSession(sessionId, (latest) => {
-    enabledConnector(latest, connectorId);
+    enabledConnector(latest, canonicalConnectorId);
     latest.connectorActions ||= [];
     if (latest.connectorActions.filter((item) => ["pending", "executing_unknown"].includes(item.status)).length >= 50) {
-      throw new Error("Resolve existing connector proposals before creating more");
+      throw connectorError("connector_proposal_limit", "Resolve existing connector proposals before creating more", 409);
     }
     const proposal = {
-      id: crypto.randomUUID(), connector: connectorId, action: actionId, input: structuredClone(input),
+      id: crypto.randomUUID(), connector: canonicalConnectorId, action: actionId, input: structuredClone(input),
       status: "pending", createdAt: new Date().toISOString(),
     };
     latest.connectorActions.push(proposal);
@@ -73,11 +130,11 @@ export async function requestConnectorAction(sessionId, connectorId, actionId, i
 }
 
 export async function decideConnectorAction(sessionId, actionId, approve) {
-  if (approve !== true && approve !== false) throw new Error("Connector approval must be a boolean");
+  if (approve !== true && approve !== false) throw connectorError("invalid_connector_decision", "Connector approval must be a boolean", 400);
   const claim = await mutateSession(sessionId, (session) => {
     const proposal = (session.connectorActions || []).find((item) => item.id === actionId);
-    if (!proposal) throw new Error("Connector action not found");
-    if (proposal.status !== "pending") throw new Error(`Connector action is already ${proposal.status}`);
+    if (!proposal) throw connectorError("connector_action_not_found", "Connector action not found", 404);
+    if (proposal.status !== "pending") throw connectorError("connector_action_already_decided", `Connector action is already ${proposal.status}`, 409);
     enabledConnector(session, proposal.connector);
     proposal.decidedAt = new Date().toISOString();
     if (approve !== true) {

@@ -8,11 +8,13 @@ Use Node.js 22+ and pnpm 10.12.1 (pinned in `package.json`).
 
 ```bash
 corepack enable
-pnpm install --frozen-lockfile
+pnpm install --frozen-lockfile --ignore-scripts
 pnpm run ci
+pnpm lint
+pnpm test:coverage
 ```
 
-Use `pnpm desktop` for the Electron app or `pnpm start` for the browser-only server.
+Use `pnpm start` for the browser-facing source server. Run `pnpm test:browser` with system Chrome/Edge and `pnpm test:smoke` for the loopback startup check.
 
 ## Change boundaries
 

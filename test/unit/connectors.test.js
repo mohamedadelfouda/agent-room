@@ -103,12 +103,24 @@ test("read-only connector results preserve structure while redacting credentials
   });
   try {
     await setConnectorEnabled(session.id, "gmail", true);
-    const completed = await requestConnectorAction(session.id, "gmail", "list_messages", {});
+    const completed = await requestConnectorAction(session.id, "gmail", "list_messages", {
+      query: `TOKEN="${credential}"`, accessToken: "input-secret", body: "private message body",
+      content: { nested: "private structured content" },
+    });
     assert.ok(Array.isArray(completed.result.messages));
     assert.equal(completed.result.messages[0].snippet, "TOKEN=<redacted>");
     assert.equal(completed.result.messages[0].metadata.accessToken, "<redacted>");
     assert.equal(completed.result.messages[0].metadata.label, "visible");
     assert.equal(JSON.stringify(completed).includes(credential), false);
+    const saved = await getSession(session.id);
+    const audit = saved.connectorReadAudits.find((item) => item.id === completed.auditId);
+    assert.equal(audit.status, "completed");
+    assert.equal(audit.inputSummary.accessToken, "<redacted>");
+    assert.match(audit.inputSummary.body, /^<omitted:/);
+    assert.match(audit.inputSummary.content, /^<omitted:/);
+    assert.doesNotMatch(JSON.stringify(audit), /private structured content/);
+    assert.equal(JSON.stringify(audit).includes(credential), false);
+    assert.equal(Object.hasOwn(audit, "result"), false);
   } finally {
     globalThis.fetch = previousFetch;
     if (previousToken === undefined) delete process.env.AGENT_ROOM_GMAIL_ACCESS_TOKEN;
@@ -161,7 +173,10 @@ test("malformed success response leaves an approved connector action failed", as
   try {
     await setConnectorEnabled(session.id, "gmail", true);
     const proposal = await requestConnectorAction(session.id, "gmail", "send_message", { to: "user@example.com", subject: "Hello", body: "Body" });
-    await assert.rejects(() => decideConnectorAction(session.id, proposal.id, true), SyntaxError);
+    await assert.rejects(
+      () => decideConnectorAction(session.id, proposal.id, true),
+      (error) => error.apiCode === "connector_dependency_unavailable" && error.apiStatus === 503,
+    );
     const saved = await getSession(session.id);
     assert.equal(saved.connectorActions.find((item) => item.id === proposal.id).status, "failed_after_approval");
   } finally {
@@ -170,6 +185,58 @@ test("malformed success response leaves an approved connector action failed", as
     else process.env.AGENT_ROOM_GMAIL_ACCESS_TOKEN = previousToken;
     await cleanup(session.id);
   }
+});
+
+test("connector identifiers are stored canonically", async () => {
+  const session = await createSession("connector-canonical-id-test");
+  try {
+    await setConnectorEnabled(session.id, "GITHUB", true);
+    const saved = await getSession(session.id);
+    assert.equal(saved.connectors.github.enabled, true);
+    assert.equal(saved.connectors.GITHUB, undefined);
+  } finally { await cleanup(session.id); }
+});
+
+test("failed read-only connector calls retain only bounded audit metadata", async () => {
+  const session = await createSession("gmail-read-audit-failure-test");
+  const previousToken = process.env.AGENT_ROOM_GMAIL_ACCESS_TOKEN;
+  const previousFetch = globalThis.fetch;
+  process.env.AGENT_ROOM_GMAIL_ACCESS_TOKEN = "placeholder-token";
+  globalThis.fetch = async () => new Response(JSON.stringify({ error: { message: "expired token response body" } }), {
+    status: 401, headers: { "Content-Type": "application/json" },
+  });
+  try {
+    await setConnectorEnabled(session.id, "gmail", true);
+    await assert.rejects(
+      () => requestConnectorAction(session.id, "gmail", "list_messages", { accessToken: "never-store-this" }),
+      (error) => error.apiCode === "connector_auth_unavailable" && error.apiStatus === 503,
+    );
+    const saved = await getSession(session.id);
+    assert.equal(saved.connectorReadAudits.length, 1);
+    assert.equal(saved.connectorReadAudits[0].status, "failed");
+    assert.equal(saved.connectorReadAudits[0].errorCode, "connector_auth_unavailable");
+    assert.equal(JSON.stringify(saved.connectorReadAudits).includes("expired token response body"), false);
+    assert.equal(JSON.stringify(saved.connectorReadAudits).includes("never-store-this"), false);
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousToken === undefined) delete process.env.AGENT_ROOM_GMAIL_ACCESS_TOKEN;
+    else process.env.AGENT_ROOM_GMAIL_ACCESS_TOKEN = previousToken;
+    await cleanup(session.id);
+  }
+});
+
+test("connector read audit history is bounded", async () => {
+  const session = await createSession("connector-read-audit-bound-test");
+  try {
+    session.connectorReadAudits = Array.from({ length: 205 }, (_, index) => ({
+      id: String(index), connector: "gmail", action: "list_messages", status: "completed",
+      requestedAt: new Date(index).toISOString(), inputSummary: {},
+    }));
+    await saveSession(session);
+    const saved = await getSession(session.id);
+    assert.equal(saved.connectorReadAudits.length, 200);
+    assert.equal(saved.connectorReadAudits[0].id, "5");
+  } finally { await cleanup(session.id); }
 });
 
 test("connector failure-state persistence cannot mask the upstream error", async () => {

@@ -21,7 +21,7 @@ Node.js 22 or newer is required. Agent Room is meant to run as a **loopback HTTP
 
 ```bash
 corepack enable
-pnpm install --frozen-lockfile
+pnpm install --prod --frozen-lockfile --ignore-scripts
 pnpm start
 ```
 
@@ -31,9 +31,14 @@ By default the server listens on **`http://127.0.0.1:3210`**. Override the port 
 PORT=3210 pnpm start
 ```
 
-On Windows you can also double-click `start-windows.bat` (macOS: `start-macos.command`, Linux: `start-linux.sh`). Those scripts start the same browser-facing server.
+PowerShell:
 
-There are no published GitHub Release installers right now. To try the optional Electron shell from this checkout: `pnpm desktop` (see [desktop distribution](docs/DESKTOP.md) if you build locally).
+```powershell
+$env:PORT = "3210"
+pnpm start
+```
+
+The production-only install verifies the lockfile and skips the desktop development toolchain. The source server uses Node.js built-ins and has no production npm dependencies.
 
 ## Required agent CLIs
 
@@ -52,14 +57,25 @@ Prompts and project excerpts are sent to the selected model providers through th
 
 ## Validate
 
+Contributor setup installs the development toolchain without running package lifecycle scripts:
+
 ```bash
+corepack enable
+pnpm install --frozen-lockfile --ignore-scripts
 pnpm check
+pnpm lint
 pnpm test
+pnpm test:coverage
+pnpm test:smoke
+pnpm test:browser
 ```
+
+`pnpm lint` downloads the pinned ESLint version into a temporary npm cache; it does not add it to the source-server dependency graph. The browser test uses a system Chrome or Edge executable and accepts an override through `AGENT_ROOM_BROWSER`.
 
 ## Safety boundaries
 
 - Project files are unavailable to agents until the user explicitly trusts the project fingerprint.
+- A trusted provider executable is stored with a SHA-256 fingerprint. If the executable changes at the approved path, Agent Room requires **Trust & check** again.
 - Planning and review are read-only. Agent process environments use an allowlist and do not inherit arbitrary token/key variables.
 - Output, line size, final-response files, and each agent call are bounded.
 - Execution is offered only by providers that can enforce the requested local boundary. The current registry exposes one `run` mode for Codex because its workspace sandbox permits both edits and local commands; it does not advertise a prompt-only edit mode. Claude is collaboration/review-only until its CLI can enforce an equivalent write boundary.
@@ -67,6 +83,9 @@ pnpm test
 - Connector credentials remain in the host and are excluded from agent, GitHub, and publication subprocess environments and prompts.
 - Claude project reads use Agent Room's bounded host broker; Claude cannot combine project files with web or connector tools in the same call. Codex project calls run without web or connectors.
 - Stored sessions retain up to 200 messages and decisions, 50 terminal executions, and 100 terminal connector actions while preserving pending records. Nested metadata and total session size are bounded.
+- Sessions have an explicit schema version. Legacy files are backed up before migration; unreadable files remain visible as recovery entries that can be exported, retried, or explicitly deleted.
+- One runtime lock prevents two server processes from writing the same data folder. A stored running discussion is marked interrupted during startup recovery instead of remaining permanently busy.
+- Logs rotate locally and diagnostics can be exported explicitly from the setup rail. The JSON export contains bounded redacted log tails and runtime health; it is never uploaded automatically.
 - Each execution uses a disposable clone with its own Git objects, refs, and configuration, so rejected or secret-bearing objects never enter the project repository. The clone is still not a general operating-system sandbox or a limit on every possible filesystem read. See [SECURITY.md](SECURITY.md) for the threat model and reporting instructions.
 
 ## Extend Agent Room

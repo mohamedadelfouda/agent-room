@@ -45,7 +45,9 @@ html[data-preset="simple"] [data-context-card="log"] { display: none !important;
 html[data-preset="builder"] [data-context-card="log"] { display: none !important; }
 html.rail-collapsed { --rail-w: 64px; }
 html.context-hidden { --context-w: 0px; }
-html.context-hidden .context-col { display: none !important; }
+@media (min-width: 1101px) {
+  html.context-hidden .context-col { display: none !important; }
+}
 
 * { box-sizing: border-box; }
 html, body { height: 100%; margin: 0; }
@@ -171,6 +173,7 @@ html[data-phase="execute"] .pill::before { background: var(--blue); }
 .topbar-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; flex-wrap: nowrap; min-width: 0; overflow-x: auto; scrollbar-width: none; }
 .topbar-actions::-webkit-scrollbar { display: none; }
 .topbar-actions > :not(.setup-toggle) { flex: none; }
+.shell-overlay-toggle { display: none; }
 .setup-toggle { display: inline-flex; align-items: center; gap: 8px; min-width: 0; flex: 0 1 auto; max-width: 320px; }
 .setup-summary { color: var(--muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .setup-toggle .chevron { transition: transform .18s var(--ease); color: var(--faint); }
@@ -256,7 +259,8 @@ textarea { resize: none; line-height: 1.55; }
 
 /* ============ Main + decision view ============ */
 .main { min-width: 0; min-height: 0; overflow: hidden; display: grid; grid-template-rows: minmax(0, 1fr); }
-.empty { height: 100%; display: grid; place-items: center; padding: 24px; }
+.empty { position: relative; height: 100%; display: grid; place-items: center; padding: 24px; }
+.empty-rail-toggle { position: absolute; inset-block-start: 12px; inset-inline-start: 12px; z-index: 1; }
 .empty-inner { text-align: center; max-width: 420px; }
 .empty-mark { font-size: 46px; color: var(--accent); opacity: .9; margin-bottom: 10px; }
 .empty h1 { font-size: 24px; font-weight: 700; letter-spacing: -.2px; }
@@ -472,20 +476,43 @@ details.tech pre { margin-top: 8px; background: var(--bg); border: 1px solid var
 .preset span { color: var(--muted); font-size: 12px; }
 
 /* ============ Responsive ============ */
+.shell-overlay-backdrop { position: fixed; inset: 0; z-index: 60; background: rgba(0, 0, 0, .5); }
 @media (max-width: 1100px) {
   .workspace { grid-template-columns: minmax(0, 1fr); }
-  .workflow, .context-col { position: fixed; inset-block: 52px 0; z-index: 25; width: min(320px, 92vw); box-shadow: var(--shadow); display: none; }
-  .workflow.open, .context-col.open { display: grid; }
+  .shell-overlay-toggle:not(.rail-drawer-toggle) { display: grid; }
+  .workflow, .context-col { position: fixed; inset-block: 52px 0; z-index: 65; width: min(320px, 92vw); box-shadow: var(--shadow); display: none; }
+  .workflow { inset-inline-start: var(--rail-w); }
+  .context-col { inset-inline-end: 0; }
+  .workflow.open { display: grid; }
+  html[data-preset="simple"] .workflow.open { display: grid !important; }
+  .context-col.open { display: flex; }
   .agent-grid, .live-strip { grid-template-columns: 1fr; }
   .live-actor + .live-actor { border-inline-start: 0; border-top: 1px solid var(--line-soft); }
   .approval { grid-template-columns: auto minmax(0, 1fr); }
   .approval-actions { grid-column: 1 / -1; }
 }
 @media (max-width: 860px) {
-  body { overflow: auto; }
-  .app { grid-template-columns: 1fr; height: auto; }
-  .sessions { border-inline-end: 0; border-bottom: 1px solid var(--line-soft); }
-  .session-list { max-height: 180px; }
+  .shell { grid-template-columns: minmax(0, 1fr); }
+  .main { grid-column: 1; }
+  .rail { position: fixed; inset-block: 0; inset-inline-start: 0; z-index: 65; width: min(320px, 92vw); display: none; box-shadow: var(--shadow); }
+  .rail.open { display: grid; }
+  html.rail-collapsed .rail.open .brand-name,
+  html.rail-collapsed .rail.open .lang-toggle { display: flex !important; }
+  html.rail-collapsed .rail.open .rail-tools { display: grid !important; }
+  html.rail-collapsed .rail.open .session-list { display: flex !important; }
+  html.rail-collapsed .rail.open #connText { display: inline !important; }
+  html.rail-collapsed .rail.open #openOnboard,
+  html.rail-collapsed .rail.open #toggleContext { display: grid !important; }
+  html.rail-collapsed .rail.open .brand,
+  html.rail-collapsed .rail.open .rail-foot { justify-content: initial; }
+  html.rail-collapsed .rail.open .conn { justify-content: initial; padding: 8px; flex: 1; }
+  html.rail-collapsed .rail.open .rail-collapse { transform: none; }
+  .rail-drawer-toggle { display: grid; }
+  .workflow { inset-inline-start: 0; }
+  .topbar { padding-inline: 10px; gap: 8px; }
+  .topbar-actions { gap: 5px; }
+  .topbar-actions .setup-toggle { max-width: 160px; }
+  .composer { padding-inline: 10px; }
   .setup-row, .agents-grid, .agent-fields { grid-template-columns: 1fr; }
 }
 @media (prefers-reduced-motion: reduce) {
