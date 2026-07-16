@@ -3,10 +3,11 @@ import { provider } from "./providers/registry.js";
 import { scanForSecrets } from "./secret-scan.js";
 import { logError, redact } from "./logger.js";
 import { executionPrompt } from "./prompts.js";
+import { EXEC_STOPPED_MESSAGE } from "./exec-state.js";
 
 // Run exactly one executor with write permissions inside its disposable clone.
 // The reviewer is a separate, read-only step — this function never runs two writers.
-export async function runExecution({ projectPath, executor, mode = "run", task, config = {}, onEvent, registerChild }) {
+export async function runExecution({ projectPath, executor, mode = "run", task, config = {}, onEvent, registerChild, isCancelled }) {
   const executorProvider = provider(executor);
   if (!executorProvider) throw new Error(`Unknown executor: ${executor}`);
   if (!task || !String(task).trim()) throw new Error("Execution task is empty");
@@ -15,9 +16,15 @@ export async function runExecution({ projectPath, executor, mode = "run", task, 
     throw new Error(`${executorProvider.label} does not provide a safe ${mode} execution mode`);
   }
 
+  // Bail before the clone if a Stop already landed, and make the clone/checkout killable. The
+  // worktree creation is checked inside createWorktree too; this is the outermost gate.
+  if (isCancelled?.()) throw new Error(EXEC_STOPPED_MESSAGE);
   const taskId = "t-" + crypto.randomUUID().slice(0, 8);
-  const wt = await createWorktree(projectPath, executor, taskId);
+  const wt = await createWorktree(projectPath, executor, taskId, { registerChild, isCancelled });
   try {
+    // Never launch the executor agent once a Stop has been accepted — the just-created clone is
+    // cleaned up by the catch below, so no writer process starts after the user stops.
+    if (isCancelled?.()) throw new Error(EXEC_STOPPED_MESSAGE);
     const response = await executorProvider.run({
       prompt: executionPrompt(task, mode),
       config: { ...config, permission: mode },

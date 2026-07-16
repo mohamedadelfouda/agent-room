@@ -1,18 +1,17 @@
 # Agent Room — خريطة الطريق الموحّدة
 
 > **Review baseline:** `main @ a37b3c0` (الحالة اللي عليها المراجعة والخطط الأربعة اتكتبت).
-> **Execution baseline:** يُعاد تثبيته على أحدث `main` **بعد** دمج PR #23 و PR #24 وقبل أول PR تنفيذية،
-> وكل PR تنفيذية تسجّل الـ SHA الجديد بتاعها.
+> **Execution baseline:** `main @ 8714c8a` — بعد دمج PR #23 و PR #24 و PR #25 (الخطط الأربعة + الخريطة).
+> كل PR تنفيذية تبدأ من هنا وتسجّل الـ SHA الجديد بتاعها وقت الفتح.
 >
-> **المصادر المدمَجة (٤ مستندات، ٢ PR مفتوحة وقت الكتابة):**
+> **المصادر (٤ مستندات، اندمجت في `main` عبر PR #23 و PR #24):**
 > - [`PROJECT_REVIEW.md`](PROJECT_REVIEW.md) — تقرير التقييم الشامل (PR #23)
 > - [`LAUNCH_ACTION_PLAN.md`](LAUNCH_ACTION_PLAN.md) — خطة العمل المبنية على التقرير (PR #23)
 > - [`CURSOR_INTEGRATION_PLAN.md`](CURSOR_INTEGRATION_PLAN.md) — خطة إضافة Cursor كمزوّد ثالث (PR #23)
 > - [`SETUP_DOCTOR_UPDATE_PLAN.md`](SETUP_DOCTOR_UPDATE_PLAN.md) — خطة تقليل تكلفة أول تجربة (PR #24)
 >
-> **ملاحظة عن الروابط:** بتشتغل بعد دمج PR #23 و PR #24 — دلوقتي المستندات على الفروع البعيدة بس
-> (`origin/docs/project-review-and-debate-test`, `origin/docs/setup-doctor-plan`). هذا الملف مستقل بذاته
-> ولا يفترض دمجهم.
+> **الروابط أعلاه تعمل على `main`** (المستندات الأربعة موجودة في `docs/`). الخريطة والخطط مستقلة —
+> لا تُحذَف الخطط بعد الدمج (انظر "سلطة المستندات" أدناه).
 
 ---
 

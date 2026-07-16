@@ -445,7 +445,8 @@ const server = http.createServer(async (req, res) => {
       return json(res, 202, { ok: true });
     }
     if (parts[0] === "api" && parts[1] === "sessions" && parts[2] && parts[3] === "exec-stop" && req.method === "POST") {
-      return json(res, 200, { stopped: await stopExec(parts[2]) });
+      // { stopped, status } — status is stop_requested | process_terminated | already_finished.
+      return json(res, 200, await stopExec(parts[2]));
     }
     if (parts[0] === "api" && parts[1] === "sessions" && parts[2] && parts[3] === "execution" && parts[4] && parts[5] === "accept" && req.method === "POST") {
       if (!startupReconciled) return json(res, 503, apiErrorPayload("startup_recovery_pending", "Startup recovery is still running; retry in a moment"));
