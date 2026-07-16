@@ -363,15 +363,16 @@ test("first collaboration opinions start independently before either provider re
 test("2026-07-16 regression: a stop finalizes a run whose providers never settle", async (t) => {
   const session = await createSession("stop-settle-timeout");
   const bothStarted = deferred();
-  const neverSettles = new Promise(() => {});
+  // Providers stay pending (no child to kill) until the test releases them — a real stall in the
+  // un-timed setup phase. Using a resolvable deferred (not an un-resolvable promise) lets the run
+  // body unwind at the end, so the node:test runner is not left with a dangling promise.
+  const releaseProviders = deferred();
   const events = [];
   let starts = 0;
 
-  t.mock.method(provider("claude"), "run", async () => { await neverSettles; return providerResult("unreachable"); });
-  t.mock.method(provider("codex"), "run", async () => { await neverSettles; return providerResult("unreachable"); });
+  t.mock.method(provider("claude"), "run", async () => { await releaseProviders.promise; return providerResult("unreachable"); });
+  t.mock.method(provider("codex"), "run", async () => { await releaseProviders.promise; return providerResult("unreachable"); });
 
-  // Provider promises never resolve, so the run body's Promise.allSettled would hang forever;
-  // deliberately do NOT await runPromise here — the stop path must finalize the session anyway.
   const runPromise = runOrchestration(session.id, chatRequest("Stop a stalled run"), (event) => {
     events.push(event);
     if (event.type === "agent_start" && ++starts === 2) bothStarted.resolve();
@@ -394,6 +395,10 @@ test("2026-07-16 regression: a stop finalizes a run whose providers never settle
     assert.equal(events.some((event) => event.type === "agent_complete"), false);
     assertSingleRunIdentity(events);
   } finally {
+    // Release the stalled providers so the run body unwinds (their late results are discarded
+    // because the run is already terminal), then await it so no pending promise outlives the test.
+    releaseProviders.resolve();
+    await runPromise.catch(() => {});
     await cleanupSession(session.id);
   }
 });
