@@ -1,9 +1,33 @@
 import { expectedApiError } from "./api-errors.js";
-import { approvedProviderCommand, checkCommand } from "./process.js";
+import { approveProviderCommand, approvedProviderCommand, checkCommand } from "./process.js";
+import { discoverProviderCommands } from "./cli-discovery.js";
+import { logError, redact } from "./logger.js";
 import { provider } from "./providers/registry.js";
 
 const READINESS_TTL_MS = 30000;
 const readinessCache = new Map();
+
+// PATH search can miss a CLI installed via npm/pnpm/bun: on Windows those expose only cmd/ps1 shims
+// (rejected as non-native executables), and elsewhere the binary can be hoisted out of PATH. When the
+// primary check fails and nothing has been trusted yet, discover the bundled native executable
+// (cli-discovery covers Windows/macOS/Linux × x64/arm64), verify it actually runs as this provider,
+// and auto-trust it — so an installed provider "just works" without a manual Trust & check step.
+async function autoTrustDiscoveredCommand(definition, discover = discoverProviderCommands) {
+  let candidates = [];
+  try { candidates = await discover(definition.command); }
+  catch (error) { logError("provider auto-discovery failed", redact(error?.message || String(error))); return null; }
+  for (const candidate of candidates) {
+    try {
+      const status = await checkCommand(candidate, { allowedCommands: new Set([definition.command]), trustedPaths: [candidate] });
+      if (!status.ok) continue;
+      await approveProviderCommand(definition.id, candidate, new Set([definition.command]));
+      return { status, path: candidate };
+    } catch (error) {
+      logError("provider auto-trust rejected a discovered command", redact(error?.message || String(error)));
+    }
+  }
+  return null;
+}
 
 export function configuredProviderCommand(definition) {
   return process.env[definition.commandEnv] || definition.command;
@@ -13,19 +37,31 @@ export function trustedProviderCliPaths(definition) {
   return [process.env[definition.commandEnv], approvedProviderCommand(definition.id)].filter(Boolean);
 }
 
-export async function providerReadiness(providerId, { refresh = false } = {}) {
+export async function providerReadiness(providerId, { refresh = false, discover = discoverProviderCommands } = {}) {
   const definition = provider(providerId);
   if (!definition) return { installed: false, version: "", detail: "Unknown provider" };
   const cached = readinessCache.get(definition.id);
   if (!refresh && cached && cached.expiresAt > Date.now()) return cached.value;
-  const status = await checkCommand(
+  let status = await checkCommand(
     approvedProviderCommand(definition.id) || configuredProviderCommand(definition),
     {
       allowedCommands: new Set([definition.command]),
       trustedPaths: trustedProviderCliPaths(definition),
     },
   );
-  const value = { installed: status.ok, version: status.version, detail: status.detail };
+  // Nothing on PATH and nothing trusted yet: fall back to discovering + auto-trusting the bundled
+  // native executable, so an npm/pnpm-installed provider is detected without a manual setup step.
+  // Skipped when the user set an explicit command override (respect their choice — never silently
+  // supersede a failing override with a different discovered binary). `discover` is injectable so
+  // tests can exercise this path without a real provider install. `autoTrusted` lets the UI surface
+  // that a path was trusted on the user's behalf (see docs/PROVIDERS.md). The discovered absolute
+  // path is deliberately NOT returned — it would carry the OS username into the diagnostics snapshot.
+  let autoTrusted = false;
+  if (!status.ok && !approvedProviderCommand(definition.id) && !process.env[definition.commandEnv]) {
+    const discovered = await autoTrustDiscoveredCommand(definition, discover);
+    if (discovered) { status = discovered.status; autoTrusted = true; }
+  }
+  const value = { installed: status.ok, version: status.version, detail: status.detail, autoTrusted };
   readinessCache.set(definition.id, { value, expiresAt: Date.now() + READINESS_TTL_MS });
   return value;
 }
