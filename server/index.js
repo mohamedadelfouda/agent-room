@@ -205,6 +205,20 @@ function addSseClient(sessionId, req, res) {
   });
 }
 
+// End every live SSE stream for a session. The browser's EventSource then auto-reconnects (unless
+// the client closed it first), so its onopen re-sync path runs. Used when a session is deleted — its
+// streams must not dangle — and by the reconnect regression test to force a deterministic drop.
+export function closeSessionStreams(sessionId) {
+  const set = clients.get(sessionId);
+  if (!set) return 0;
+  let closed = 0;
+  for (const client of set) {
+    try { client.end(); closed += 1; } catch { /* client already gone */ }
+  }
+  clients.delete(sessionId);
+  return closed;
+}
+
 function mimeType(filePath) {
   const ext = path.extname(filePath).toLowerCase();
   return ({ ".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".json": "application/json", ".svg": "image/svg+xml" })[ext] || "application/octet-stream";
@@ -326,13 +340,7 @@ const server = http.createServer(async (req, res) => {
         const result = await deleteSession(parts[2], {
           isBusy: () => isRunning(parts[2]) || isExecuting(parts[2]),
         });
-        const set = clients.get(parts[2]);
-        if (set) {
-          for (const client of set) {
-            try { client.end(); } catch {}
-          }
-          clients.delete(parts[2]);
-        }
+        closeSessionStreams(parts[2]);
         return json(res, 200, result);
       } catch (error) {
         if (error.code === "session_busy") {

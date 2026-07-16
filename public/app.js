@@ -788,8 +788,18 @@ async function openSession(id) {
   if (eventSource) eventSource.close();
   const source = new EventSource(`/api/sessions/${id}/events`);
   eventSource = source;
+  let streamOpenedBefore = false;
   source.onmessage = (e) => { if (eventSource === source && isCurrentSessionView(id, viewEpoch)) handleEvent(JSON.parse(e.data)); };
-  source.onopen = () => { if (eventSource === source && isCurrentSessionView(id, viewEpoch)) setConnected(true); };
+  source.onopen = () => {
+    if (eventSource !== source || !isCurrentSessionView(id, viewEpoch)) return;
+    setConnected(true);
+    // A reconnect — the browser auto-reopens an EventSource after a dropped connection (laptop
+    // sleep, network blip) — may have missed a run's terminal event, which is fire-and-forget with
+    // no server backlog. Re-sync from persisted state so the UI can't stay stuck on "running" with
+    // inputs locked. The first open is skipped: openSession already loaded the session below.
+    if (streamOpenedBefore) { loadSession().catch(() => {}); refreshSessions().catch(() => {}); }
+    streamOpenedBefore = true;
+  };
   source.onerror = () => { if (eventSource === source && isCurrentSessionView(id, viewEpoch)) setConnected(false); };
   $("emptyState").hidden = true;
   $("sessionView").hidden = false;
