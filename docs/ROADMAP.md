@@ -55,8 +55,8 @@
 | P1-5 | سجلات قراءة الموصلات العالقة "running" لا تُصالَح | LAUNCH_ACTION_PLAN | 🟡 P1 | ساعات |
 | P1-6 | **اختبار تكامل full-stack فقط** (HTTP → orchestration/execution → SSE → حالة نهائية مخزَّنة → تزامن UI/API) | LAUNCH_ACTION_PLAN | 🟠 P1 | 2-3 يوم |
 | P1-7 | قياس استهلاك المزوّدين (Usage Instrumentation) | LAUNCH_ACTION_PLAN | 🟠 P1 | 2-3 يوم |
-| S-2 | إثبات القيمة بأرقام (mini-eval بـ٤ أذرع + GIF) | LAUNCH_ACTION_PLAN | 🔵 S | 3-5 يوم |
-| S-1 | إعادة التموضع حول "بوابة المراجعة الأمينة" (+ README + GIF) | LAUNCH_ACTION_PLAN | 🔵 S | أيام (محتوى) |
+| S-2 | إثبات القيمة بأرقام — mini-eval بـ٤ أذرع + **نشر النتائج القابلة للتكرار** (منهجية فقط، بلا GIF) | LAUNCH_ACTION_PLAN | 🔵 S | 3-5 يوم |
+| S-1 | إعادة التموضع حول "بوابة المراجعة الأمينة" + README + **GIF مبني على نتيجة S-2** | LAUNCH_ACTION_PLAN | 🔵 S | أيام (محتوى) |
 | SD-4a | **انضباط الإصدار** (RELEASING.md · تطابق `package.json` مع Tag · CHANGELOG · Stable/Prerelease · Rollback/Yanking · اختبار من clean checkout · لا رفع قبل CI + Review Gate) | مشتقّ من P1-3 + SETUP_DOCTOR | 🟠 (بوابة الألفا) | 1 يوم |
 | — | **🚀 إطلاق ألفا** (بوابة صريحة — انظر Alpha launch gate) | — | — | — |
 | SD-4 | Update Notify — **بعد أول Release منشور** (لا معنى للتنبيه قبل وجود تحديث) | SETUP_DOCTOR (PR4) | 🟠 P1 (post-alpha) | — |
@@ -115,7 +115,9 @@
   ═══════════════════ 🚀 إطلاق ألفا (بعد اجتياز Alpha launch gate) ═══════════════════
 
 المرحلة 6 — Post-alpha distribution & features
-  SD-4  Update Notify   (الآن فقط — بعد وجود Release رسمي قابل للاكتشاف)
+  SD-4  Update Notify — يُختبر بـ Release fixture / mock endpoint قبل الدمج، يُفعّل
+        فعليًا بعد أول Alpha Release، وأثره يظهر عند الإصدار التالي
+        (0.2.0 يبلّغ عن 0.2.1، لا عن نفسه)
   F-2   عرض استهلاك التوكن/التكلفة (فوق P1-7 مباشرة)
   F-1   مرفقات الصور — PR مستقلة، بعد usage + benchmark النصي
   F-3   تتبّع حصة الاشتراك — spike أولاً يحسم الجدوى الفعلية
@@ -142,10 +144,12 @@
 - [ ] P0-1 / P0-2 / P0-3 مكتملة واختباراتها الخاصة خضراء.
 - [ ] Setup Doctor ينجح مع صفر / واحد / اثنين من المزوّدين.
 - [ ] Source Preflight يعمل على Windows / macOS / Linux.
-- [ ] Durable terminal writes (P1-1) والاسترداد الأساسي مكتملان.
+- [ ] الحفظ المتين للحالات الطرفية (P1-1) والاسترداد الأساسي مكتملان.
 - [ ] Usage instrumentation (P1-7) يسجّل `real` / `unavailable` بصدق.
 - [ ] Mini-eval بالأذرع الأربعة (S-2) مكتمل ونتائجه منشورة.
-- [ ] لا توجد ملاحظة Critical أو High مفتوحة.
+- [ ] لا توجد ملاحظة Critical أو High **صالحة وغير محلولة** ضمن نطاق الإصدار. أي ملاحظة
+      مستبعدة تحمل سببًا موثقًا، وأي مخاطرة مقبولة تحمل قرار قبول صريحًا من المالك (Findings
+      كاذبة لا توقف الإطلاق، وHigh حقيقية لا تُتجاهَل بصمت).
 - [ ] Clean-clone smoke test موثّق ويمرّ.
 - [ ] Version + Tag + Changelog + GitHub Release جاهزة (SD-4a).
 
