@@ -197,6 +197,64 @@ test("a five-round collaboration stops after round two and finalizes once", asyn
   }
 });
 
+test("a debate runs opening then rebuttal, converges early, and finalizes once", async (t) => {
+  const session = await createSession("debate-convergence");
+  let claudeCalls = 0;
+  let codexCalls = 0;
+
+  t.mock.method(provider("claude"), "run", async () => {
+    claudeCalls += 1;
+    // Round 1 opening is independent and carries NO control block (debate opening ≠ rebuttal).
+    if (claudeCalls === 1) return providerResult("Claude opening: in-process cache is simpler for one node.");
+    // Round 2 rebuttal concedes and converges (delta-free) so the run stops before round 3.
+    if (claudeCalls === 2) return providerResult(`Claude concedes Redis wins once you scale.\n${controlBlock("satisfied", [])}`);
+    // Third call is the synthesis brief (finalizer = claude); synthesis never carries a control block.
+    return providerResult("Decision brief: Redis for horizontal scale; the choice remains the user's.");
+  });
+  t.mock.method(provider("codex"), "run", async () => {
+    codexCalls += 1;
+    if (codexCalls === 1) return providerResult("Codex opening: use Redis to scale horizontally.");
+    return providerResult(`Codex agrees the tradeoff is settled.\n${controlBlock("satisfied", [])}`);
+  });
+
+  try {
+    await runOrchestration(session.id, {
+      mode: "debate",
+      rounds: 3,
+      content: "Redis or in-process cache?",
+      finalizer: "claude",
+      agents: {
+        claude: { enabled: true, role: "Debater" },
+        codex: { enabled: true, role: "Debater" },
+      },
+    }, () => {});
+
+    const saved = await getSession(session.id);
+    assert.equal(saved.status, "completed");
+    assert.equal(saved.activeRun.status, "completed");
+
+    // Debate's distinctive phases: round 1 = "opening", later rounds = "rebuttal" — never "collaboration".
+    const opening = saved.messages.filter((message) => message.phase === "opening");
+    const rebuttal = saved.messages.filter((message) => message.phase === "rebuttal");
+    const synthesis = saved.messages.filter((message) => message.phase === "synthesis");
+    assert.equal(saved.messages.some((message) => message.phase === "collaboration"), false);
+    assert.equal(opening.length, 2); // one opening per participant
+    assert.deepEqual([...new Set(opening.map((message) => message.round))], [1]);
+    // Converged on the first rebuttal round → stops early (round 2 only, not the full 3).
+    assert.equal(rebuttal.length, 2);
+    assert.deepEqual([...new Set(rebuttal.map((message) => message.round))], [2]);
+    assert.equal(synthesis.length, 1);
+
+    const outcomeMessage = saved.messages.find((message) => message.meta?.outcome);
+    assert.equal(outcomeMessage.meta.outcome.agreementState, "converged");
+    assert.equal(outcomeMessage.meta.outcome.completionState, "satisfied");
+    assert.equal(outcomeMessage.meta.outcome.requestedRounds, 3);
+    assert.equal(outcomeMessage.meta.outcome.completedRounds, 2);
+  } finally {
+    await cleanupSession(session.id);
+  }
+});
+
 test("orchestration request validation rejects unsupported or inconsistent configurations", () => {
   const base = collaborationRequest("Validate this request");
   const cases = [
