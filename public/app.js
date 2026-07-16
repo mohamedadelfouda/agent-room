@@ -16,6 +16,7 @@ import { activityControls } from "./activity-state.js";
 import { closeReservedPrWindow, openReservedPrWindow, reservePrWindow } from "./pr-window.js";
 import { STRINGS } from "./strings.js";
 import { renderMarkdown } from "./markdown.js";
+import { shouldHandleRunEvent } from "./run-events.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -33,6 +34,9 @@ const connectorRequests = createLatestRequest(async (id) => {
 let eventSource = null;
 let mode = "collaboration";
 let running = false;
+let currentRunId = null;
+let activeShellOverlay = null;
+let shellOverlayTrigger = null;
 let lang = "ar";
 let routeSuggestion = null;
 
@@ -348,7 +352,7 @@ function updateSetupSummary() {
 
 /* ---------------- sessions rail ---------------- */
 function discussionModeLabel(value) {
-  return { collaboration: t("modeCollab"), debate: t("modeDebate"), chat: t("modeChat"), idle: t("statusIdle") }[value] || String(value || "");
+  return { collaboration: t("modeCollab"), debate: t("modeDebate"), chat: t("modeChat"), idle: t("statusIdle"), recovery: t("recoverySession") }[value] || String(value || "");
 }
 
 function sessionStatusLabel(status) {
@@ -358,6 +362,7 @@ function sessionStatusLabel(status) {
     completed: "statusCompleted",
     error: "statusError",
     interrupted: "statusInterrupted",
+    recovery_needed: "statusRecovery",
   }[status];
   return key ? t(key) : String(status || t("statusIdle"));
 }
@@ -378,7 +383,7 @@ function phaseLabel(phase) {
 }
 
 async function refreshSessions() {
-  let sessions = [];
+  let sessions;
   try { sessions = await api("/api/sessions"); } catch { return; }
   const list = $("sessionList");
   list.innerHTML = "";
@@ -403,13 +408,13 @@ async function refreshSessions() {
       copy.className = "si-copy";
       const title = document.createElement("strong");
       title.className = "si-title";
-      title.textContent = s.title;
+      title.textContent = s.recoveryNeeded ? t("recoverySession") : s.title;
       const meta = document.createElement("small");
       meta.className = "si-sub";
       meta.textContent = `${discussionModeLabel(s.mode)} · ${formatMessageCount(lang, s.messageCount)} · ${sessionStatusLabel(s.status)}`;
       copy.append(title, meta);
       btn.append(dot, copy);
-      btn.onclick = () => openSession(s.id);
+      btn.onclick = () => s.recoveryNeeded ? toggleSessionMenu(more, s) : openSession(s.id);
       const more = document.createElement("button");
       more.type = "button";
       more.className = "session-more";
@@ -500,18 +505,59 @@ function toggleSessionMenu(anchor, session) {
   menu.className = "session-menu";
   menu.dataset.sessionId = session.id;
   menu.setAttribute("role", "menu");
-  const renameBtn = document.createElement("button");
-  renameBtn.type = "button";
-  renameBtn.setAttribute("role", "menuitem");
-  renameBtn.textContent = t("renameSession");
-  renameBtn.onclick = () => { closeSessionMenu(); openRenameSessionModal(session); };
-  const deleteBtn = document.createElement("button");
-  deleteBtn.type = "button";
-  deleteBtn.className = "is-danger";
-  deleteBtn.setAttribute("role", "menuitem");
-  deleteBtn.textContent = t("deleteSession");
-  deleteBtn.onclick = () => { closeSessionMenu(); void confirmDeleteSession(session); };
-  menu.append(renameBtn, deleteBtn);
+  if (session.recoveryNeeded) {
+    const exportBtn = document.createElement("button");
+    exportBtn.type = "button";
+    exportBtn.setAttribute("role", "menuitem");
+    exportBtn.textContent = t("recoveryExport");
+    exportBtn.onclick = () => {
+      closeSessionMenu();
+      const link = document.createElement("a");
+      link.href = `/api/session-recovery/${session.recoveryId}/export`;
+      link.download = "";
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+    };
+    const retryBtn = document.createElement("button");
+    retryBtn.type = "button";
+    retryBtn.setAttribute("role", "menuitem");
+    retryBtn.textContent = t("recoveryRetry");
+    retryBtn.onclick = async () => {
+      closeSessionMenu();
+      try {
+        await api(`/api/session-recovery/${session.recoveryId}/retry`, { method: "POST", body: "{}" });
+        await refreshSessions();
+      } catch (error) { $("liveStatus").textContent = localizedFailure(error); }
+    };
+    const recoveryDeleteBtn = document.createElement("button");
+    recoveryDeleteBtn.type = "button";
+    recoveryDeleteBtn.className = "is-danger";
+    recoveryDeleteBtn.setAttribute("role", "menuitem");
+    recoveryDeleteBtn.textContent = t("recoveryDelete");
+    recoveryDeleteBtn.onclick = async () => {
+      closeSessionMenu();
+      if (!window.confirm(t("recoveryDeleteConfirm"))) return;
+      try {
+        await api(`/api/session-recovery/${session.recoveryId}`, { method: "DELETE", body: JSON.stringify({ confirm: true }) });
+        await refreshSessions();
+      } catch (error) { $("liveStatus").textContent = localizedFailure(error); }
+    };
+    menu.append(exportBtn, retryBtn, recoveryDeleteBtn);
+  } else {
+    const renameBtn = document.createElement("button");
+    renameBtn.type = "button";
+    renameBtn.setAttribute("role", "menuitem");
+    renameBtn.textContent = t("renameSession");
+    renameBtn.onclick = () => { closeSessionMenu(); openRenameSessionModal(session); };
+    const deleteBtn = document.createElement("button");
+    deleteBtn.type = "button";
+    deleteBtn.className = "is-danger";
+    deleteBtn.setAttribute("role", "menuitem");
+    deleteBtn.textContent = t("deleteSession");
+    deleteBtn.onclick = () => { closeSessionMenu(); void confirmDeleteSession(session); };
+    menu.append(renameBtn, deleteBtn);
+  }
   menu.addEventListener("keydown", onSessionMenuKeydown);
   document.body.appendChild(menu);
   openSessionMenu = menu;
@@ -522,7 +568,7 @@ function toggleSessionMenu(anchor, session) {
   const left = Math.min(window.innerWidth - menuWidth - 8, Math.max(8, rect.left));
   menu.style.top = `${Math.min(window.innerHeight - menu.offsetHeight - 8, rect.bottom + 4)}px`;
   menu.style.left = `${left}px`;
-  renameBtn.focus();
+  menu.querySelector("[role='menuitem']")?.focus();
 }
 
 function openRenameSessionModal(session) {
@@ -597,6 +643,9 @@ function applyShellChrome() {
   if (contextBtn) {
     contextBtn.classList.toggle("is-active", !contextHidden);
     contextBtn.setAttribute("aria-pressed", String(!contextHidden));
+    contextBtn.setAttribute("aria-expanded", String(window.matchMedia("(max-width: 1100px)").matches
+      ? activeShellOverlay === "context"
+      : !contextHidden));
     contextBtn.title = t("toggleContext");
     contextBtn.setAttribute("aria-label", t("toggleContext"));
   }
@@ -605,23 +654,100 @@ function applyShellChrome() {
 }
 
 function toggleRailCollapsed() {
+  if (window.matchMedia("(max-width: 860px)").matches) {
+    closeShellOverlay();
+    return;
+  }
   const next = !document.documentElement.classList.contains("rail-collapsed");
   localStorage.setItem("agent-room-rail-collapsed", next ? "1" : "0");
   applyShellChrome();
 }
 
 function toggleContextColumn() {
+  if (window.matchMedia("(max-width: 1100px)").matches) {
+    if (!currentSessionId) return;
+    toggleShellOverlay("context", $("contextDrawerToggle"));
+    return;
+  }
   const next = !document.documentElement.classList.contains("context-hidden");
   localStorage.setItem("agent-room-context-hidden", next ? "1" : "0");
   applyShellChrome();
-  // Below the responsive breakpoint the column is an overlay gated by `.open` (not
-  // `context-hidden`, which only drives the desktop grid-column layout). Tie it to this
-  // explicit toggle rather than the persisted state, so it never auto-opens on load.
-  $("contextCol")?.classList.toggle("open", next);
+}
+
+const SHELL_OVERLAYS = {
+  rail: "sessionsRail",
+  workflow: "workflow",
+  context: "contextCol",
+};
+
+function shellOverlayButtons() {
+  return [$("railDrawerToggle"), $("emptyRailDrawerToggle"), $("workflowToggle"), $("contextDrawerToggle"), $("toggleContext")].filter(Boolean);
+}
+
+function closeShellOverlay({ restoreFocus = true } = {}) {
+  if (!activeShellOverlay) return;
+  const trigger = shellOverlayTrigger;
+  Object.values(SHELL_OVERLAYS).forEach((id) => {
+    const panel = $(id);
+    panel?.classList.remove("open");
+    panel?.removeAttribute("role");
+    panel?.removeAttribute("aria-modal");
+  });
+  shellOverlayButtons().forEach((button) => button.setAttribute("aria-expanded", "false"));
+  const backdrop = $("shellOverlayBackdrop");
+  backdrop.hidden = true;
+  activeShellOverlay = null;
+  shellOverlayTrigger = null;
+  if (restoreFocus) trigger?.focus();
+}
+
+function openShellOverlay(kind, trigger) {
+  const panel = $(SHELL_OVERLAYS[kind]);
+  if (!panel) return;
+  closeShellOverlay({ restoreFocus: false });
+  activeShellOverlay = kind;
+  shellOverlayTrigger = trigger;
+  panel.classList.add("open");
+  panel.setAttribute("role", "dialog");
+  panel.setAttribute("aria-modal", "true");
+  $("shellOverlayBackdrop").hidden = false;
+  shellOverlayButtons().forEach((button) => {
+    button.setAttribute("aria-expanded", String(button === trigger || button.getAttribute("aria-controls") === panel.id));
+  });
+  panel.focus();
+}
+
+function toggleShellOverlay(kind, trigger) {
+  if (activeShellOverlay === kind) closeShellOverlay();
+  else openShellOverlay(kind, trigger);
+}
+
+function handleShellOverlayKeydown(event) {
+  if (!activeShellOverlay) return;
+  if (event.key === "Escape") {
+    event.preventDefault();
+    closeShellOverlay();
+    return;
+  }
+  if (event.key !== "Tab") return;
+  const panel = $(SHELL_OVERLAYS[activeShellOverlay]);
+  const focusable = [...panel.querySelectorAll("button:not(:disabled), a[href], summary, input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex='-1'])")];
+  if (!focusable.length) {
+    event.preventDefault();
+    panel.focus();
+    return;
+  }
+  const first = focusable[0];
+  const last = focusable[focusable.length - 1];
+  if (event.shiftKey && [first, panel].includes(document.activeElement)) { event.preventDefault(); last.focus(); }
+  else if (!event.shiftKey && document.activeElement === panel) { event.preventDefault(); first.focus(); }
+  else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
 }
 
 /* ---------------- session open / focused view ---------------- */
 async function openSession(id) {
+  const focusMainAfterOpen = activeShellOverlay === "rail";
+  closeShellOverlay({ restoreFocus: false });
   const switching = currentSessionId !== id;
   if (switching) sessionViewEpoch += 1;
   const viewEpoch = sessionViewEpoch;
@@ -629,6 +755,7 @@ async function openSession(id) {
   connectorRequests.invalidate();
   currentSessionId = id;
   currentSession = null;
+  if (switching) currentRunId = null;
   routeSuggestion = null;
   pendingExec = null;
   renderedMessageSessionId = null;
@@ -666,6 +793,7 @@ async function openSession(id) {
   source.onerror = () => { if (eventSource === source && isCurrentSessionView(id, viewEpoch)) setConnected(false); };
   $("emptyState").hidden = true;
   $("sessionView").hidden = false;
+  if (focusMainAfterOpen) $("sessionTitle").focus();
   try { await loadSession(); }
   catch (error) {
     if (isCurrentSessionView(id, viewEpoch)) {
@@ -687,15 +815,11 @@ async function loadSession() {
   currentSession = result.value;
   const orchestrating = Boolean(currentSession.running || currentSession.status === "running");
   const executing = Boolean(currentSession.executing);
+  if (orchestrating && currentSession.activeRun?.status === "running") currentRunId = currentSession.activeRun.runId;
+  else if (!orchestrating) currentRunId = null;
   running = orchestrating || executing;
-  const controls = activityControls(running, executing ? "execution" : "orchestration");
   loadSessionMeta();
-  $("messageInput").disabled = running;
-  $("sendBtn").disabled = running;
-  $("stopBtn").disabled = controls.mainStopDisabled;
-  $("execStopBtn").hidden = controls.executionStopHidden;
-  $("execRun").disabled = controls.executionRunDisabled;
-  $("exportBtn").disabled = false;
+  applyActivityControlState(running, executing ? "execution" : "orchestration");
   if (currentSession.project?.path) {
     $("projectPath").value = currentSession.project.path;
     const trusted = currentSession.project.trusted === true;
@@ -1030,13 +1154,15 @@ function autoGrow(el) { el.style.height = "auto"; el.style.height = Math.min(el.
 /* ---------------- SSE ---------------- */
 function handleEvent(event) {
   if (event.type === "session_updated") loadSession();
-  if (event.type === "run_started") { liveAgents = {}; renderLiveStrip(); setRunning(true, `${discussionModeLabel(event.mode)} · ${formatLocaleNumber(lang, event.rounds)} ${t("roundsShort")}`); }
+  if (!shouldHandleRunEvent(currentRunId, event)) return;
+  if (event.type === "run_started") { currentRunId = event.runId; liveAgents = {}; renderLiveStrip(); setRunning(true, `${discussionModeLabel(event.mode)} · ${formatLocaleNumber(lang, event.rounds)} ${t("roundsShort")}`); }
   if (event.type === "agent_start") { const s = `${phaseLabel(event.phase)} · ${t("roundWord")} ${formatLocaleNumber(lang, event.round)}`; liveAgents[event.agent] = s; renderLiveStrip(); setAgentState(event.agent, s, "running"); $("liveStatus").textContent = t("working")(event.label); }
   if (event.type === "agent_activity" && event.event?.text) { const s = event.event.text.slice(0, 90); if (event.agent in liveAgents) { liveAgents[event.agent] = s; renderLiveStrip(); } setAgentState(event.agent, s, "running"); }
   if (event.type === "agent_complete") { liveAgents[event.agent] = t("replied"); renderLiveStrip(); setAgentState(event.agent, t("replied"), "done"); }
   if (["run_complete","run_stopped","run_error"].includes(event.type)) {
     liveAgents = {}; renderLiveStrip();
     setRunning(false, event.type === "run_complete" ? t("runDone") : event.type === "run_stopped" ? t("runStopped") : localizedFailure({ code: event.code, detail: event.error }));
+    currentRunId = null;
     loadSession(); refreshSessions();
   }
   if (event.type === "exec_started") setRunning(true, t("starting"), "execution");
@@ -1047,14 +1173,19 @@ function handleEvent(event) {
 function setAgentState(agent, text, cls = "") { const el = $(`${agent}RunState`); if (el) { el.textContent = text; el.className = `run-state ${cls}`; } }
 function setRunning(value, status, kind = "orchestration") {
   running = value;
+  applyActivityControlState(value, kind);
+  if (status) $("liveStatus").textContent = status;
+}
+function applyActivityControlState(value, kind = "orchestration") {
   const controls = activityControls(value, kind);
-  $("messageInput").disabled = value || !currentSessionId;
-  $("sendBtn").disabled = value || !currentSessionId;
-  if ($("attachBtn")) $("attachBtn").disabled = value || !currentSessionId;
+  const unavailable = value || !currentSessionId;
+  $("messageInput").disabled = unavailable;
+  $("sendBtn").disabled = unavailable;
+  $("attachBtn").disabled = unavailable;
   $("stopBtn").disabled = controls.mainStopDisabled;
   $("execStopBtn").hidden = controls.executionStopHidden;
   $("execRun").disabled = controls.executionRunDisabled;
-  if (status) $("liveStatus").textContent = status;
+  $("exportBtn").disabled = !currentSessionId;
 }
 
 /* ---------------- send ---------------- */
@@ -1512,9 +1643,15 @@ async function loadConnectors() {
       const config = configs.get(connector.id);
       const connectorName = localizedMarkup(connectorLabelKey(connector.id), connector.label || connector.id);
       const descriptions = connector.actions.map((action) => localizedMarkup(connectorActionKeys(connector.id, action.id)?.description, action.id)).join(" · ");
+      const notes = [
+        connector.experimental ? t("connectorExperimental") : "",
+        connector.limitation === "gmail_token_expiry_unmanaged" ? t("gmailTokenLimitation") : "",
+        connector.securityGuidance === "supabase_least_privilege_rls" ? t("supabaseSecurityGuidance") : "",
+      ].filter(Boolean);
+      const hostNote = connector.displayHost ? `<small>${esc(t("configuredHost"))}: ${bdi(connector.displayHost, "ltr")}</small>` : "";
       const row = document.createElement("div");
       row.className = "connector-row";
-      row.innerHTML = `<div><b>${connectorName}</b><small>${connector.configured ? descriptions : esc(t("notConfigured"))}</small></div><div class="connector-controls">${config ? `<button class="btn-mini" data-config aria-expanded="false">${esc(t("configure"))}</button>` : ""}<button class="btn-mini" data-toggle${!connector.configured ? " disabled" : ""}>${esc(enabled ? t("disable") : t("enable"))}</button></div>`;
+      row.innerHTML = `<div><b>${connectorName}</b><small>${connector.configured ? descriptions : esc(t("notConfigured"))}</small>${notes.map((note) => `<small>${esc(note)}</small>`).join("")}${hostNote}</div><div class="connector-controls">${config ? `<button class="btn-mini" data-config aria-expanded="false">${esc(t("configure"))}</button>` : ""}<button class="btn-mini" data-toggle${!enabled && !connector.ready ? " disabled" : ""}>${esc(enabled ? t("disable") : t("enable"))}</button></div>`;
       row.querySelector("[data-toggle]").onclick = async () => {
         try {
           await api(`/api/sessions/${requestedId}/connectors/${encodeURIComponent(connector.id)}`, { method: "POST", body: JSON.stringify({ enabled: !enabled }) });
@@ -1574,6 +1711,16 @@ async function loadConnectors() {
         buttons[0].onclick = () => decide(true);
         buttons[1].onclick = () => decide(false);
       }
+      list.appendChild(row);
+    }
+    for (const audit of (data.readAudits || []).slice(-20).reverse()) {
+      const row = document.createElement("div");
+      row.className = "connector-action connector-audit";
+      const connectorName = localizedMarkup(connectorLabelKey(audit.connector), audit.connector);
+      const actionName = localizedMarkup(connectorActionKeys(audit.connector, audit.action)?.label, audit.action);
+      const status = localizedMarkup(connectorStatusKey(audit.status), audit.status);
+      const timing = [audit.requestedAt, audit.completedAt].filter(Boolean).map((date) => formatClock(date)).join(" → ");
+      row.innerHTML = `<b>${esc(t("connectorReadAudit"))} · ${connectorName} · ${actionName}</b><span class="connector-status">${status}</span><small>${esc(timing)}</small><pre dir="ltr">${esc(JSON.stringify(audit.inputSummary || {}, null, 2))}</pre>`;
       list.appendChild(row);
     }
   } catch (error) {
@@ -2043,6 +2190,9 @@ $("messageInput").addEventListener("input", () => autoGrow($("messageInput")));
 $("newSessionModal").addEventListener("click", (e) => { if (e.target === $("newSessionModal")) closeNewSessionModal(); });
 $("connFooter").onclick = () => { pollHealth(); if (currentSessionId) openSession(currentSessionId); };
 $("openOnboard").onclick = openOnboard;
+$("diagnosticsBtn").onclick = () => {
+  if (confirm(t("diagnosticsConfirm"))) location.href = "/api/diagnostics";
+};
 $("onboardRefresh").onclick = loadOnboard;
 $("onboardDone").onclick = closeOnboard;
 $("onboardModal").addEventListener("click", (e) => { if (e.target === $("onboardModal")) closeOnboard(); });
@@ -2057,6 +2207,17 @@ $("approveCancel").onclick = cancelExecApproval;
 $("approveModal").addEventListener("click", (e) => { if (e.target === $("approveModal")) cancelExecApproval(); });
 $("toggleRail").onclick = toggleRailCollapsed;
 $("toggleContext").onclick = toggleContextColumn;
+$("railDrawerToggle").onclick = () => toggleShellOverlay("rail", $("railDrawerToggle"));
+$("emptyRailDrawerToggle").onclick = () => toggleShellOverlay("rail", $("emptyRailDrawerToggle"));
+$("workflowToggle").onclick = () => toggleShellOverlay("workflow", $("workflowToggle"));
+$("contextDrawerToggle").onclick = () => toggleShellOverlay("context", $("contextDrawerToggle"));
+$("shellOverlayBackdrop").onclick = () => closeShellOverlay();
+document.addEventListener("keydown", handleShellOverlayKeydown);
+window.addEventListener("resize", () => {
+  if (activeShellOverlay === "rail" && !window.matchMedia("(max-width: 860px)").matches) closeShellOverlay({ restoreFocus: false });
+  if (["workflow", "context"].includes(activeShellOverlay) && !window.matchMedia("(max-width: 1100px)").matches) closeShellOverlay({ restoreFocus: false });
+  applyShellChrome();
+});
 $("themeBtn").onclick = toggleTheme;
 $("presetsBtn").onclick = openPresets;
 $("closePresets").onclick = closePresets;

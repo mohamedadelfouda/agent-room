@@ -120,3 +120,27 @@ test("Codex isolated home copies auth only and distrusts project config", async 
     await fs.rm(root, { recursive: true, force: true });
   }
 });
+
+test("Codex auth isolation refuses a symlink to a file outside CODEX_HOME", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "agent-room-codex-auth-link-test-"));
+  try {
+    const sourceHome = path.join(root, "source-home");
+    const project = path.join(root, "project");
+    const external = path.join(root, "outside-secret.json");
+    await fs.mkdir(sourceHome, { recursive: true });
+    await fs.mkdir(path.join(project, ".git"), { recursive: true });
+    await fs.writeFile(external, '{"token":"must-not-copy"}');
+    try { await fs.symlink(external, path.join(sourceHome, "auth.json"), "file"); }
+    catch (error) {
+      if (process.platform === "win32" && ["EPERM", "EACCES", "ENOTSUP"].includes(error.code)) {
+        t.skip(`symlink creation is unavailable: ${error.code}`);
+        return;
+      }
+      throw error;
+    }
+    await assert.rejects(
+      () => prepareIsolatedCodexHome({ tempDir: path.join(root, "run"), cwd: project, sourceEnv: { CODEX_HOME: sourceHome } }),
+      /not a regular file/,
+    );
+  } finally { await fs.rm(root, { recursive: true, force: true }); }
+});

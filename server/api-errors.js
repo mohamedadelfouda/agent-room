@@ -5,9 +5,9 @@ export function apiErrorPayload(code, error, extra = {}) {
   return { ...extra, code, error: detail, detail };
 }
 
-export function expectedApiError(code, message) {
+export function expectedApiError(code, message, status = 409) {
   const error = new Error(message);
   error.apiCode = code;
-  error.apiStatus = 409;
+  error.apiStatus = status;
   return error;
 }

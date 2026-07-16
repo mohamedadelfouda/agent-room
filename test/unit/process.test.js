@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, realpathSync, symlinkSync, writeFileSync, rmSync } from "node:fs";
+import { realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync, spawn } from "node:child_process";
@@ -132,6 +133,55 @@ test("trusted CLI approvals persist to disk and reload in a fresh process", asyn
     `;
     const reloaded = execFileSync(process.execPath, ["--input-type=module", "-e", script], { encoding: "utf8" });
     assert.equal(reloaded, approved);
+  } finally {
+    configureTrustedCliStore("");
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a trusted CLI is rejected after the executable at that path changes", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "ar-trusted-cli-swap-"));
+  const store = join(dir, "trusted-cli.json");
+  const binary = join(dir, process.platform === "win32" ? "codex.exe" : "codex");
+  const providerId = "swap_test";
+  writeFileSync(binary, "first executable identity");
+  if (process.platform !== "win32") {
+    const { chmodSync } = await import("node:fs");
+    chmodSync(binary, 0o755);
+  }
+  try {
+    configureTrustedCliStore(store);
+    await approveProviderCommand(providerId, binary, new Set(["codex"]));
+    writeFileSync(binary, "different executable identity");
+    await assert.rejects(
+      () => resolveAllowedCommand(binary, new Set(["codex"]), { trustedPaths: [approvedProviderCommand(providerId)] }),
+      /identity changed/,
+    );
+    await approveProviderCommand(providerId, binary, new Set(["codex"]));
+    // Compare against the SAME canonicalizer the code uses (async fs.realpath). On Windows,
+    // realpathSync keeps an 8.3 short path (e.g. MOHAM_~1) while promises.realpath expands it,
+    // so the sync form would spuriously mismatch when os.tmpdir() sits under a short-name parent.
+    assert.equal(await resolveAllowedCommand(binary, new Set(["codex"]), { trustedPaths: [approvedProviderCommand(providerId)] }), await realpath(binary));
+  } finally {
+    configureTrustedCliStore("");
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("legacy path-only trusted CLI records are not hydrated", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "ar-trusted-cli-legacy-"));
+  const store = join(dir, "trusted-cli.json");
+  const binary = join(dir, process.platform === "win32" ? "codex.exe" : "codex");
+  writeFileSync(binary, "legacy executable");
+  writeFileSync(store, JSON.stringify({ legacy_test: binary }));
+  if (process.platform !== "win32") {
+    const { chmodSync } = await import("node:fs");
+    chmodSync(binary, 0o755);
+  }
+  try {
+    configureTrustedCliStore(store);
+    await hydrateTrustedProviderCommands({ allowed: new Set(["codex"]) });
+    assert.equal(approvedProviderCommand("legacy_test"), "");
   } finally {
     configureTrustedCliStore("");
     rmSync(dir, { recursive: true, force: true });

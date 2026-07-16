@@ -8,15 +8,16 @@
 </head>
 <body>
   <div id="appShell" class="shell">
-    <aside class="rail" aria-label="Agent Room">
+    <aside id="sessionsRail" class="rail" aria-label="Agent Room" tabindex="-1">
       <div class="brand">
         <span class="brand-mark" aria-hidden="true">AR</span>
         <div class="brand-name">
           <strong>Agent Room</strong>
           <small data-i18n="brandSubtitle">جلسة ذكاء اصطناعي مشتركة</small>
         </div>
-        <button id="toggleContext" type="button" class="icon-btn" title="Context" aria-label="Context" aria-pressed="true" data-i18n-title="toggleContext" data-i18n-aria-label="toggleContext">◫</button>
+        <button id="toggleContext" type="button" class="icon-btn" title="Context" aria-label="Context" aria-pressed="true" aria-expanded="false" aria-controls="contextCol" data-i18n-title="toggleContext" data-i18n-aria-label="toggleContext">◫</button>
         <button id="openOnboard" type="button" class="icon-btn" title="Setup" aria-label="Setup" data-i18n-title="setup" data-i18n-aria-label="setup">⚙</button>
+        <button id="diagnosticsBtn" type="button" class="icon-btn" title="Diagnostics" aria-label="Export diagnostics" data-i18n-title="diagnostics" data-i18n-aria-label="diagnostics">i</button>
         <div class="lang-toggle" role="group" aria-label="Language" data-i18n-aria-label="language">
           <button type="button" class="lang-btn is-active" data-lang="ar" aria-label="Arabic" data-i18n-aria-label="arabicLanguage" aria-pressed="true">ع</button>
           <button type="button" class="lang-btn" data-lang="en" aria-label="English" data-i18n-aria-label="englishLanguage" aria-pressed="false">EN</button>
@@ -50,6 +51,7 @@
 
     <main class="main">
       <section id="emptyState" class="empty">
+        <button id="emptyRailDrawerToggle" type="button" class="icon-btn shell-overlay-toggle rail-drawer-toggle empty-rail-toggle" aria-label="Sessions" aria-controls="sessionsRail" aria-expanded="false" data-i18n-aria-label="sessions">☰</button>
         <div class="empty-inner">
           <div class="empty-mark" aria-hidden="true">◒</div>
           <h1 data-i18n="emptyTitle">جلسة واحدة، أكثر من عقل</h1>
@@ -61,10 +63,13 @@
       <div id="sessionView" class="session-view" hidden>
         <header class="topbar">
           <div class="topbar-titles">
-            <h1 id="sessionTitle">—</h1>
+            <h1 id="sessionTitle" tabindex="-1">—</h1>
             <p id="sessionMeta"></p>
           </div>
           <div class="topbar-actions">
+            <button id="railDrawerToggle" type="button" class="icon-btn shell-overlay-toggle rail-drawer-toggle" aria-label="Sessions" aria-controls="sessionsRail" aria-expanded="false" data-i18n-aria-label="sessions">☰</button>
+            <button id="workflowToggle" type="button" class="icon-btn shell-overlay-toggle" aria-label="Room flow" aria-controls="workflow" aria-expanded="false" data-i18n-aria-label="workflowNav">⇥</button>
+            <button id="contextDrawerToggle" type="button" class="icon-btn shell-overlay-toggle" aria-label="Context" aria-controls="contextCol" aria-expanded="false" data-i18n-aria-label="contextColumn">◫</button>
             <span class="pill" id="statusPill" role="status" aria-live="polite">—</span>
             <button id="setupToggle" class="btn-ghost setup-toggle" aria-expanded="false" aria-controls="setupDrawer">
               <span id="setupSummary" class="setup-summary"></span>
@@ -137,7 +142,7 @@
         </section>
 
         <div class="workspace">
-          <aside class="workflow" id="workflow" aria-label="Room flow" data-i18n-aria-label="workflowNav">
+          <aside class="workflow" id="workflow" aria-label="Room flow" data-i18n-aria-label="workflowNav" tabindex="-1">
             <h2 data-i18n="workflow">مسار الغرفة</h2>
             <div class="stage-list" id="stageList"></div>
           </aside>
@@ -167,7 +172,7 @@
             </section>
           </div>
 
-          <aside id="contextCol" class="context-col" aria-label="Context" data-i18n-aria-label="contextColumn"></aside>
+          <aside id="contextCol" class="context-col" aria-label="Context" data-i18n-aria-label="contextColumn" tabindex="-1"></aside>
         </div>
         <div id="conversationAnnouncements" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></div>
 
@@ -188,6 +193,8 @@
       </div>
     </main>
   </div>
+
+  <div id="shellOverlayBackdrop" class="shell-overlay-backdrop" hidden></div>
 
   <div id="onboardModal" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="onboardModalTitle" aria-describedby="onboardModalDescription">
     <div class="modal modal-lg" tabindex="-1">

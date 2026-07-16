@@ -1,11 +1,27 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readFile, rm, stat, writeFile, utimes } from "node:fs/promises";
+import { readFile, readdir, rm, stat, writeFile, utimes } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { createSession, saveSession, getSession, addMessage, listSessions, renameSession, deleteSession } from "../../server/store.js";
+import {
+  createSession,
+  saveSession,
+  getSession,
+  addMessage,
+  listSessions,
+  listSessionRecoveries,
+  exportSessionRecovery,
+  retrySessionRecovery,
+  deleteSessionRecovery,
+  mutateSession,
+  renameSession,
+  deleteSession,
+  SKIP_SESSION_WRITE,
+} from "../../server/store.js";
+import { CURRENT_SESSION_SCHEMA_VERSION } from "../../server/session-schema.js";
 
 const sessionsDir = join(dirname(fileURLToPath(import.meta.url)), "../../data/sessions");
+const backupsDir = join(dirname(fileURLToPath(import.meta.url)), "../../data/session-backups");
 const cleanup = (id) => Promise.all([
   rm(join(sessionsDir, `${id}.json`), { force: true }),
   rm(join(sessionsDir, `${id}.summary.json`), { force: true }),
@@ -39,6 +55,120 @@ test("concurrent addMessage calls on one session don't drop appends", async () =
     assert.equal(new Set(loaded.messages.map((m) => m.content)).size, 40); // all distinct, none lost
   } finally {
     await cleanup(s.id);
+  }
+});
+
+test("a rejected conditional mutation performs no session write", async () => {
+  const session = await createSession("skip-session-write");
+  try {
+    const mainPath = join(sessionsDir, `${session.id}.json`);
+    const before = await readFile(mainPath, "utf8");
+    const result = await mutateSession(session.id, () => SKIP_SESSION_WRITE);
+    const after = await readFile(mainPath, "utf8");
+    assert.equal(result, false);
+    assert.equal(after, before);
+  } finally {
+    await cleanup(session.id);
+  }
+});
+
+test("an unversioned session migrates only after its original source is backed up", async () => {
+  const id = `legacy-${Date.now()}`;
+  const mainPath = join(sessionsDir, `${id}.json`);
+  const legacy = {
+    id,
+    title: "Legacy session",
+    status: "idle",
+    mode: "collaboration",
+    createdAt: "2025-01-01T00:00:00.000Z",
+    updatedAt: "2025-01-01T00:00:00.000Z",
+    messages: [],
+    decisions: [],
+    settings: {},
+    connectorActions: [{ id: "connector-1", status: "completed" }],
+    executions: [{ taskId: "execution-1", status: "merged", cleanupPending: false, cleanupCompletedAt: "2025-01-01T00:00:00.000Z" }],
+  };
+  const original = JSON.stringify(legacy, null, 2);
+  await writeFile(mainPath, original, "utf8");
+
+  try {
+    const migrated = await getSession(id);
+    assert.equal(migrated.sessionSchemaVersion, CURRENT_SESSION_SCHEMA_VERSION);
+    assert.deepEqual(migrated.connectorActions, legacy.connectorActions);
+    assert.deepEqual(migrated.executions, legacy.executions);
+    const backups = (await readdir(backupsDir)).filter((name) => name.startsWith(`${id}.`));
+    assert.equal(backups.length, 1);
+    assert.equal(await readFile(join(backupsDir, backups[0]), "utf8"), original);
+  } finally {
+    await cleanup(id);
+    const backups = await readdir(backupsDir).catch(() => []);
+    await Promise.all(backups.filter((name) => name.startsWith(`${id}.`)).map((name) => rm(join(backupsDir, name), { force: true })));
+  }
+});
+
+test("a future session schema is rejected without rewriting its source", async () => {
+  const id = `future-${Date.now()}`;
+  const mainPath = join(sessionsDir, `${id}.json`);
+  const original = JSON.stringify({ id, sessionSchemaVersion: CURRENT_SESSION_SCHEMA_VERSION + 1 }, null, 2);
+  await writeFile(mainPath, original, "utf8");
+  try {
+    await assert.rejects(() => getSession(id), (error) => error.code === "unsupported_session_schema");
+    assert.equal(await readFile(mainPath, "utf8"), original);
+  } finally {
+    await cleanup(id);
+  }
+});
+
+test("malformed session JSON appears once as recoverable and its original can be exported", async () => {
+  const id = `corrupt-${Date.now()}`;
+  const fileName = `${id}.json`;
+  const original = Buffer.from("{not valid json", "utf8");
+  await writeFile(join(sessionsDir, fileName), original);
+  let recovery;
+  try {
+    const first = await listSessions();
+    const second = await listSessions();
+    recovery = first.find((item) => item.recoveryNeeded && item.recoveryCategory === "invalid_json" && item.id.startsWith("recovery-"));
+    assert.ok(recovery);
+    assert.equal(second.filter((item) => item.recoveryId === recovery.recoveryId).length, 1);
+    const records = (await listSessionRecoveries()).filter((record) => record.fileName === fileName);
+    assert.equal(records.length, 1);
+    const exported = await exportSessionRecovery(recovery.recoveryId);
+    assert.deepEqual(await readFile(exported.sourcePath), original);
+    await deleteSessionRecovery(recovery.recoveryId);
+    await assert.rejects(() => stat(join(sessionsDir, fileName)), /ENOENT/);
+  } finally {
+    if (recovery) await deleteSessionRecovery(recovery.recoveryId).catch(() => {});
+    await cleanup(id);
+  }
+});
+
+test("concurrent recovery retry and delete produce one complete outcome", async () => {
+  const id = `recovery-race-${Date.now()}`;
+  const fileName = `${id}.json`;
+  const sourcePath = join(sessionsDir, fileName);
+  let recovery;
+  try {
+    await writeFile(sourcePath, "{damaged", "utf8");
+    await listSessions();
+    recovery = (await listSessionRecoveries()).find((record) => record.fileName === fileName);
+    assert.ok(recovery);
+    const now = new Date().toISOString();
+    await writeFile(sourcePath, JSON.stringify({
+      id, sessionSchemaVersion: CURRENT_SESSION_SCHEMA_VERSION, title: "Recovered",
+      status: "idle", mode: "collaboration", createdAt: now, updatedAt: now,
+      messages: [], decisions: [], settings: {}, activeRun: null,
+    }), "utf8");
+
+    const outcomes = await Promise.allSettled([
+      retrySessionRecovery(recovery.recoveryId),
+      deleteSessionRecovery(recovery.recoveryId),
+    ]);
+    assert.equal(outcomes.filter((outcome) => outcome.status === "fulfilled").length, 1);
+    assert.equal(outcomes.filter((outcome) => outcome.status === "rejected").length, 1);
+  } finally {
+    if (recovery) await deleteSessionRecovery(recovery.recoveryId).catch(() => {});
+    await cleanup(id);
   }
 });
 

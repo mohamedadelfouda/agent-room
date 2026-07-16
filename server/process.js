@@ -1,5 +1,6 @@
 import { spawn, execFile } from "node:child_process";
 import crypto from "node:crypto";
+import { createReadStream } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -56,6 +57,25 @@ export function allowedCommand(input, allowed = ALLOWED_CLI, { trustedPaths = []
 const resolvedCommands = new Map();
 const approvedProviderCommands = new Map();
 
+function sameFileSnapshot(left, right) {
+  return left.size === right.size && left.mtimeMs === right.mtimeMs && left.ino === right.ino && left.dev === right.dev;
+}
+
+async function executableFingerprint(filePath) {
+  const before = await fs.stat(filePath);
+  if (!before.isFile()) throw new Error("Trusted command is no longer a file");
+  const hash = crypto.createHash("sha256");
+  await new Promise((resolve, reject) => {
+    const stream = createReadStream(filePath);
+    stream.on("data", (chunk) => hash.update(chunk));
+    stream.once("error", reject);
+    stream.once("end", resolve);
+  });
+  const after = await fs.stat(filePath);
+  if (!sameFileSnapshot(before, after)) throw new Error("Trusted command changed while its identity was checked");
+  return hash.digest("hex");
+}
+
 // Persisted approvals survive process restarts. Unconfigured (tests) stays
 // in-memory only so the suite never writes into the developer's data folder.
 let trustedCliStorePath = "";
@@ -66,7 +86,7 @@ export function configureTrustedCliStore(filePath) {
 }
 
 export function approvedProviderCommand(providerId) {
-  return approvedProviderCommands.get(String(providerId || "")) || "";
+  return approvedProviderCommands.get(String(providerId || ""))?.path || "";
 }
 
 async function persistApprovedProviderCommands() {
@@ -76,7 +96,7 @@ async function persistApprovedProviderCommands() {
   const storePath = trustedCliStorePath;
   const run = persistApprovedChain.then(async () => {
     if (!storePath) return;
-    const payload = Object.fromEntries(approvedProviderCommands);
+    const payload = { schemaVersion: 1, providers: Object.fromEntries(approvedProviderCommands) };
     const tempPath = `${storePath}.${crypto.randomUUID()}.tmp`;
     await fs.mkdir(path.dirname(storePath), { recursive: true });
     try {
@@ -108,13 +128,17 @@ export async function hydrateTrustedProviderCommands({ allowed = ALLOWED_CLI } =
   } catch {
     return;
   }
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return;
-  for (const [providerId, commandPath] of Object.entries(parsed)) {
+  if (!parsed || parsed.schemaVersion !== 1 || !parsed.providers || typeof parsed.providers !== "object" || Array.isArray(parsed.providers)) return;
+  for (const [providerId, record] of Object.entries(parsed.providers)) {
     if (!/^[a-z0-9_-]+$/.test(providerId)) continue;
+    const commandPath = record?.path;
+    const fingerprint = record?.fingerprint;
     if (!path.isAbsolute(String(commandPath || ""))) continue;
+    if (!/^[a-f0-9]{64}$/.test(String(fingerprint || ""))) continue;
     try {
       const resolved = await resolveAllowedCommand(commandPath, allowed, { trustedPaths: [commandPath] });
-      approvedProviderCommands.set(providerId, resolved);
+      if (await executableFingerprint(resolved) !== fingerprint) continue;
+      approvedProviderCommands.set(providerId, { path: resolved, fingerprint });
     } catch {
       // Drop entries that no longer resolve — user can Trust & check again.
     }
@@ -161,6 +185,16 @@ export async function resolveAllowedCommand(input, allowed = ALLOWED_CLI, option
     if (!new Set(trusted.map(normalize)).has(normalize(resolved))) {
       throw new Error("Absolute command path has not been trusted by Agent Room");
     }
+    const approved = [...approvedProviderCommands.values()].find((record) => normalize(record.path) === normalize(resolved));
+    if (options.verifyApprovedIdentity !== false && approved && await executableFingerprint(resolved) !== approved.fingerprint) {
+      throw new Error("Trusted command identity changed; Trust & check this executable again");
+    }
+    // Accepted residual (see SOURCE_RUN_REMEDIATION_PLAN.md): an unavoidable TOCTOU exists between
+    // this identity check and the eventual spawn of `resolved`, because there is no portable way to
+    // exec a verified file handle (no fexecve). Callers spawn `resolved` immediately with no
+    // intervening await, so the window is microscopic, and exploiting it already requires write
+    // access to the trusted CLI path — a stronger foothold than the swap itself. A copy-and-exec
+    // from a private path would be disproportionate to that risk.
     return resolved;
   }
   const command = allowedCommand(raw, allowed, options);
@@ -180,16 +214,17 @@ export async function resolveAllowedCommand(input, allowed = ALLOWED_CLI, option
 export async function approveProviderCommand(providerId, input, allowed) {
   if (!/^[a-z0-9_-]+$/.test(String(providerId || ""))) throw new Error("Invalid provider id");
   if (!path.isAbsolute(String(input || ""))) throw new Error("Only an explicitly selected absolute path needs approval");
-  const resolved = await resolveAllowedCommand(input, allowed, { trustedPaths: [input] });
+  const resolved = await resolveAllowedCommand(input, allowed, { trustedPaths: [input], verifyApprovedIdentity: false });
+  const record = { path: resolved, fingerprint: await executableFingerprint(resolved) };
   const hadPrevious = approvedProviderCommands.has(providerId);
-  const previous = hadPrevious ? approvedProviderCommands.get(providerId) : "";
-  approvedProviderCommands.set(providerId, resolved);
+  const previous = hadPrevious ? approvedProviderCommands.get(providerId) : null;
+  approvedProviderCommands.set(providerId, record);
   try {
     await persistApprovedProviderCommands();
   } catch (error) {
     // Roll memory back only if this approval is still the latest for the
     // provider — a newer concurrent approve must not be wiped by our failure.
-    if (approvedProviderCommands.get(providerId) === resolved) {
+    if (approvedProviderCommands.get(providerId) === record) {
       if (hadPrevious) approvedProviderCommands.set(providerId, previous);
       else approvedProviderCommands.delete(providerId);
     }

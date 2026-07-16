@@ -22,6 +22,10 @@ async function post(pathname, body) {
   });
 }
 
+async function get(pathname) {
+  return fetch(`${origin}${pathname}`, { headers: { Cookie: cookie, Origin: origin } });
+}
+
 before(async () => {
   runtimeDir = await fs.mkdtemp(path.join(os.tmpdir(), "agent-room-api-errors-"));
   projectDir = await fs.mkdtemp(path.join(os.tmpdir(), "agent-room-api-project-"));
@@ -70,6 +74,24 @@ test("route rejection exposes the same reason code in the error and route", asyn
   assert.equal(payload.detail, payload.error);
 });
 
+test("invalid orchestration configuration is rejected before a run starts", async () => {
+  const response = await post(`/api/sessions/${sessionId}/message`, {
+    content: "Compare two approaches",
+    mode: "collaboration",
+    rounds: 2,
+    finalizer: "cursor",
+    agents: {
+      claude: { enabled: true },
+      codex: { enabled: true },
+    },
+  });
+  const payload = await response.json();
+
+  assert.equal(response.status, 400);
+  assert.equal(payload.code, "invalid_finalizer");
+  assert.equal(payload.detail, payload.error);
+});
+
 test("pending execution conflict returns 409 with a stable code", async () => {
   const attached = await post(`/api/sessions/${sessionId}/project`, { path: projectDir });
   assert.equal(attached.status, 200);
@@ -83,6 +105,51 @@ test("pending execution conflict returns 409 with a stable code", async () => {
   assert.equal(response.status, 409);
   assert.equal(payload.code, "pending_execution_decisions");
   assert.equal(payload.detail, payload.error);
+});
+
+test("connector routes distinguish invalid, conflicting, and unavailable requests", async () => {
+  const created = await post("/api/sessions", { title: "Connector contract" });
+  const connectorSessionId = (await created.json()).id;
+
+  const invalid = await post(`/api/sessions/${connectorSessionId}/connectors/not-real`, { enabled: true });
+  assert.equal(invalid.status, 400);
+  assert.equal((await invalid.json()).code, "invalid_connector");
+
+  const disabled = await post(`/api/sessions/${connectorSessionId}/connector-actions`, {
+    connector: "gmail", action: "list_messages", input: {},
+  });
+  assert.equal(disabled.status, 409);
+  assert.equal((await disabled.json()).code, "connector_disabled");
+
+  const enabled = await post(`/api/sessions/${connectorSessionId}/connectors/gmail`, { enabled: true });
+  assert.equal(enabled.status, 200);
+  const unavailable = await post(`/api/sessions/${connectorSessionId}/connector-actions`, {
+    connector: "gmail", action: "list_messages", input: {},
+  });
+  assert.equal(unavailable.status, 503);
+  assert.equal((await unavailable.json()).code, "connector_auth_unavailable");
+});
+
+test("diagnostics export reports health and redacts log credentials", async () => {
+  const { logError } = await import("../../server/logger.js");
+  const secret = "diagnostic-secret-token-123456";
+  logError("diagnostic export test", `Authorization: Bearer ${secret}`);
+  const response = await get("/api/diagnostics");
+  const text = await response.text();
+  const payload = JSON.parse(text);
+  assert.equal(response.status, 200);
+  assert.match(response.headers.get("content-disposition"), /agent-room-diagnostics/);
+  assert.equal(payload.runtime.node, process.version);
+  assert.equal(typeof payload.logging.healthy, "boolean");
+  assert.equal(text.includes(secret), false);
+  assert.match(text, /<redacted>/);
+});
+
+test("a missing recovery record returns the stable 404 contract", async () => {
+  const response = await get("/api/session-recovery/00000000000000000000000000000000/export");
+  const payload = await response.json();
+  assert.equal(response.status, 404);
+  assert.equal(payload.code, "not_found");
 });
 
 test("MCP bridge returns Invalid Request for a JSON null body", async () => {
