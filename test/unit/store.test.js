@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readFile, readdir, rm, stat, writeFile, utimes } from "node:fs/promises";
+import { open, readFile, readdir, rm, stat, writeFile, utimes } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import {
@@ -17,6 +17,7 @@ import {
   renameSession,
   deleteSession,
   SKIP_SESSION_WRITE,
+  directoryFsyncErrorIsFatal,
 } from "../../server/store.js";
 import { CURRENT_SESSION_SCHEMA_VERSION } from "../../server/session-schema.js";
 
@@ -41,6 +42,37 @@ test("concurrent saves of one session store one complete payload — never torn 
     assert.deepEqual(loaded.messages, expected[loaded.messages.length]);
   } finally {
     await cleanup(s.id);
+  }
+});
+
+test("a durable session write is fsync'd for power-loss durability", async (t) => {
+  // Round-trip tests can't catch a silently dropped fsync — spy on FileHandle.sync via its prototype and
+  // confirm the durable transcript write actually syncs. (The best-effort directory fsync may also fire.)
+  const probe = await open(join(sessionsDir, ".sync-probe.tmp"), "w");
+  const proto = Object.getPrototypeOf(probe);
+  await probe.close();
+  await rm(join(sessionsDir, ".sync-probe.tmp"), { force: true });
+  const realSync = proto.sync;
+  let syncs = 0;
+  t.mock.method(proto, "sync", async function spy(...args) { syncs += 1; return realSync.apply(this, args); });
+
+  const s = await createSession("durability-fsync-test");
+  syncs = 0; // measure only this save, not the create's own writes
+  await saveSession(s);
+  assert.ok(syncs >= 1, "the durable transcript write called fsync");
+  await rm(join(sessionsDir, `${s.id}.json`), { force: true }).catch(() => {});
+  await rm(join(sessionsDir, `${s.id}.summary.json`), { force: true }).catch(() => {});
+});
+
+test("directoryFsyncErrorIsFatal surfaces real I/O failures but tolerates unsupported-platform ones", () => {
+  // Directory fsync isn't supported on Windows (syncing a dir handle throws EPERM — verified) or on some
+  // network filesystems (EINVAL); those must stay best-effort or every durable write would fail there. A
+  // real resource/I-O failure must surface so a caller never gets a false durability acknowledgement.
+  for (const code of ["EPERM", "EINVAL", "ENOTSUP", "EISDIR", undefined]) {
+    assert.equal(directoryFsyncErrorIsFatal({ code }), false, `tolerate ${code}`);
+  }
+  for (const code of ["ENOSPC", "EIO", "EMFILE", "ENFILE", "EDQUOT", "EROFS"]) {
+    assert.equal(directoryFsyncErrorIsFatal({ code }), true, `surface ${code}`);
   }
 });
 
