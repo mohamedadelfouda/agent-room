@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Collaboration round-summaries now render in the reader's language. The server persists the structured discussion outcome on the message and the browser renders the wording from it, so an English reader sees an English summary and an Arabic reader an Arabic one from the same run — instead of the previously hardcoded Arabic text.
 - Trusted CLI paths from in-app Setup / Trust & check now persist across server restarts, and onboarding Setup discovers and trusts a found executable without closing the checklist dialog.
 - Added in-app CLI setup: read-only discovery of native provider executables hidden behind npm/pnpm shims (such as a global Codex install on Windows), one-click Trust & check from a discovered path, and per-provider install guidance in the settings drawer and onboarding checklist.
 

@@ -5,6 +5,7 @@ import {
   decisionActionKey,
   decisionOutcomeKey,
   decisionTypeKey,
+  discussionOutcomeReport,
   errorMessageKey,
   formatLocaleDuration,
   formatMessageCount,
@@ -891,7 +892,22 @@ function renderMessages() {
     } else if (msg.author === "user") {
       el.innerHTML = `<div class="msg-body"><div class="msg-content md">${renderMarkdown(msg.content)}</div></div>`;
     } else {
-      el.innerHTML = `<div class="msg-body" dir="auto">${appError ? esc(msg.phase === "exec_error" ? t("executionFailed") : t("runFailed")) : esc(msg.content)}</div>${techHtml}`;
+      // A discussion round-summary carries its structured outcome in meta.outcome; render it in the
+      // reader's language rather than the server's stored (Arabic) text. Each free-text bullet (pending
+      // items / disagreements, authored by the agents) gets its own line and is bidi-isolated, so a
+      // different-direction item can't reorder against the template. Falls back to the stored content
+      // when there's no outcome (or a truncated one).
+      const report = meta.outcome ? discussionOutcomeReport(meta.outcome, lang) : null;
+      let systemBody;
+      if (appError) {
+        systemBody = esc(msg.phase === "exec_error" ? t("executionFailed") : t("runFailed"));
+      } else if (report?.text) {
+        const items = report.items.map((item) => `<div class="outcome-item" dir="auto">• ${bdi(item)}</div>`).join("");
+        systemBody = `${esc(report.text)}${items}`;
+      } else {
+        systemBody = esc(msg.content);
+      }
+      el.innerHTML = `<div class="msg-body" dir="auto">${systemBody}</div>${techHtml}`;
     }
     chat.appendChild(el);
   }

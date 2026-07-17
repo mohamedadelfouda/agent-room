@@ -319,6 +319,8 @@ textarea { resize: none; line-height: 1.55; }
 .msg-user .msg-body { background: color-mix(in srgb, var(--accent) 12%, var(--surface)); border: 1px solid color-mix(in srgb, var(--accent) 30%, var(--line-soft)); border-radius: 12px; padding: 13px 16px; }
 .msg-system { text-align: center; color: var(--faint); font-size: 12px; }
 .msg-system .msg-body { display: inline-block; max-width: 100%; border: 1px dashed var(--line); border-radius: 999px; padding: 5px 14px; overflow-wrap: anywhere; word-break: break-word; }
+/* Round-summary bullet lines (pending items / disagreements): each on its own start-aligned line. */
+.outcome-item { text-align: start; margin-block-start: 3px; }
 .msg-agent .msg-head { display: flex; align-items: center; gap: 9px; margin-bottom: 8px; }
 .msg-agent .msg-body { background: var(--surface); border: 1px solid var(--line-soft); border-radius: 12px; padding: 15px 17px; }
 .msg-name { font-size: 13px; font-weight: 700; }
