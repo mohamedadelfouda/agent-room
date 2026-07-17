@@ -54,10 +54,13 @@ test("deriveSetupCapabilities needs two operational providers — one is not eno
 });
 
 test("deriveSetupCapabilities unlocks discussion at two providers, execution only with Git too", () => {
+  // executeModes lives under `capabilities` — the registry shape (registry.js) every other consumer reads
+  // (executor.js, app.js). Entries fed to deriveSetupCapabilities carry the registry definition, so the
+  // model reads capabilities.executeModes, not a flattened field.
   const providers = [
-    { provider: "codex", operational: { available: true }, executeModes: ["run"] },
-    { provider: "claude", operational: { available: true }, executeModes: [] }, // ready reviewer, but can't execute
-    { provider: "cursor", operational: { available: false }, executeModes: ["run"] }, // not ready — excluded
+    { provider: "codex", operational: { available: true }, capabilities: { executeModes: ["run"] } },
+    { provider: "claude", operational: { available: true }, capabilities: { executeModes: [] } }, // ready reviewer, but can't execute
+    { provider: "cursor", operational: { available: false }, capabilities: { executeModes: ["run"] } }, // not ready — excluded
   ];
   const noGit = deriveSetupCapabilities({ providers, gitAvailable: false });
   assert.equal(noGit.discussion.available, true);
@@ -76,8 +79,8 @@ test("deriveSetupCapabilities unlocks discussion at two providers, execution onl
 test("deriveSetupCapabilities offers no execution engine when no ready provider can execute", () => {
   // Two providers ready, but neither supports an execute mode → discussion yes, execution engine no.
   const providers = [
-    { provider: "claude", operational: { available: true }, executeModes: [] },
-    { provider: "gemini", operational: { available: true }, executeModes: [] },
+    { provider: "claude", operational: { available: true }, capabilities: { executeModes: [] } },
+    { provider: "gemini", operational: { available: true }, capabilities: { executeModes: [] } },
   ];
   const caps = deriveSetupCapabilities({ providers, gitAvailable: true });
   assert.equal(caps.discussion.available, true);
