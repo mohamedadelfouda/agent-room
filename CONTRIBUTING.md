@@ -16,6 +16,12 @@ pnpm test:coverage
 
 Use `pnpm start` for the browser-facing source server. Run `pnpm test:browser` with system Chrome/Edge and `pnpm test:smoke` for the loopback startup check.
 
+## How contributions land
+
+- Fork or branch, make one coherent change with focused tests, and open a pull request.
+- **CI is the mandatory gate.** It re-runs the syntax check, unit tests, and lint/coverage on Ubuntu, Windows, and macOS for every pull request — you do not need the repository's review tooling or any Claude-specific tools to contribute.
+- **Only a maintainer merges to `main`.** `main` is a protected branch: a PR needs green CI and maintainer review before it can be merged.
+
 ## Change boundaries
 
 - Keep provider-specific behavior in `server/adapters/` and provider metadata in `server/providers/registry.js`.
@@ -26,7 +32,7 @@ Use `pnpm start` for the browser-facing source server. Run `pnpm test:browser` w
 
 ## Review gate
 
-This repository uses `.review-gate/GATE.md`. Follow the same ordered sequence before every push (`push` is always the final step):
+Maintainers (and the Claude-driven workflow) run `.review-gate/GATE.md` before pushing. **External contributors do not run this — CI is your gate.** The ordered sequence (`push` is always the final step):
 
 1. Review the diff with the required review agents and relevant guard checklists.
 2. Fix real findings.
@@ -39,3 +45,13 @@ Never bypass the hooks with `--no-verify`.
 ## Pull requests
 
 Keep one coherent change per PR. Explain the user impact, safety boundary, and validation commands. Do not add generated-by, agent, or co-author signatures; repository commits and PRs use only the human contributor's identity.
+
+## Maintainers: branch protection
+
+`main` is protected on GitHub (Settings → Branches → rule for `main`) so external contributions land only through review:
+
+- Require a pull request before merging.
+- Require these status checks to pass: `check + test` (Ubuntu / Windows / macOS), `lint + coverage`, and `source-only smoke` (Ubuntu / Windows / macOS).
+- Restrict who can push/merge to maintainers, and do not allow bypassing the above.
+
+CI (`.github/workflows/ci.yml`) already runs on every `pull_request`; branch protection is what makes those checks blocking.
