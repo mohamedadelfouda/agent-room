@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { createSession, getSession, saveSession } from "../../server/store.js";
 import { connectorCatalog, executeConnectorAction } from "../../server/connectors/registry.js";
-import { setConnectorEnabled, requestConnectorAction, decideConnectorAction } from "../../server/connectors/service.js";
+import { setConnectorEnabled, requestConnectorAction, decideConnectorAction, reconcileInterruptedReadAudits } from "../../server/connectors/service.js";
 import { handleMcpRequest } from "../../server/mcp-server.js";
 import { claudeMcpLaunch, resolveMcpBridgeGrant, setMcpBridgeUrl } from "../../server/mcp-config.js";
 
@@ -32,6 +32,30 @@ test("state-changing connector calls become proposals and require an explicit de
     assert.equal(rejected.status, "rejected");
     const saved = await getSession(session.id);
     assert.ok(saved.decisions.some((decision) => decision.outcome === "rejected" && decision.taskId === proposal.id));
+  } finally { await cleanup(session.id); }
+});
+
+test("a connector read audit stuck 'running' after a crash is reconciled to failed at startup", async () => {
+  const session = await createSession("read-audit-reconcile");
+  try {
+    // Simulate a crash mid-read: one audit left "running", one already settled.
+    const now = new Date().toISOString();
+    await saveSession({
+      ...session,
+      connectorReadAudits: [
+        { id: "stuck", connector: "gmail", action: "list_messages", status: "running", requestedAt: now },
+        { id: "done", connector: "gmail", action: "list_messages", status: "completed", requestedAt: now, completedAt: now },
+      ],
+    });
+    const recovered = await reconcileInterruptedReadAudits("server_restart");
+    assert.ok(recovered >= 1);
+    const reloaded = await getSession(session.id);
+    const stuck = reloaded.connectorReadAudits.find((audit) => audit.id === "stuck");
+    const done = reloaded.connectorReadAudits.find((audit) => audit.id === "done");
+    assert.equal(stuck.status, "interrupted");
+    assert.equal(stuck.interruptionReason, "server_restart");
+    assert.ok(stuck.completedAt);
+    assert.equal(done.status, "completed"); // a settled audit is left untouched
   } finally { await cleanup(session.id); }
 });
 

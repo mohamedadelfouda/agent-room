@@ -30,7 +30,7 @@ import { provider, providerCatalog, providerIds, discoverProviderModels } from "
 import { preflightRoute } from "./capability-router.js";
 import { recordDecision } from "./decisions.js";
 import { connectorCatalog, githubConnectorReadiness } from "./connectors/registry.js";
-import { setConnectorEnabled, requestConnectorAction, decideConnectorAction } from "./connectors/service.js";
+import { setConnectorEnabled, requestConnectorAction, decideConnectorAction, reconcileInterruptedReadAudits } from "./connectors/service.js";
 import { handleMcpRequest } from "./mcp-server.js";
 import { resolveMcpBridgeGrant, setMcpBridgeUrl } from "./mcp-config.js";
 export { configureConnectorSecretStore, hydrateConnectorSecrets } from "./connector-config.js";
@@ -380,6 +380,8 @@ const server = http.createServer(async (req, res) => {
       catch (error) { return json(res, error.apiStatus || 500, apiErrorPayload(error.apiCode || "connector_toggle_failed", error)); }
     }
     if (parts[0] === "api" && parts[1] === "sessions" && parts[2] && parts[3] === "connector-actions" && parts.length === 4 && req.method === "POST") {
+      if (shuttingDown) return json(res, 503, apiErrorPayload("server_shutting_down", "Server is shutting down"));
+      if (!startupReconciled) return json(res, 503, apiErrorPayload("startup_recovery_pending", "Startup recovery is still running; retry in a moment"));
       const body = await readJson(req);
       try { return json(res, 200, await requestConnectorAction(parts[2], String(body.connector || ""), String(body.action || ""), body.input || {})); }
       catch (error) { return json(res, error.apiStatus || 500, apiErrorPayload(error.apiCode || "connector_action_request_failed", error)); }
@@ -618,6 +620,7 @@ export const serverReady = new Promise((resolve, reject) => {
       void Promise.all([
         reconcileInterruptedRuns().catch((error) => logError("discussion reconciliation failed", error.message)),
         reconcileExecutionWorktrees().catch((error) => logError("execution workspace reconciliation failed", error.message)),
+        reconcileInterruptedReadAudits().catch((error) => logError("connector read audit reconciliation failed", error.message)),
       ]).finally(() => {
         startupReconciled = true;
         console.log(`\nAgent Room is running at ${url}\nData folder: ${path.join(rootPath(), "data")}\n`);
