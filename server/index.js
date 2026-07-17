@@ -411,8 +411,16 @@ const server = http.createServer(async (req, res) => {
       const body = await readJson(req);
       const projectPath = String(body.path || "").trim();
       if (!projectPath) return json(res, 400, apiErrorPayload("project_path_required", "Project path is required"));
-      let stat; try { stat = await fs.stat(projectPath); } catch { return json(res, 400, apiErrorPayload("project_path_not_found", "المسار غير موجود")); }
-      if (!stat.isDirectory()) return json(res, 400, apiErrorPayload("project_path_not_directory", "المسار مش مجلد"));
+      let stat;
+      try { stat = await fs.stat(projectPath); }
+      catch (error) {
+        // A missing path (ENOENT) or a path whose parent component is a file (ENOTDIR) is a 400 "not found" —
+        // matching projectIdentity's handling; permission, descriptor-exhaustion, and other I/O errors are real
+        // faults, so let them reach the global handler (500) instead of being masked as "not found" here.
+        if (["ENOENT", "ENOTDIR"].includes(error?.code)) return json(res, 400, apiErrorPayload("project_path_not_found", "Project path not found"));
+        throw error;
+      }
+      if (!stat.isDirectory()) return json(res, 400, apiErrorPayload("project_path_not_directory", "Project path is not a directory"));
       const git = await isGitRepo(projectPath);
       const identity = await projectIdentity(projectPath);
       const canOpenPr = git ? await hasGitHubOrigin(identity.realPath) : false;
@@ -447,7 +455,7 @@ const server = http.createServer(async (req, res) => {
     if (parts[0] === "api" && parts[1] === "sessions" && parts[2] && parts[3] === "execute" && req.method === "POST") {
       if (shuttingDown) return json(res, 503, apiErrorPayload("server_shutting_down", "Server is shutting down"));
       if (!startupReconciled) return json(res, 503, apiErrorPayload("startup_recovery_pending", "Startup recovery is still running; retry in a moment"));
-      if (isExecuting(parts[2]) || isRunning(parts[2])) return json(res, 409, apiErrorPayload("session_busy", "السيشن مشغولة بالفعل"));
+      if (isExecuting(parts[2]) || isRunning(parts[2])) return json(res, 409, apiErrorPayload("session_busy", "Session is already busy"));
       const body = await readJson(req);
       const backgroundExecution = runExecuteAndReview(parts[2], body, (event) => emit(parts[2], event));
       void backgroundExecution.catch((error) => logError("execution background task failed", error?.stack || String(error)));

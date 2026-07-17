@@ -54,6 +54,13 @@ test("known API, connector, and decision identifiers resolve to catalog keys", (
   assert.equal(errorMessageKey({ code: "provider_unavailable" }), "errorProviderUnavailable");
   assert.equal(errorMessageKey({ route: { reasonCode: "project_trust_required" } }), "routeProjectTrustRequired");
   assert.equal(errorMessageKey({ code: "future_error" }), "errorUnexpected");
+  // P0-3b: server execution errors now carry codes the client localizes (no hardcoded server strings).
+  assert.equal(errorMessageKey({ code: "executor_unknown" }), "errorExecutorUnknown");
+  assert.equal(errorMessageKey({ code: "reviewer_unknown" }), "errorReviewerUnknown");
+  assert.equal(errorMessageKey({ code: "executor_reviewer_same" }), "errorExecutorReviewerSame");
+  assert.equal(errorMessageKey({ code: "execution_task_required" }), "errorExecutionTaskRequired");
+  assert.equal(errorMessageKey({ code: "execution_stopped" }), "errorExecutionStopped");
+  assert.equal(errorMessageKey({ code: "execution_failed" }), "executionFailed");
   assert.equal(connectorLabelKey("gmail"), "connectorGmail");
   assert.equal(connectorActionKeys("gmail", "send_message").label, "actionGmailSendMessage");
   assert.equal(connectorStatusKey("pending"), "actionPending");
@@ -66,6 +73,12 @@ test("known API, connector, and decision identifiers resolve to catalog keys", (
     errorMessageKey({ code: "invalid_finalizer" }),
     errorMessageKey({ code: "provider_unavailable" }),
     errorMessageKey({ route: { reasonCode: "project_trust_required" } }),
+    errorMessageKey({ code: "executor_unknown" }),
+    errorMessageKey({ code: "reviewer_unknown" }),
+    errorMessageKey({ code: "executor_reviewer_same" }),
+    errorMessageKey({ code: "execution_task_required" }),
+    errorMessageKey({ code: "execution_stopped" }),
+    errorMessageKey({ code: "execution_failed" }),
     connectorLabelKey("gmail"),
     ...Object.values(connectorActionKeys("gmail", "send_message")),
     connectorStatusKey("pending"),

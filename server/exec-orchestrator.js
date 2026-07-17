@@ -5,6 +5,7 @@ import { provider } from "./providers/registry.js";
 import { resolveAllowedCommand, runProcess, terminateProcess } from "./process.js";
 import { hasBlockingSecrets } from "./secret-scan.js";
 import { logError, redact } from "./logger.js";
+import { expectedApiError } from "./api-errors.js";
 import { prepareAcceptedChange, prepareReviewSnapshot } from "./acceptance.js";
 import { recordDecision } from "./decisions.js";
 import { registerProjectScope } from "./project-tools.js";
@@ -62,7 +63,7 @@ function finalizeStalledExecStop(id, state) {
   if (activeExec.get(id) === state) activeExec.delete(id);
   state.releaseProjectScope?.();
   state.releaseActivity?.();
-  if (!finalizing) state.emit?.({ type: "exec_error", error: EXEC_STOPPED_MESSAGE });
+  if (!finalizing) state.emit?.({ type: "exec_error", error: EXEC_STOPPED_MESSAGE, code: "execution_stopped" });
 }
 
 // Stop an in-flight execution. Distinguishes: already_finished (nothing running), process_terminated
@@ -273,6 +274,7 @@ async function runExecuteAndReviewClaimed(sessionId, req, emit, releaseActivity)
   let pendingWorktreeNeedsSecretPurge = false;
   let projectPath = "";
   let terminalError = null;
+  let terminalErrorCode = null;
   activeExec.set(sessionId, state);
   const registerChild = (c) => {
     // If a Stop already landed, trackExecChild refuses the child and we kill it immediately, so no
@@ -289,18 +291,18 @@ async function runExecuteAndReviewClaimed(sessionId, req, emit, releaseActivity)
   try {
     const session = await getSession(sessionId);
     const project = session.project;
-    if (!project?.path) throw new Error("اربط مجلد مشروع (git) أولاً");
+    if (!project?.path) throw expectedApiError("project_path_required", "Attach a project folder (git) first", 400);
     await assertTrustedProject(session);
     if ((session.executions || []).filter((item) => !["merged", "pr_opened", "rejected", "blocked_secret"].includes(item.status)).length >= 20) {
-      throw new Error("Resolve existing execution decisions before starting more work");
+      throw expectedApiError("pending_execution_decisions", "Resolve existing execution decisions before starting more work", 409);
     }
     projectPath = project.path;
     const executor = req.executor, reviewer = req.reviewer, mode = req.mode || "run";
-    if (!provider(executor)) throw new Error("منفّذ غير معروف");
-    if (!provider(reviewer)) throw new Error("مراجع غير معروف");
-    if (executor === reviewer) throw new Error("المنفّذ والمراجع لازم يكونوا مختلفين");
+    if (!provider(executor)) throw expectedApiError("executor_unknown", "Unknown executor", 400);
+    if (!provider(reviewer)) throw expectedApiError("reviewer_unknown", "Unknown reviewer", 400);
+    if (executor === reviewer) throw expectedApiError("executor_reviewer_same", "Executor and reviewer must be different", 400);
     const task = String(req.task || "").trim();
-    if (!task) throw new Error("مهمة التنفيذ فارغة");
+    if (!task) throw expectedApiError("execution_task_required", "Execution task is empty", 400);
 
     emit({ type: "exec_started", executor, reviewer, mode });
 
@@ -432,6 +434,7 @@ async function runExecuteAndReviewClaimed(sessionId, req, emit, releaseActivity)
     // finally, so a stalled-Stop finalize and this path can't both surface the error or double-free.
     if (pendingWorktree) await cleanupExecutionWorkspace(projectPath, pendingWorktree, { purgeSecrets: pendingWorktreeNeedsSecretPurge });
     terminalError = redact(err?.message || String(err));
+    terminalErrorCode = err?.apiCode || (err?.message === EXEC_STOPPED_MESSAGE ? "execution_stopped" : "execution_failed");
     logError("execution failed", terminalError);
   } finally {
     try {
@@ -444,10 +447,12 @@ async function runExecuteAndReviewClaimed(sessionId, req, emit, releaseActivity)
         if (activeExec.get(sessionId) === state) activeExec.delete(sessionId);
         releaseActivity();
         if (terminalError) {
-          emit({ type: "exec_error", error: terminalError });
+          emit({ type: "exec_error", error: terminalError, code: terminalErrorCode });
           try {
             await mutateSession(sessionId, (current) => {
-              current.messages.push({ id: crypto.randomUUID(), createdAt: new Date().toISOString(), author: "system", content: `فشل التنفيذ: ${terminalError}`, phase: "exec_error", mode: current.mode });
+              // Persist the error code with the transcript so a reload after a missed SSE terminal event can
+              // localize the specific failure (validation / stop / generic) instead of a generic fallback line.
+              current.messages.push({ id: crypto.randomUUID(), createdAt: new Date().toISOString(), author: "system", content: `Execution failed: ${terminalError}`, phase: "exec_error", mode: current.mode, meta: { code: terminalErrorCode } });
             });
           } catch {}
         }
