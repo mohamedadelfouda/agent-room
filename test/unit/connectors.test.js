@@ -35,7 +35,7 @@ test("state-changing connector calls become proposals and require an explicit de
   } finally { await cleanup(session.id); }
 });
 
-test("a connector read audit stuck 'running' after a crash is reconciled to failed at startup", async () => {
+test("a connector read audit stuck 'running' after a crash is reconciled to interrupted at startup", async () => {
   const session = await createSession("read-audit-reconcile");
   try {
     // Simulate a crash mid-read: one audit left "running", one already settled.
@@ -56,6 +56,28 @@ test("a connector read audit stuck 'running' after a crash is reconciled to fail
     assert.equal(stuck.interruptionReason, "server_restart");
     assert.ok(stuck.completedAt);
     assert.equal(done.status, "completed"); // a settled audit is left untouched
+
+    // Idempotent: a second pass must not re-touch an already-interrupted audit (guards the running-only filter).
+    await reconcileInterruptedReadAudits("later_restart");
+    const again = (await getSession(session.id)).connectorReadAudits.find((audit) => audit.id === "stuck");
+    assert.equal(again.status, "interrupted");
+    assert.equal(again.interruptionReason, "server_restart"); // unchanged — not reconciled a second time
+    assert.equal(again.completedAt, stuck.completedAt);
+  } finally { await cleanup(session.id); }
+});
+
+test("reconcileInterruptedReadAudits leaves a session with no running read audits untouched", async () => {
+  const session = await createSession("read-audit-noop");
+  try {
+    const now = new Date().toISOString();
+    await saveSession({
+      ...session,
+      connectorReadAudits: [{ id: "done", connector: "gmail", action: "list_messages", status: "completed", requestedAt: now, completedAt: now }],
+    });
+    const before = (await getSession(session.id)).connectorReadAudits;
+    await reconcileInterruptedReadAudits("server_restart");
+    const after = (await getSession(session.id)).connectorReadAudits;
+    assert.deepEqual(after, before); // nothing "running" → nothing changed
   } finally { await cleanup(session.id); }
 });
 

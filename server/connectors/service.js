@@ -153,7 +153,7 @@ export async function reconcileInterruptedReadAudits(reason = "server_restart") 
       });
       if (settled) recovered += 1;
     } catch (error) {
-      logError("connector read audit reconciliation failed", redact(error?.message || String(error)));
+      logError(`connector read audit reconciliation failed for ${summary.id}`, redact(error?.message || String(error)));
     }
   }
   return recovered;
