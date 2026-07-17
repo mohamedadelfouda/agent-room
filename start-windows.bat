@@ -19,6 +19,11 @@ if %NODE_MAJOR% LSS 22 (
   pause
   exit /b 1
 )
+node scripts\source-preflight.mjs
+if errorlevel 1 (
+  pause
+  exit /b 1
+)
 echo Starting Agent Room. Your browser will open automatically when the local server is ready.
 node server\index.js
 pause
