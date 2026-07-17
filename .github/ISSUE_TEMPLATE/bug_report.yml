@@ -36,3 +36,13 @@ body:
     id: validation
     attributes:
       label: Relevant safe logs or checks
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostics export (recommended)
+      description: >-
+        Attach the output of the in-app "Export diagnostic data" control (it opens /api/diagnostics).
+        It is already redacted — no credentials, absolute paths, or session content — and captures
+        versions, platform, and provider readiness so we can reproduce faster. Review it before pasting.
+    validations:
+      required: false
