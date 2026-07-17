@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- The onboarding update control now reflects real state per agent CLI: **Update** (with the target version) when a newer release exists on the npm registry, a passive **✓ Updated** when already current, and a ticking elapsed timer while updating. Falls back to a plain Update affordance when offline.
+- Sidebar, room-flow, and context columns are now drag-resizable (with a keyboard-operable splitter) and the topbar ☰/⇥/◫ buttons collapse/expand them on desktop instead of only opening mobile overlays; widths and collapse state persist. The rail brand name no longer truncates.
+- A provider installed only as an npm/pnpm/bun shim (such as Codex on Windows, where PATH exposes only `.cmd`/`.ps1` shims) is now auto-detected: Agent Room discovers the bundled native executable at its known package layout, verifies it runs, and trusts it automatically — no manual Trust & check for that curated path. Onboarding shows an "auto-detected" note. An explicit command override is never superseded, and an arbitrary path the user supplies still requires Trust & check.
 - Trusted CLI paths from in-app Setup / Trust & check now persist across server restarts, and onboarding Setup discovers and trusts a found executable without closing the checklist dialog.
 - Added in-app CLI setup: read-only discovery of native provider executables hidden behind npm/pnpm shims (such as a global Codex install on Windows), one-click Trust & check from a discovered path, and per-provider install guidance in the settings drawer and onboarding checklist.
 

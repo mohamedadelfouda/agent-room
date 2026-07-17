@@ -44,6 +44,7 @@ import {
   providerReadiness,
   trustedProviderCliPaths,
 } from "./provider-readiness.js";
+import { checkAllProviderUpdates } from "./update-check.js";
 import { diagnosticSnapshot, healthSnapshot } from "./diagnostics.js";
 
 // First-run detection resolves native executables before entering an attached project.
@@ -205,6 +206,20 @@ function addSseClient(sessionId, req, res) {
   });
 }
 
+// End every live SSE stream for a session. The browser's EventSource then auto-reconnects (unless
+// the client closed it first), so its onopen re-sync path runs. Used when a session is deleted — its
+// streams must not dangle — and by the reconnect regression test to force a deterministic drop.
+export function closeSessionStreams(sessionId) {
+  const set = clients.get(sessionId);
+  if (!set) return 0;
+  let closed = 0;
+  for (const client of set) {
+    try { client.end(); closed += 1; } catch { /* client already gone */ }
+  }
+  clients.delete(sessionId);
+  return closed;
+}
+
 function mimeType(filePath) {
   const ext = path.extname(filePath).toLowerCase();
   return ({ ".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".json": "application/json", ".svg": "image/svg+xml" })[ext] || "application/octet-stream";
@@ -326,13 +341,7 @@ const server = http.createServer(async (req, res) => {
         const result = await deleteSession(parts[2], {
           isBusy: () => isRunning(parts[2]) || isExecuting(parts[2]),
         });
-        const set = clients.get(parts[2]);
-        if (set) {
-          for (const client of set) {
-            try { client.end(); } catch {}
-          }
-          clients.delete(parts[2]);
-        }
+        closeSessionStreams(parts[2]);
         return json(res, 200, result);
       } catch (error) {
         if (error.code === "session_busy") {
@@ -445,7 +454,8 @@ const server = http.createServer(async (req, res) => {
       return json(res, 202, { ok: true });
     }
     if (parts[0] === "api" && parts[1] === "sessions" && parts[2] && parts[3] === "exec-stop" && req.method === "POST") {
-      return json(res, 200, { stopped: await stopExec(parts[2]) });
+      // { stopped, status } — status is stop_requested | process_terminated | already_finished.
+      return json(res, 200, await stopExec(parts[2]));
     }
     if (parts[0] === "api" && parts[1] === "sessions" && parts[2] && parts[3] === "execution" && parts[4] && parts[5] === "accept" && req.method === "POST") {
       if (!startupReconciled) return json(res, 503, apiErrorPayload("startup_recovery_pending", "Startup recovery is still running; retry in a moment"));
@@ -460,6 +470,11 @@ const server = http.createServer(async (req, res) => {
     }
     if (req.method === "GET" && url.pathname === "/api/agents/status") {
       return json(res, 200, await detectAgents());
+    }
+    // Reads the npm registry (network) to report which agent CLIs have a newer version, so the UI can
+    // show UPDATE vs UPDATED. Separate from status so status stays fast/offline; fails soft.
+    if (req.method === "GET" && url.pathname === "/api/agents/update-check") {
+      return json(res, 200, await checkAllProviderUpdates());
     }
     if (req.method === "GET" && url.pathname === "/api/providers") {
       return json(res, 200, { providers: providerCatalog() });

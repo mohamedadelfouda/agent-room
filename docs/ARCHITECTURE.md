@@ -39,4 +39,4 @@ Claude receives a strict per-run MCP configuration containing only Agent Room's 
 - Connector schemas and external calls stay in `server/connectors/`; encrypted persistence stays in the Electron main process.
 - Approval, retry, and session persistence stay outside adapters and connectors.
 - Browser code consumes public catalogs; it does not contain the source of truth for providers or actions.
-- Explicitly approved native provider paths are persisted with a SHA-256 executable fingerprint. A later identity mismatch blocks use until the user runs **Trust & check** again.
+- Native provider paths — approved explicitly via **Trust & check**, or auto-trusted after a verifying `--version` run when discovered at a curated npm/pnpm/bun package layout — are persisted with a SHA-256 executable fingerprint. A later identity mismatch blocks use until the user runs **Trust & check** again.

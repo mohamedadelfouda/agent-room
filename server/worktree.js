@@ -4,6 +4,7 @@ import crypto from "node:crypto";
 import { resolveAllowedCommand, runProcess } from "./process.js";
 import { redact } from "./logger.js";
 import { isGitHubRemote } from "./github-remote.js";
+import { EXEC_STOPPED_MESSAGE } from "./exec-state.js";
 
 const SAFE = /^[a-zA-Z0-9_.-]+$/;
 const EXECUTION_BRANCH = /^agent\/([a-zA-Z0-9_.-]+)\/([a-zA-Z0-9_.-]+)$/;
@@ -117,6 +118,9 @@ async function git(args, cwd, env = {}, input = "", options = {}) {
     timeoutMs: 120000,
     maxOutputBytes: options.maxOutputBytes,
     binaryOutput: options.binaryOutput,
+    // When the execution pipeline passes a registrar, the clone/checkout processes become
+    // killable mid-flight so an accepted Stop terminates them instead of racing them to finish.
+    registerChild: options.registerChild,
   });
   if (execution.code !== 0) throw new Error(redact(execution.stderr || `git exited with code ${execution.code}`).trim());
   return execution;
@@ -157,8 +161,17 @@ export async function isGitRepo(projectPath) {
 
 // The regular Git transport copies reachable source objects so the disposable executor clone
 // never depends on the source repository's object storage.
-export async function createWorktree(projectPath, agent, taskId) {
+export async function createWorktree(projectPath, agent, taskId, { registerChild, isCancelled } = {}) {
+  // A Stop accepted between pipeline stages must abort before the next git process starts (checked
+  // via abortIfCancelled) and kill any that is already running (gitStep threads registerChild so the
+  // clone/checkout are killable). The read-only probes below (isGitRepo, rev-parse, publicationContext)
+  // run against the trusted SOURCE repo before the disposable clone exists — they're fast and carry no
+  // registerChild by design, so the only cancellation cost there is a little wasted work before the
+  // pre-clone gate throws.
+  const abortIfCancelled = () => { if (isCancelled?.()) throw new Error(EXEC_STOPPED_MESSAGE); };
+  const gitStep = (args, cwd) => git(args, cwd, {}, "", { registerChild });
   if (!isSafeExecutionComponent(agent) || !isSafeExecutionComponent(taskId)) throw new Error("Invalid agent/taskId");
+  abortIfCancelled();
   if (!(await isGitRepo(projectPath))) throw new Error("Project is not a git repository");
   const { stdout: sha } = await git(["rev-parse", "HEAD"], projectPath);
   const baseSha = sha.trim();
@@ -175,10 +188,12 @@ export async function createWorktree(projectPath, agent, taskId) {
     if (error.code !== "ENOENT") throw error;
   }
   try {
-    await git(["clone", "--no-local", "--no-checkout", "--origin", "agent-room-source", projectPath, wtPath], projectPath);
+    abortIfCancelled();
+    await gitStep(["clone", "--no-local", "--no-checkout", "--origin", "agent-room-source", projectPath, wtPath], projectPath);
     await assertRealDirectory(wtPath, "Execution clone");
-    await git(["remote", "remove", "agent-room-source"], wtPath);
-    await git(["switch", "-c", branch, baseSha], wtPath);
+    await gitStep(["remote", "remove", "agent-room-source"], wtPath);
+    abortIfCancelled();
+    await gitStep(["switch", "-c", branch, baseSha], wtPath);
     const canonical = await fs.realpath(wtPath);
     if (normalizedPath(canonical) !== normalizedPath(wtPath)) throw new Error("Execution clone escaped its approved directory");
     const gitDir = path.join(wtPath, ".git");

@@ -32,7 +32,7 @@ export default [
       ecmaVersion: "latest", sourceType: "module",
       globals: {
         ...sharedGlobals, alert: "readonly", confirm: "readonly", document: "readonly", EventSource: "readonly",
-        FileReader: "readonly", history: "readonly", localStorage: "readonly", location: "readonly",
+        FileReader: "readonly", getComputedStyle: "readonly", history: "readonly", localStorage: "readonly", location: "readonly",
         HTMLElement: "readonly", navigator: "readonly", requestAnimationFrame: "readonly", window: "readonly",
       },
     },
