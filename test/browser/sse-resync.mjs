@@ -56,8 +56,12 @@ async function run() {
     // Force a deterministic drop: end the server side of the live SSE stream. The session still
     // exists, so the browser's EventSource reconnects cleanly — and its onopen must now re-sync,
     // observable as a GET for this session firing after the reconnect.
-    const closed = serverModule.closeSessionStreams(sessionId);
-    assert.ok(closed >= 1, `expected at least one open SSE stream to close, got ${closed}`);
+    // Poll until the server has actually registered this session's SSE stream, then close it. The UI's
+    // connection indicator (waited on above) can flip on the browser's EventSource.onopen before the
+    // server finishes registering the stream in `clients`, so closing once could race and return 0 — a
+    // flake. Using closeSessionStreams's own return value as the wait condition closes it exactly when
+    // it exists.
+    await waitFor(() => serverModule.closeSessionStreams(sessionId) >= 1, 20000);
     console.log("sse resync check: server closed the stream");
 
     const resynced = await waitFor(() => devtools.evaluate(`window.__sessionGets > 0`), 20000);

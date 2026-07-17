@@ -173,11 +173,26 @@ export async function launchBrowserHarness() {
       "--window-size=1280,800",
       url,
     ];
-    if (typeof process.getuid === "function" && process.getuid() === 0) args.unshift("--no-sandbox");
+    // Chrome's sandbox needs a setuid helper or unprivileged user namespaces; GitHub's Linux runners
+    // restrict both and run as non-root, so the sandbox aborts the launch there (the port file never
+    // appears → an opaque launch timeout). It adds nothing for an ephemeral test browser loading only
+    // localhost, so drop it on Linux and whenever running as root anywhere.
+    if (process.platform === "linux" || (typeof process.getuid === "function" && process.getuid() === 0)) {
+      args.unshift("--no-sandbox", "--disable-setuid-sandbox");
+    }
     browser = spawn(executable, args, { stdio: ["ignore", "ignore", "pipe"], windowsHide: true });
     browser.stderr.on("data", (chunk) => { browserStderr = `${browserStderr}${chunk}`.slice(-6000); });
     const portFile = path.join(profileDir, "DevToolsActivePort");
-    const debugPort = await waitFor(async () => Number((await fs.readFile(portFile, "utf8")).split(/\r?\n/, 1)[0]));
+    // Fail fast (with the captured stderr) if the browser exits before publishing its debug port —
+    // otherwise a crashed launch (e.g. a sandbox abort) only surfaces as an opaque 15s timeout.
+    const debugPort = await waitFor(async () => {
+      if (browser.exitCode !== null) {
+        const error = new Error(`Browser exited before it published its debug port: ${browserStderr}`);
+        error.fatal = true;
+        throw error;
+      }
+      return Number((await fs.readFile(portFile, "utf8")).split(/\r?\n/, 1)[0]);
+    });
     console.log("browser check: connected to browser");
     const pages = await waitFor(async () => {
       if (browser.exitCode !== null) {
