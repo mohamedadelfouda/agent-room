@@ -81,7 +81,7 @@
             <button id="execToggle" class="btn-ghost" data-i18n="execute" aria-expanded="false" aria-controls="execDrawer">تنفيذ</button>
             <button id="exportBtn" class="btn-ghost" data-i18n="export" disabled>تصدير</button>
             <button id="stopBtn" class="btn-danger" data-i18n="stop" disabled>إيقاف</button>
-            <button id="themeBtn" type="button" class="icon-btn" title="Theme" aria-label="Theme" data-i18n-title="theme" data-i18n-aria-label="theme">☼</button>
+            <button id="themeBtn" type="button" class="icon-btn" aria-pressed="false" title="Theme" aria-label="Theme" data-i18n-title="theme" data-i18n-aria-label="theme">☼</button>
             <button id="presetsBtn" type="button" class="icon-btn" title="Customize" aria-label="Customize workspace" aria-haspopup="dialog" data-i18n-title="customize" data-i18n-aria-label="customize">▦</button>
           </div>
         </header>
@@ -183,7 +183,7 @@
           <div id="attachChips" class="attach-chips" hidden></div>
           <div class="composer-box">
             <button id="attachBtn" type="button" class="attach-btn" title="Attach file" aria-label="Attach file" data-i18n-title="attachFile" data-i18n-aria-label="attachFile">📎</button>
-            <input id="attachInput" type="file" class="sr-only" multiple accept=".txt,.md,.markdown,.json,.js,.ts,.tsx,.jsx,.css,.html,.csv,.log,.yml,.yaml,.toml,.xml,.py,.go,.rs,.java,.c,.h,.cpp,.rb,.php,.sh,.env,.gitignore,text/plain,text/markdown,application/json" aria-label="Attach text file" data-i18n-aria-label="attachFile" />
+            <input id="attachInput" type="file" class="sr-only" tabindex="-1" multiple accept=".txt,.md,.markdown,.json,.js,.ts,.tsx,.jsx,.css,.html,.csv,.log,.yml,.yaml,.toml,.xml,.py,.go,.rs,.java,.c,.h,.cpp,.rb,.php,.sh,.env,.gitignore,text/plain,text/markdown,application/json" aria-label="Attach text file" data-i18n-aria-label="attachFile" />
             <label for="messageInput" class="sr-only" data-i18n="composerLabel">الرسالة</label>
             <textarea id="messageInput" rows="1" placeholder="اكتب الفكرة أو السؤال..." data-i18n-ph="composerPh"></textarea>
             <button id="sendBtn" class="send-btn" title="ابدأ الجولة" aria-label="ابدأ الجولة" data-i18n-title="send" data-i18n-aria-label="send" disabled>↑</button>

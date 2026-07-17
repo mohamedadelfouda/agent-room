@@ -1014,7 +1014,7 @@ function fmtDuration(ms) {
   return ms == null ? "" : formatLocaleDuration(lang, ms);
 }
 function technicalDetailsHtml(detail) {
-  return detail ? `<details class="tech"><summary>${esc(t("techDetails"))}</summary><pre>${esc(String(detail).slice(0, 8000))}</pre></details>` : "";
+  return detail ? `<details class="tech"><summary>${esc(t("techDetails"))}</summary><pre dir="ltr" tabindex="0">${esc(String(detail).slice(0, 8000))}</pre></details>` : "";
 }
 function renderMessages() {
   const chat = $("chat");
@@ -1958,8 +1958,8 @@ async function loadConnectors() {
       const actionName = localizedMarkup(connectorActionKeys(action.connector, action.action)?.label, action.action);
       const status = localizedMarkup(connectorStatusKey(action.status), action.status);
       const renderedResult = action.result && typeof action.result === "object" ? JSON.stringify(action.result, null, 2) : String(action.result || "");
-      const result = action.error ? technicalDetailsHtml(action.error) : renderedResult ? `<pre dir="ltr">${esc(renderedResult)}</pre>` : "";
-      row.innerHTML = `<b>${connectorName} · ${actionName}</b><span class="connector-status" role="status" aria-live="polite">${status}</span><pre dir="ltr">${esc(JSON.stringify(action.input, null, 2))}</pre>${result}${action.status === "pending" ? `<div><button class="btn-primary">${esc(t("approveAction"))}</button><button class="btn-danger">${esc(t("rejectAction"))}</button></div>` : ""}`;
+      const result = action.error ? technicalDetailsHtml(action.error) : renderedResult ? `<pre dir="ltr" tabindex="0">${esc(renderedResult)}</pre>` : "";
+      row.innerHTML = `<b>${connectorName} · ${actionName}</b><span class="connector-status" role="status" aria-live="polite">${status}</span><pre dir="ltr" tabindex="0">${esc(JSON.stringify(action.input, null, 2))}</pre>${result}${action.status === "pending" ? `<div><button class="btn-primary">${esc(t("approveAction"))}</button><button class="btn-danger">${esc(t("rejectAction"))}</button></div>` : ""}`;
       if (action.status === "pending") {
         const decide = async (approve) => {
           try {
@@ -1982,7 +1982,7 @@ async function loadConnectors() {
       const actionName = localizedMarkup(connectorActionKeys(audit.connector, audit.action)?.label, audit.action);
       const status = localizedMarkup(connectorStatusKey(audit.status), audit.status);
       const timing = [audit.requestedAt, audit.completedAt].filter(Boolean).map((date) => formatClock(date)).join(" → ");
-      row.innerHTML = `<b>${esc(t("connectorReadAudit"))} · ${connectorName} · ${actionName}</b><span class="connector-status">${status}</span><small>${esc(timing)}</small><pre dir="ltr">${esc(JSON.stringify(audit.inputSummary || {}, null, 2))}</pre>`;
+      row.innerHTML = `<b>${esc(t("connectorReadAudit"))} · ${connectorName} · ${actionName}</b><span class="connector-status">${status}</span><small>${esc(timing)}</small><pre dir="ltr" tabindex="0">${esc(JSON.stringify(audit.inputSummary || {}, null, 2))}</pre>`;
       list.appendChild(row);
     }
   } catch (error) {
@@ -2052,7 +2052,7 @@ function renderExecutions() {
     const el = document.createElement("article"); el.className = "msg exec-card";
     let body = `<div class="exec-body">`;
     body += `<div class="exec-part"><div class="exec-label">${esc(t("executor"))} (${bdi(providerInfo(ex.executor).label, "ltr")})</div><div class="exec-text" dir="auto">${esc(ex.executorText || "")}</div></div>`;
-    if (ex.diff?.patch) body += `<div class="exec-part exec-diff"><div class="exec-label">${bdi(ex.diff.files || "", "ltr")}</div><pre>${highlightDiff(ex.diff.patch)}</pre></div>`;
+    if (ex.diff?.patch) body += `<div class="exec-part exec-diff"><div class="exec-label">${bdi(ex.diff.files || "", "ltr")}</div><pre dir="ltr" tabindex="0">${highlightDiff(ex.diff.patch)}</pre></div>`;
     if (ex.review?.text) body += `<div class="exec-part"><div class="exec-label">${esc(t("reviewer"))} (${bdi(providerInfo(ex.reviewer).label, "ltr")})</div><div class="exec-text" dir="auto">${esc(ex.review.text)}</div></div>`;
     if (ex.executorMeta?.outputTruncated || ex.review?.meta?.outputTruncated) body += `<div class="exec-part"><div class="exec-label">⚠ ${esc(t("truncatedTag"))}</div></div>`;
     if (ex.secretFindings?.length) body += `<div class="exec-part"><div class="exec-label">🔒 ${esc(t("secretScanBlocked"))}</div><div class="exec-text">${ex.secretFindings.map((f) => `${bdi(f.path, "ltr")}${f.line ? `:${bdi(formatLocaleNumber(lang, f.line))}` : ""} — ${bdi(f.rule, "ltr")} (${bdi(f.severity, "ltr")})`).join("<br>")}</div></div>`;
@@ -2066,7 +2066,7 @@ function renderExecutions() {
     } else if (ex.status === "rejected_cleanup_pending") {
       body += `<div class="exec-decision"><button class="btn-danger" data-reject="${esc(ex.taskId)}">${esc(execStatusLabel(ex.status))}</button></div>`;
     } else {
-      const link = ex.prUrl ? ` — <a href="${esc(ex.prUrl)}" target="_blank" rel="noopener">PR</a>` : "";
+      const link = ex.prUrl ? ` — <a href="${esc(ex.prUrl)}" target="_blank" rel="noopener">PR<span class="sr-only"> (${esc(t("opensInNewTab"))})</span></a>` : "";
       body += `<div class="exec-status-line">${esc(execStatusLabel(ex.status))}${link}</div>`;
     }
     body += `</div>`;
