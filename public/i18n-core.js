@@ -145,6 +145,67 @@ export function errorMessageKey(failure = {}) {
   return ERROR_MESSAGE_KEYS[code] || "errorUnexpected";
 }
 
+// Render the deterministic discussion outcome (the round-summary the orchestrator persists on the
+// system message's `meta.outcome`) in the reader's language. The browser owns the user-facing wording:
+// the server stores the structured outcome, and this renders it, so an English reader sees English and
+// an Arabic reader sees Arabic from the same run. Returns `{ text, items }` — a single-direction summary
+// sentence plus the free-text bullet lines (pending items or disagreements, authored by the agents), so
+// the caller can render each bullet on its own line and bidi-isolate it. Returns empty text for a
+// missing/truncated outcome so the caller can fall back to the stored text. Pure (no DOM), unit-tested.
+//
+// The Arabic wording mirrors `discussionOutcomeReport`/`terminalOutcomeReport`/`unfinishedOutcomeReport`
+// in server/orchestrator.js, which still generates the stored `content` (the agent transcript + the
+// truncated-meta fallback). Keep the two in sync until they are consolidated behind one renderer.
+export function discussionOutcomeReport(outcome, language = "ar") {
+  // Render only a complete, server-stamped outcome: buildDiscussionOutcome sets outcomeVersion 1 atomically
+  // with every field, so its absence marks a truncated/foreign outcome that must fall back to the stored
+  // content rather than render a generic "N rounds ended" summary over it. (Same validity marker as
+  // officialOutcomeFrom in app.js.)
+  if (!outcome || typeof outcome !== "object" || outcome.outcomeVersion !== 1 || typeof outcome.completedRounds !== "number") return { text: "", items: [] };
+  const en = language === "en";
+  const round = formatLocaleNumber(language, outcome.completedRounds);
+  const pendingItems = Array.isArray(outcome.pendingItems) ? outcome.pendingItems.map((item) => item.text) : [];
+
+  if (outcome.phase === "converged") {
+    const text = outcome.stoppedEarly
+      ? (en ? `The agents agreed and the task is complete at round ${round} — the remaining rounds were stopped.`
+            : `الوكلاء اتفقوا والمهمة اكتملت في الجولة ${round} — تم إيقاف الجولات المتبقية.`)
+      : (en ? `The agents agreed and the task is complete at the final round (${round}).`
+            : `الوكلاء اتفقوا والمهمة اكتملت في الجولة الأخيرة (${round}).`);
+    return { text, items: [] };
+  }
+  if (outcome.phase === "needs_user") {
+    return { items: pendingItems, text: en
+      ? `The agents agree; the discussion stopped at round ${round} because the outcome needs your decision.`
+      : `الوكلاء متفقون، والنقاش توقف في الجولة ${round} لأن النتيجة تحتاج قرارك.` };
+  }
+  if (outcome.phase === "blocked_external") {
+    return { items: pendingItems, text: en
+      ? `The agents agree; the discussion stopped at round ${round} because the outcome awaits verification or an external step.`
+      : `الوكلاء متفقون، والنقاش توقف في الجولة ${round} لأن النتيجة تنتظر تحققًا أو خطوة خارجية.` };
+  }
+
+  // Unfinished (no adoptable terminal agreement).
+  if (outcome.stopReason === "invalid_control") {
+    return { items: [], text: en
+      ? `${round} rounds ended, but the agreement state could not be established because the control data was missing or invalid.`
+      : `انتهت ${round} جولات، لكن تعذّر اعتماد حالة الاتفاق لأن بيانات التحكم كانت ناقصة أو غير صالحة.` };
+  }
+  if (Array.isArray(outcome.disagreements) && outcome.disagreements.length) {
+    return { items: [...outcome.disagreements], text: en
+      ? `${round} rounds ended and a substantive disagreement between the agents remains:`
+      : `انتهت ${round} جولات وما زال هناك اختلاف جوهري بين الوكلاء:` };
+  }
+  if (outcome.agreementState === "converged" && outcome.completionState === "incomplete") {
+    return { items: pendingItems, text: en
+      ? `${round} rounds ended. The agents agree on the current state, but the task still needs more work.`
+      : `انتهت ${round} جولات. الوكلاء متفقون على الوضع الحالي، لكن المهمة ما زالت تحتاج شغلًا إضافيًا.` };
+  }
+  return { items: [], text: en
+    ? `${round} rounds ended without a final, adoptable agreement.`
+    : `انتهت ${round} جولات من غير اتفاق نهائي قابل للاعتماد.` };
+}
+
 export function connectorLabelKey(connectorId) {
   return CONNECTOR_LABEL_KEYS[connectorId] || null;
 }

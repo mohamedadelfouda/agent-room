@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Collaboration round-summaries now render in the reader's language. The server persists the structured discussion outcome on the message and the browser renders the wording from it, so an English reader sees an English summary and an Arabic reader an Arabic one from the same run — instead of the previously hardcoded Arabic text.
 - The onboarding update control now reflects real state per agent CLI: **Update** (with the target version) when a newer release exists on the npm registry, a passive **✓ Updated** when already current, and a ticking elapsed timer while updating. Falls back to a plain Update affordance when offline.
 - Sidebar, room-flow, and context columns are now drag-resizable (with a keyboard-operable splitter) and the topbar ☰/⇥/◫ buttons collapse/expand them on desktop instead of only opening mobile overlays; widths and collapse state persist. The rail brand name no longer truncates.
 - A provider installed only as an npm/pnpm/bun shim (such as Codex on Windows, where PATH exposes only `.cmd`/`.ps1` shims) is now auto-detected: Agent Room discovers the bundled native executable at its known package layout, verifies it runs, and trusts it automatically — no manual Trust & check for that curated path. Onboarding shows an "auto-detected" note. An explicit command override is never superseded, and an arbitrary path the user supplies still requires Trust & check.
