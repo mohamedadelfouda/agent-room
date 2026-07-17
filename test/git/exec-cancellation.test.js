@@ -229,9 +229,9 @@ test("a run that finalizes to awaiting_user emits exec_ready with no exec_error,
   }
 });
 
-test("a stop racing the finalize never emits both exec_error and exec_ready, and always frees the session", async (t) => {
+test("a stop accepted after review but before the finalizing commit is honored — no record, session freed", async (t) => {
   const dir = repository();
-  const session = await trustedSession("exec-finalize-race", dir);
+  const session = await trustedSession("exec-stop-before-finalizing", dir);
   const events = [];
   const reviewerDone = deferred();
 
@@ -239,8 +239,7 @@ test("a stop racing the finalize never emits both exec_error and exec_ready, and
     writeFileSync(join(cwd, "feature.txt"), "new feature\n");
     return { text: "executor output", model: "test", durationMs: 1, exitCode: 0 };
   });
-  // Signal the moment review completes: the run then crosses into its finalizing save, so a stop
-  // issued now genuinely races the finalize latch (rather than landing early, during the executor).
+  // Resolve the instant review finishes; the run then snapshots and reaches the finalizing gate.
   t.mock.method(provider("claude"), "run", async () => {
     reviewerDone.resolve();
     return { text: "APPROVE", model: "test", durationMs: 1, exitCode: 0 };
@@ -249,18 +248,23 @@ test("a stop racing the finalize never emits both exec_error and exec_ready, and
   try {
     const runPromise = runExecuteAndReview(session.id, execRequest(), (event) => events.push(event));
     await reviewerDone.promise;
-    // The stop either lands just before enterExecFinalizing (honored → exec_error, no record) or is
-    // refused by it (→ exec_ready, awaiting_user). The invariant this PR guarantees holds either way:
-    // never BOTH, exactly one terminal outcome, and the session is always freed (never wedged busy).
+    // stopExec's synchronous requestExecCancellation runs while the run is still unwinding the reviewer /
+    // in prepareReviewSnapshot — i.e. before enterExecFinalizing — so the Stop wins the race to the gate:
+    // enterExecFinalizing then refuses to commit and the run raises EXEC_STOPPED before any save.
     await stopExec(session.id);
     await runPromise;
 
-    const errors = events.filter((e) => e.type === "exec_error").length;
-    const readies = events.filter((e) => e.type === "exec_ready").length;
-    assert.ok(!(errors > 0 && readies > 0), `must not emit both exec_error and exec_ready (got ${errors} error, ${readies} ready)`);
-    assert.equal(errors + readies, 1, "exactly one terminal outcome");
+    // The Stop won the gate: exec_error terminated the run, exec_ready never fired, nothing was left for
+    // the user to accept, and the session is free. The mirror case — a Stop that lands *after*
+    // enterExecFinalizing being refused (and a stalled finalize releasing silently) — is covered
+    // deterministically at the state-machine level in test/unit/exec-state.test.js; a full end-to-end
+    // stop-during-finalizing integration test needs a mutation-injection seam and is tracked as a follow-up.
+    assert.equal(events.some((event) => event.type === "exec_error"), true);
+    assert.equal(events.some((event) => event.type === "exec_ready"), false);
+    const saved = await getSession(session.id);
+    assert.equal((saved.executions || []).some((execution) => execution.status === "awaiting_user"), false);
     assert.equal(isExecuting(session.id), false);
-    assert.doesNotThrow(() => claimSessionActivity(session.id, "post-race-check")());
+    assert.doesNotThrow(() => claimSessionActivity(session.id, "post-stop-before-finalizing")());
   } finally {
     await cleanupSession(session.id);
     rmSync(dir, { recursive: true, force: true });
