@@ -1,4 +1,4 @@
-import { win32 as winPath } from "node:path";
+import { win32 as winPath, posix as posixPath } from "node:path";
 
 // CU-0 (Cursor integration — Phase 0B) · SECURITY-QUALIFICATION MODEL · SPIKE ARTIFACT.
 //
@@ -14,10 +14,12 @@ import { win32 as winPath } from "node:path";
 
 export const CURSOR_QUALIFICATION_SCHEMA_VERSION = 1;
 
-// CU-0 scope is explicitly Windows x64 experimental only. A descriptor validated on one platform/arch
-// is not portable — the launcher, sandbox backend, and install paths differ per platform.
-export const CURSOR_SUPPORTED_PLATFORM = "win32";
-export const CURSOR_SUPPORTED_ARCH = "x64";
+// The launch chain differs per platform (executable name, sandbox backend, path style), so a descriptor is
+// bound to the platform+arch it was built for and validated with THAT platform's path semantics — never
+// reused across platforms. Qualification is per-platform: a descriptor proven on one OS says nothing about
+// another, and Cursor becomes available on a platform only where its safety suite has passed there.
+export const SUPPORTED_PLATFORMS = Object.freeze(["win32", "darwin", "linux"]);
+export const SUPPORTED_ARCHES = Object.freeze(["x64", "arm64"]);
 
 // Reviewer boundary = a layered AND. A reviewer must not be able to mutate anything outside a disposable
 // test repo, reach the network, or be steered by untrusted project settings. `--mode plan` and the
@@ -55,11 +57,17 @@ export const REQUIRED_EXECUTE_LAYERS = Object.freeze([
 
 const NODE_FLAG = /^-/; // any argv token starting with "-" is a Node flag when it precedes the entry point
 
-function isWithin(root, target) {
-  // True when `target` resolves inside `root` (win32 semantics — this is a Windows-only descriptor).
-  if (!winPath.isAbsolute(root) || !winPath.isAbsolute(target)) return false;
-  const rel = winPath.relative(root, target);
-  return rel !== "" && !rel.startsWith("..") && !winPath.isAbsolute(rel);
+// The path flavor matches the descriptor's target platform, so validation is deterministic regardless of
+// which OS the check runs on (a win32 descriptor is always checked with win32 path semantics, etc.).
+function pathFor(platform) {
+  return platform === "win32" ? winPath : posixPath;
+}
+
+function isWithin(pathModule, root, target) {
+  // True when `target` resolves inside `root` under the given path flavor.
+  if (!pathModule.isAbsolute(root) || !pathModule.isAbsolute(target)) return false;
+  const rel = pathModule.relative(root, target);
+  return rel !== "" && !rel.startsWith("..") && !pathModule.isAbsolute(rel);
 }
 
 /**
@@ -72,20 +80,23 @@ function isWithin(root, target) {
  * attacker code before Cursor ever starts, so the fixed prefix must be exactly the entry point.
  *
  * Pure and synchronous. Fingerprint/realpath equality against the on-disk binaries is a RUNTIME check the
- * caller performs separately; this validates the descriptor's shape and argv-boundary invariants.
+ * caller performs separately; this validates the descriptor's shape, argv-boundary, and platform binding.
  *
  * @param {object} descriptor
- * @param {{trustedRoot: string, expectedProviderId?: string}} options
- *   trustedRoot — REQUIRED win32 absolute path of the trusted Cursor version directory; `executable` and
- *   `entryPoint` must resolve within it. A missing trustedRoot fails closed — containment cannot be skipped.
+ * @param {{trustedRoot: string, expectedProviderId?: string, platform?: string, arch?: string}} options
+ *   trustedRoot — REQUIRED absolute path (in the descriptor's platform flavor) of the trusted Cursor version
+ *   directory; `executable` and `entryPoint` must resolve within it. A missing trustedRoot fails closed.
+ *   platform/arch — the target being validated FOR (default: the current process). The descriptor must
+ *   declare a supported platform/arch AND match the target — a descriptor is never portable across them.
  * @returns {{valid: boolean, violations: string[]}}
  */
-export function validateTrustedLaunchDescriptor(descriptor, { trustedRoot = null, expectedProviderId = "cursor" } = {}) {
+export function validateTrustedLaunchDescriptor(descriptor, { trustedRoot = null, expectedProviderId = "cursor", platform = process.platform, arch = process.arch } = {}) {
   if (!descriptor || typeof descriptor !== "object") {
     return { valid: false, violations: ["descriptor is missing or not an object"] };
   }
   const violations = [];
-  const absolute = (value) => typeof value === "string" && value.length > 0 && winPath.isAbsolute(value);
+  const pathModule = pathFor(descriptor.platform);
+  const absolute = (value) => typeof value === "string" && value.length > 0 && pathModule.isAbsolute(value);
 
   if (descriptor.schemaVersion !== 1) violations.push("schemaVersion must be 1");
   if (descriptor.providerId !== expectedProviderId) {
@@ -111,23 +122,30 @@ export function validateTrustedLaunchDescriptor(descriptor, { trustedRoot = null
       violations.push("fixedPrefixArgs must include the entryPoint");
     } else if (entryIndex !== 0) {
       violations.push("entryPoint must be the first fixed-prefix arg (trusted node → trusted index.js → request args)");
-    } else if (prefix.length !== 1) {
-      // The fixed prefix is exactly [entryPoint]. Anything after it is forwarded to Cursor as a launch
-      // flag (e.g. --force), which would silently defeat the separate noForce qualification evidence.
-      violations.push("entryPoint must be the only fixed-prefix arg (trailing args are forwarded to Cursor)");
     }
     // No Node flag may appear before the entry point — it would run code before Cursor starts.
     const beforeEntry = entryIndex === -1 ? prefix : prefix.slice(0, entryIndex);
     if (beforeEntry.some((arg) => NODE_FLAG.test(arg))) {
       violations.push("no Node flags may precede the entryPoint (e.g. --require/--import run code before Cursor)");
     }
+    // The fixed prefix is EXACTLY the entry point: request args append AFTER it at launch, so any arg baked
+    // into the trusted prefix (e.g. a trailing --force / --yolo) would reach Cursor as if it were trusted.
+    if (prefix.length !== 1) {
+      violations.push("fixedPrefixArgs must be exactly [entryPoint] — no args after the entry point (those belong to the request, not the trusted prefix)");
+    }
   }
 
-  if (descriptor.platform !== CURSOR_SUPPORTED_PLATFORM) {
-    violations.push(`platform must be "${CURSOR_SUPPORTED_PLATFORM}" (CU-0 scope: Windows x64 experimental only)`);
+  // Platform/arch binding: the descriptor must target a supported platform/arch AND match what we are
+  // validating for. A descriptor built for one platform/arch is never valid for another.
+  if (!SUPPORTED_PLATFORMS.includes(descriptor.platform)) {
+    violations.push(`platform must be one of: ${SUPPORTED_PLATFORMS.join(", ")}`);
+  } else if (descriptor.platform !== platform) {
+    violations.push(`descriptor platform "${descriptor.platform}" does not match the target platform "${platform}"`);
   }
-  if (descriptor.arch !== CURSOR_SUPPORTED_ARCH) {
-    violations.push(`arch must be "${CURSOR_SUPPORTED_ARCH}" (CU-0 scope: Windows x64 experimental only)`);
+  if (!SUPPORTED_ARCHES.includes(descriptor.arch)) {
+    violations.push(`arch must be one of: ${SUPPORTED_ARCHES.join(", ")}`);
+  } else if (descriptor.arch !== arch) {
+    violations.push(`descriptor arch "${descriptor.arch}" does not match the target arch "${arch}"`);
   }
 
   // Containment is mandatory: a missing trustedRoot fails closed instead of skipping the check, otherwise a
@@ -136,10 +154,10 @@ export function validateTrustedLaunchDescriptor(descriptor, { trustedRoot = null
   if (!trustedRoot) {
     violations.push("trustedRoot must be supplied to verify launch-chain containment");
   } else {
-    if (absolute(descriptor.entryPoint) && !isWithin(trustedRoot, descriptor.entryPoint)) {
+    if (absolute(descriptor.entryPoint) && !isWithin(pathModule, trustedRoot, descriptor.entryPoint)) {
       violations.push("entryPoint must resolve within the trusted Cursor version directory");
     }
-    if (absolute(descriptor.executable) && !isWithin(trustedRoot, descriptor.executable)) {
+    if (absolute(descriptor.executable) && !isWithin(pathModule, trustedRoot, descriptor.executable)) {
       violations.push("executable must resolve within the trusted Cursor version directory");
     }
   }

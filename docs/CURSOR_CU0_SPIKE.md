@@ -6,7 +6,7 @@
 > owner's machine against the real Cursor CLI.
 >
 > **Companion plan:** [`CURSOR_INTEGRATION_PLAN.md`](CURSOR_INTEGRATION_PLAN.md) (the security analysis this
-> report implements). **Scope:** Windows x64 experimental only.
+> report implements). **Scope:** per-platform — Cursor becomes available on any OS where its safety suite passes there. First qualified: Windows x64.
 
 ## What CU-0 delivered
 
@@ -66,7 +66,13 @@ fingerprint without widening the general allowlist. `validateTrustedLaunchDescri
   which no descriptor field can see. `server/process.js`'s env allowlist already excludes
   `NODE_OPTIONS`/`NODE_*`; the `envIsolated` qualification layer makes CU-1 prove the Cursor launch uses
   that sanitized env (never `envPolicy: "inherit"`).
-- `platform`/`arch` are `win32`/`x64` — a descriptor validated on one platform/arch is not portable.
+- `platform`/`arch` declare a **supported** target and must match the platform being validated FOR — a
+  descriptor built for one platform/arch is never portable to another (checked with that platform's path
+  semantics, so validation is deterministic on any CI OS).
+
+> **CU-1 update:** `server/providers/cursor-launch.js` builds this descriptor from a real cursor-agent
+> install — it locates the latest `versions/<v>/`, fingerprints `node(.exe)` + `index.js` (+ the sandbox
+> binary), and validates the result. Proven against the actual install on this machine (a real-install test).
 
 **Policy-name change this forces (must be documented in CU-1):** the old rule *"native provider executable
 only"* stops being accurate once a runtime + script is trusted. It becomes *"provider-bound trusted launch
@@ -127,6 +133,7 @@ CU-1 runs them and feeds the booleans into `deriveCursorQualification`:
 - **Fixtures only.** No provider registry or process-trust change; the two functions are imported only by
   their test, not by any production path.
 - **Separate branch.** `spike/cu-0-cursor-qualification`, independent of the hardening PRs.
-- **Windows x64 experimental** scope is encoded in the descriptor validator, not just prose.
+- **Per-platform** qualification is encoded in the validator (a descriptor is bound to its platform/arch,
+  never portable); Cursor is available on any OS only where its safety suite has passed. First: Windows x64.
 - **Honest about the CLI.** Every CLI fact is attributed to the plan's prior inspection; nothing is
   presented as a fresh capture from this environment.
