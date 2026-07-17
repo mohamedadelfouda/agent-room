@@ -205,6 +205,24 @@ test("an agreed-but-incomplete stop reports as settled without claiming completi
   assert.doesNotMatch(report, /المهمة اكتملت/);
 });
 
+test("an agreed stop still surfaces a pending user decision, not hidden by incomplete (Codex #30)", () => {
+  // converged + goalStatus:incomplete + a user_decision item is schema-valid and now stops early.
+  // The user's required action must NOT be dropped from the terminal report just because the
+  // aggregate completion is "incomplete".
+  const decision = { action: "create", kind: "user_decision", text: "اختَر آلية نشر النماذج", requiredStep: { actor: "user", action: "provide_decision" } };
+  const assessment = assessRound([
+    rawControl({ goalStatus: "incomplete", itemProposals: [decision] }),
+    rawControl({ goalStatus: "incomplete" }),
+  ], 1);
+  assert.equal(assessment.agreementState, "converged");
+  assert.equal(assessment.canStop, true);
+  const outcome = buildDiscussionOutcome(assessment, 3, 2);
+  assert.equal(outcome.phase, "converged");
+  const report = discussionOutcomeReport(outcome);
+  assert.match(report, /محتاجة إجراء منك/);
+  assert.match(report, /اختَر آلية نشر النماذج/);
+});
+
 test("a five-round collaboration stops after round two and finalizes once", async (t) => {
   const session = await createSession("convergence-regression");
   let claudeCalls = 0;

@@ -193,7 +193,11 @@ function terminalOutcomeReport(outcome) {
     const head = settledOnly ? "الوكلاء اتفقوا واستقرّوا على إجابة واحدة" : "الوكلاء اتفقوا والمهمة اكتملت";
     const tail = outcome.stoppedEarly ? `في الجولة ${round} — تم إيقاف الجولات المتبقية.` : `في الجولة الأخيرة (${round}).`;
     const deeper = settledOnly ? " لو عايز تعميق أكتر، ارفع عدد الجولات." : "";
-    return `${head} ${tail}${deeper}`;
+    // An agreed stop can still leave open items needing a NON-agent action (a user decision, an
+    // external check). completionState=incomplete would otherwise map this to a plain settled
+    // outcome and hide the required step — so surface those items instead of dropping them.
+    const pending = outcome.pendingItems.length ? `\nلسه فيه نقاط محتاجة إجراء منك أو تحقّق خارجي:${pendingItemList(outcome)}` : "";
+    return `${head} ${tail}${deeper}${pending}`;
   }
   if (outcome.phase === "needs_user") {
     return `الوكلاء متفقون، والنقاش توقف في الجولة ${round} لأن النتيجة تحتاج قرارك.${pendingItemList(outcome)}`;
