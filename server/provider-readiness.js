@@ -13,7 +13,7 @@ const readinessCache = new Map();
 // (cli-discovery covers Windows/macOS/Linux × x64/arm64), verify it actually runs as this provider,
 // and auto-trust it — so an installed provider "just works" without a manual Trust & check step.
 async function autoTrustDiscoveredCommand(definition, discover = discoverProviderCommands) {
-  let candidates = [];
+  let candidates;
   try { candidates = await discover(definition.command); }
   catch (error) { logError("provider auto-discovery failed", redact(error?.message || String(error))); return null; }
   for (const candidate of candidates) {
