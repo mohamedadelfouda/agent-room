@@ -83,6 +83,7 @@ const CONNECTOR_STATUS_KEYS = Object.freeze({
   executing_unknown: "actionUnknown",
   completed: "actionCompleted",
   running: "statusRunning",
+  interrupted: "statusInterrupted",
   failed: "statusError",
   failed_after_approval: "actionFailed",
   rejected: "actionRejected",

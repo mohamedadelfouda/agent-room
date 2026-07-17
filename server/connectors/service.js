@@ -1,5 +1,5 @@
 import crypto from "node:crypto";
-import { getSession, mutateSession } from "../store.js";
+import { getSession, listSessions, mutateSession, SKIP_SESSION_WRITE } from "../store.js";
 import { connector, executeConnectorAction } from "./registry.js";
 import { recordDecision } from "../decisions.js";
 import { logError, redact } from "../logger.js";
@@ -127,6 +127,36 @@ export async function requestConnectorAction(sessionId, connectorId, actionId, i
     latest.connectorActions.push(proposal);
     return structuredClone(proposal);
   });
+}
+
+// A read-connector audit is written "running", then flipped to "completed"/"failed" once the read
+// settles. A crash in between leaves it stuck "running" forever. At startup, settle any such orphan to
+// "interrupted" (not "failed" — the read didn't fail, its outcome is just unknown) with a restart reason;
+// a read has no side effects, so the user can simply re-read. Mirrors reconcileInterruptedRuns /
+// reconcileExecutionWorktrees (called together at startup), including their skip of unmutatable summaries.
+export async function reconcileInterruptedReadAudits(reason = "server_restart") {
+  const summaries = await listSessions();
+  let recovered = 0;
+  for (const summary of summaries) {
+    if (summary.recoveryNeeded) continue; // synthetic recovery placeholder — no session file to mutate
+    try {
+      const settled = await mutateSession(summary.id, (latest) => {
+        const audits = latest.connectorReadAudits;
+        if (!Array.isArray(audits) || !audits.some((audit) => audit.status === "running")) return SKIP_SESSION_WRITE;
+        const now = new Date().toISOString();
+        for (const audit of audits) {
+          if (audit.status === "running") {
+            Object.assign(audit, { status: "interrupted", completedAt: now, interruptionReason: reason });
+          }
+        }
+        return true;
+      });
+      if (settled) recovered += 1;
+    } catch (error) {
+      logError(`connector read audit reconciliation failed for ${summary.id}`, redact(error?.message || String(error)));
+    }
+  }
+  return recovered;
 }
 
 export async function decideConnectorAction(sessionId, actionId, approve) {
