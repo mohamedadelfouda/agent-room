@@ -26,6 +26,7 @@ test("isNodeSupported gates on Node major >= 22", () => {
 test("isGitPresent is true only for a clean `git --version` probe", () => {
   assert.equal(isGitPresent({ status: 0 }), true);
   assert.equal(isGitPresent({ error: new Error("spawn git ENOENT") }), false); // Git not installed
+  assert.equal(isGitPresent({ error: new Error("ETIMEDOUT"), status: null }), false); // hung probe → timed out
   assert.equal(isGitPresent({ status: 1 }), false);
   assert.equal(isGitPresent({ status: null }), false); // signal-killed probe
 });

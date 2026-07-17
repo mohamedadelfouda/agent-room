@@ -19,8 +19,8 @@ export function isNodeSupported(nodeVersion) {
   return Number.isInteger(major) && major >= 22;
 }
 
-// A missing Git surfaces as an ENOENT `error`; a signal-killed probe as a null `status` — both mean
-// "no usable Git", so only a clean exit 0 counts as present.
+// A missing Git surfaces as an ENOENT `error`, a hung probe that hit the timeout as an `error` too, and a
+// signal-killed probe as a null `status` — all mean "no usable Git", so only a clean exit 0 counts.
 export function isGitPresent(spawnResult) {
   return !spawnResult.error && spawnResult.status === 0;
 }
@@ -32,7 +32,9 @@ function main() {
     return;
   }
   // `git --version` is a read-only probe; spawnSync (not the server's command sandbox) is fine pre-server.
-  if (!isGitPresent(spawnSync("git", ["--version"], { stdio: "ignore" }))) {
+  // Cap it with a timeout so a hung git (broken install, AV interception, stalled network mount) can't
+  // block startup — a timed-out probe returns with `error` set, which isGitPresent reads as "not present".
+  if (!isGitPresent(spawnSync("git", ["--version"], { stdio: "ignore", timeout: 5000 }))) {
     console.warn("Note: Git was not found. Discussion works without it; install Git to unlock execution on your code.");
   }
   console.log(`Preflight OK — Node ${process.versions.node} on ${process.platform}/${process.arch}.`);
