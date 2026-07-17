@@ -80,12 +80,14 @@ test("known API, connector, and decision identifiers resolve to catalog keys", (
 });
 
 test("discussionOutcomeReport renders the structured outcome in the reader's language", () => {
-  // A missing / truncated outcome yields empty text so the caller falls back to the stored content.
+  // A missing / truncated outcome yields empty text so the caller falls back to the stored content. Only a
+  // complete, server-stamped outcome (outcomeVersion 1, set atomically with every field) renders.
   assert.deepEqual(discussionOutcomeReport(null), { text: "", items: [] });
   assert.deepEqual(discussionOutcomeReport({}), { text: "", items: [] });
   assert.deepEqual(discussionOutcomeReport({ phase: "converged" }), { text: "", items: [] }); // no completedRounds
+  assert.deepEqual(discussionOutcomeReport({ phase: "converged", completedRounds: 3 }), { text: "", items: [] }); // truncated: no outcomeVersion
 
-  const converged = { phase: "converged", completedRounds: 3, stoppedEarly: false };
+  const converged = { outcomeVersion: 1, phase: "converged", completedRounds: 3, stoppedEarly: false };
   assert.match(discussionOutcomeReport(converged, "en").text, /agreed.*final round \(3\)/);
   assert.match(discussionOutcomeReport(converged, "ar").text, /الجولة الأخيرة/);
   assert.notEqual(discussionOutcomeReport(converged, "en").text, discussionOutcomeReport(converged, "ar").text);
@@ -93,38 +95,38 @@ test("discussionOutcomeReport renders the structured outcome in the reader's lan
   assert.match(discussionOutcomeReport(converged, "ar").text, /٣/);
   assert.deepEqual(discussionOutcomeReport(converged, "en").items, []);
 
-  const early = { phase: "converged", completedRounds: 2, stoppedEarly: true };
+  const early = { outcomeVersion: 1, phase: "converged", completedRounds: 2, stoppedEarly: true };
   assert.match(discussionOutcomeReport(early, "en").text, /remaining rounds were stopped/);
 
   // needs_user carries the pending items as separate bullet lines, not baked into the sentence.
-  const needsUser = { phase: "needs_user", completedRounds: 4, pendingItems: [{ text: "Confirm the API budget" }, { text: "Pick a region" }] };
+  const needsUser = { outcomeVersion: 1, phase: "needs_user", completedRounds: 4, pendingItems: [{ text: "Confirm the API budget" }, { text: "Pick a region" }] };
   const nu = discussionOutcomeReport(needsUser, "en");
   assert.match(nu.text, /needs your decision/);
   assert.deepEqual(nu.items, ["Confirm the API budget", "Pick a region"]);
   assert.match(discussionOutcomeReport(needsUser, "ar").text, /قرارك/);
 
   // blocked_external also carries the pending items.
-  const blocked = { phase: "blocked_external", completedRounds: 3, pendingItems: [{ text: "Await CI" }] };
+  const blocked = { outcomeVersion: 1, phase: "blocked_external", completedRounds: 3, pendingItems: [{ text: "Await CI" }] };
   const be = discussionOutcomeReport(blocked, "en");
   assert.match(be.text, /awaits verification or an external step/);
   assert.deepEqual(be.items, ["Await CI"]);
 
-  const disagreement = { phase: "unresolved", completedRounds: 5, disagreements: ["Cache strategy", "Error handling"] };
+  const disagreement = { outcomeVersion: 1, phase: "unresolved", completedRounds: 5, disagreements: ["Cache strategy", "Error handling"] };
   const dz = discussionOutcomeReport(disagreement, "en");
   assert.match(dz.text, /disagreement/);
   assert.deepEqual(dz.items, ["Cache strategy", "Error handling"]);
 
-  const invalidControl = { phase: "unresolved", completedRounds: 6, stopReason: "invalid_control" };
+  const invalidControl = { outcomeVersion: 1, phase: "unresolved", completedRounds: 6, stopReason: "invalid_control" };
   assert.match(discussionOutcomeReport(invalidControl, "en").text, /control data was missing or invalid/);
   assert.deepEqual(discussionOutcomeReport(invalidControl, "en").items, []);
 
   // converged-but-incomplete (unfinished agreement) carries the pending items.
-  const incomplete = { phase: "unresolved", completedRounds: 4, agreementState: "converged", completionState: "incomplete", pendingItems: [{ text: "Write tests" }] };
+  const incomplete = { outcomeVersion: 1, phase: "unresolved", completedRounds: 4, agreementState: "converged", completionState: "incomplete", pendingItems: [{ text: "Write tests" }] };
   const inc = discussionOutcomeReport(incomplete, "ar");
   assert.match(inc.text, /تحتاج شغلًا إضافيًا/);
   assert.deepEqual(inc.items, ["Write tests"]);
 
-  const fallback = { phase: "unresolved", completedRounds: 7 };
+  const fallback = { outcomeVersion: 1, phase: "unresolved", completedRounds: 7 };
   assert.match(discussionOutcomeReport(fallback, "en").text, /without a final, adoptable agreement/);
   assert.match(discussionOutcomeReport(fallback, "ar").text, /من غير اتفاق نهائي/);
 });

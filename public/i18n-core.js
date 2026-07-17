@@ -157,7 +157,11 @@ export function errorMessageKey(failure = {}) {
 // in server/orchestrator.js, which still generates the stored `content` (the agent transcript + the
 // truncated-meta fallback). Keep the two in sync until they are consolidated behind one renderer.
 export function discussionOutcomeReport(outcome, language = "ar") {
-  if (!outcome || typeof outcome !== "object" || typeof outcome.completedRounds !== "number") return { text: "", items: [] };
+  // Render only a complete, server-stamped outcome: buildDiscussionOutcome sets outcomeVersion 1 atomically
+  // with every field, so its absence marks a truncated/foreign outcome that must fall back to the stored
+  // content rather than render a generic "N rounds ended" summary over it. (Same validity marker as
+  // officialOutcomeFrom in app.js.)
+  if (!outcome || typeof outcome !== "object" || outcome.outcomeVersion !== 1 || typeof outcome.completedRounds !== "number") return { text: "", items: [] };
   const en = language === "en";
   const round = formatLocaleNumber(language, outcome.completedRounds);
   const pendingItems = Array.isArray(outcome.pendingItems) ? outcome.pendingItems.map((item) => item.text) : [];

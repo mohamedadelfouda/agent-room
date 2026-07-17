@@ -1075,11 +1075,18 @@ function renderMessages() {
     const speaker = latest.author === "agent" ? providerInfo(latest.agent).label : t("system");
     const announcement = $("conversationAnnouncements");
     announcement.textContent = "";
-    // Announce the same localized text the reader sees. For a round-summary that's the report rendered
-    // from meta.outcome (sentence + items), not the server's stored Arabic `content`, so a screen-reader
-    // user hears it in their language too.
-    const outcome = latest.meta?.outcome ? discussionOutcomeReport(latest.meta.outcome, lang) : null;
-    const body = outcome?.text ? [outcome.text, ...outcome.items].join(" ") : String(latest.content || "");
+    // Announce the same localized text the reader sees (mirrors the systemBody branches in the render loop):
+    // an error message announces the localized failure line, a round-summary the report rendered from
+    // meta.outcome (sentence + items) — never the server's stored Arabic `content` — so a screen-reader user
+    // hears it in their language too.
+    const latestAppError = latest.meta?.status === "error" || latest.phase === "exec_error";
+    let body;
+    if (latestAppError) {
+      body = t(latest.phase === "exec_error" ? "executionFailed" : "runFailed");
+    } else {
+      const outcome = latest.meta?.outcome ? discussionOutcomeReport(latest.meta.outcome, lang) : null;
+      body = outcome?.text ? [outcome.text, ...outcome.items].join(" ") : String(latest.content || "");
+    }
     requestAnimationFrame(() => { announcement.textContent = `${t("newMessageFrom")(speaker)}: ${body.slice(0, 500)}`; });
   }
 }
