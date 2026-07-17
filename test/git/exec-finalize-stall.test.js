@@ -64,6 +64,11 @@ test("a stop during a stalled finalizing clone-cleanup releases the session sile
   const events = [];
   const cleanupStarted = deferred();
   const releaseCleanup = deferred();
+  // settleExec's timeout timer is unref'd, so hold the loop open ourselves through the settle race —
+  // otherwise the process can drain while the run is parked in the stalled removeWorktree and the pending
+  // promise trips node:test ("Promise resolution is still pending but the event loop has already resolved"),
+  // as seen on the Node 22 CI runner (mirrors the sibling stall test in exec-cancellation.test.js).
+  const keepLoopAlive = setInterval(() => {}, 25);
 
   // Stall removeWorktree (keep every other worktree export real — createWorktree must run the real
   // clone). It signals when it's entered (we're now inside the finalizing cleanup) then blocks.
@@ -122,6 +127,7 @@ test("a stop during a stalled finalizing clone-cleanup releases the session sile
     assert.equal(record.cleanupPending, false);
     assert.match(record.cleanupCompletedAt || "", /^\d{4}-\d\d-\d\dT/);
   } finally {
+    clearInterval(keepLoopAlive);
     releaseCleanup.resolve();
     // Drain the background run before deleting its session/clone, so a *future* assertion failure above
     // can't race the run's own cleanup writes against this teardown (which would surface a spurious ENOENT).
