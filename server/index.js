@@ -44,6 +44,7 @@ import {
   providerReadiness,
   trustedProviderCliPaths,
 } from "./provider-readiness.js";
+import { checkAllProviderUpdates } from "./update-check.js";
 import { diagnosticSnapshot, healthSnapshot } from "./diagnostics.js";
 
 // First-run detection resolves native executables before entering an attached project.
@@ -469,6 +470,11 @@ const server = http.createServer(async (req, res) => {
     }
     if (req.method === "GET" && url.pathname === "/api/agents/status") {
       return json(res, 200, await detectAgents());
+    }
+    // Reads the npm registry (network) to report which agent CLIs have a newer version, so the UI can
+    // show UPDATE vs UPDATED. Separate from status so status stays fast/offline; fails soft.
+    if (req.method === "GET" && url.pathname === "/api/agents/update-check") {
+      return json(res, 200, await checkAllProviderUpdates());
     }
     if (req.method === "GET" && url.pathname === "/api/providers") {
       return json(res, 200, { providers: providerCatalog() });

@@ -628,11 +628,20 @@ async function confirmDeleteSession(session) {
   }
 }
 
+// Each rail/workflow/context column collapses via a persisted root class on wide screens and becomes
+// an overlay below its breakpoint. topbarBtn is the topbar toggle whose state mirrors the column.
+const COLUMN_TOGGLES = {
+  rail: { cls: "rail-collapsed", key: "agent-room-rail-collapsed", overlayBelow: "(max-width: 860px)", needsSession: false, topbarBtn: "railDrawerToggle" },
+  workflow: { cls: "workflow-hidden", key: "agent-room-workflow-hidden", overlayBelow: "(max-width: 1100px)", needsSession: true, topbarBtn: "workflowToggle" },
+  context: { cls: "context-hidden", key: "agent-room-context-hidden", overlayBelow: "(max-width: 1100px)", needsSession: true, topbarBtn: "contextDrawerToggle" },
+};
+
 function applyShellChrome() {
-  const railCollapsed = localStorage.getItem("agent-room-rail-collapsed") === "1";
-  const contextHidden = localStorage.getItem("agent-room-context-hidden") === "1";
-  document.documentElement.classList.toggle("rail-collapsed", railCollapsed);
-  document.documentElement.classList.toggle("context-hidden", contextHidden);
+  const root = document.documentElement;
+  for (const spec of Object.values(COLUMN_TOGGLES)) {
+    root.classList.toggle(spec.cls, localStorage.getItem(spec.key) === "1");
+  }
+  const railCollapsed = root.classList.contains("rail-collapsed");
   const railBtn = $("toggleRail");
   if (railBtn) {
     railBtn.setAttribute("aria-pressed", String(railCollapsed));
@@ -641,37 +650,165 @@ function applyShellChrome() {
   }
   const contextBtn = $("toggleContext");
   if (contextBtn) {
-    contextBtn.classList.toggle("is-active", !contextHidden);
-    contextBtn.setAttribute("aria-pressed", String(!contextHidden));
-    contextBtn.setAttribute("aria-expanded", String(window.matchMedia("(max-width: 1100px)").matches
+    const contextHidden = root.classList.contains("context-hidden");
+    // Below the breakpoint the button toggles an overlay, so its pressed/active state must track whether
+    // that overlay is open — not the persisted collapse class, which would leave it stuck "pressed" after
+    // the overlay closes. Above the breakpoint it reflects the inline column's collapse state. One value
+    // drives is-active, aria-pressed, and aria-expanded so they can't disagree.
+    const contextActive = window.matchMedia(COLUMN_TOGGLES.context.overlayBelow).matches
       ? activeShellOverlay === "context"
-      : !contextHidden));
+      : !contextHidden;
+    contextBtn.classList.toggle("is-active", contextActive);
+    contextBtn.setAttribute("aria-pressed", String(contextActive));
+    contextBtn.setAttribute("aria-expanded", String(contextActive));
     contextBtn.title = t("toggleContext");
     contextBtn.setAttribute("aria-label", t("toggleContext"));
+  }
+  // The rail-toolbar workflow toggle is the desktop control for the room-flow column (the topbar ⇥ is
+  // hidden at desktop widths), mirroring the context toggle. Same overlay-aware active/expanded state.
+  const workflowBtn = $("toggleWorkflow");
+  if (workflowBtn) {
+    const workflowActive = window.matchMedia(COLUMN_TOGGLES.workflow.overlayBelow).matches
+      ? activeShellOverlay === "workflow"
+      : !root.classList.contains("workflow-hidden");
+    workflowBtn.classList.toggle("is-active", workflowActive);
+    workflowBtn.setAttribute("aria-pressed", String(workflowActive));
+    workflowBtn.setAttribute("aria-expanded", String(workflowActive));
+    workflowBtn.title = t("workflowNav");
+    workflowBtn.setAttribute("aria-label", t("workflowNav"));
+  }
+  // Keep the topbar ☰/⇥/◫ toggles' aria-expanded correct in BOTH modes and across resizes: at wide
+  // sizes it reflects the inline column's collapse state; below the breakpoint it reflects whether
+  // that overlay is open. Recomputed unconditionally so resizing past a breakpoint can't leave it stale.
+  for (const [kind, spec] of Object.entries(COLUMN_TOGGLES)) {
+    const btn = $(spec.topbarBtn);
+    if (!btn) continue;
+    btn.setAttribute("aria-expanded", String(window.matchMedia(spec.overlayBelow).matches
+      ? activeShellOverlay === kind
+      : !root.classList.contains(spec.cls)));
   }
   const groupSelect = $("sessionGroupBy");
   if (groupSelect) groupSelect.value = sessionGroupBy;
 }
 
 function toggleRailCollapsed() {
-  if (window.matchMedia("(max-width: 860px)").matches) {
+  const spec = COLUMN_TOGGLES.rail;
+  if (window.matchMedia(spec.overlayBelow).matches) {
     closeShellOverlay();
     return;
   }
-  const next = !document.documentElement.classList.contains("rail-collapsed");
-  localStorage.setItem("agent-room-rail-collapsed", next ? "1" : "0");
+  const next = !document.documentElement.classList.contains(spec.cls);
+  localStorage.setItem(spec.key, next ? "1" : "0");
   applyShellChrome();
 }
 
-function toggleContextColumn() {
-  if (window.matchMedia("(max-width: 1100px)").matches) {
-    if (!currentSessionId) return;
-    toggleShellOverlay("context", $("contextDrawerToggle"));
+// Width-aware column toggle for the topbar controls (and the rail's context button): below the
+// column's breakpoint it is an overlay, so open/close it; at wider sizes it is an inline column, so
+// collapse/expand it via its persisted class. This is why the topbar ☰/⇥/◫ buttons now do something
+// on desktop instead of toggling an overlay that isn't rendered at that width.
+function toggleColumn(kind, trigger) {
+  const spec = COLUMN_TOGGLES[kind];
+  if (!spec) return;
+  if (window.matchMedia(spec.overlayBelow).matches) {
+    if (spec.needsSession && !currentSessionId) return;
+    toggleShellOverlay(kind, trigger);
     return;
   }
-  const next = !document.documentElement.classList.contains("context-hidden");
-  localStorage.setItem("agent-room-context-hidden", next ? "1" : "0");
+  const collapsed = document.documentElement.classList.toggle(spec.cls);
+  localStorage.setItem(spec.key, collapsed ? "1" : "0");
   applyShellChrome();
+}
+
+// Drag- or keyboard-resize the rail / workflow / context columns (wide layout). Resizers live on the
+// stable grid containers (not the columns, whose innerHTML is rebuilt) and set each column's
+// persisted -open width var. Direction-aware so it feels right in both LTR and RTL. As an ARIA
+// "window splitter" each resizer is focusable and arrow/Home/End operable with a live aria-valuenow.
+function setupColumnResizers() {
+  const shell = $("appShell");
+  const workspace = document.querySelector(".workspace");
+  const configs = [
+    { col: "rail", parent: shell, colEl: "sessionsRail", varOpen: "--rail-w-open", key: "agent-room-rail-w", min: 180, max: 460, edge: "end" },
+    { col: "workflow", parent: workspace, colEl: "workflow", varOpen: "--workflow-w-open", key: "agent-room-workflow-w", min: 150, max: 380, edge: "end" },
+    { col: "context", parent: workspace, colEl: "contextCol", varOpen: "--context-w-open", key: "agent-room-context-w", min: 220, max: 520, edge: "start" },
+  ];
+  const widthOf = (varOpen) => parseFloat(getComputedStyle(document.documentElement).getPropertyValue(varOpen)) || 0;
+  for (const cfg of configs) {
+    if (!cfg.parent || !$(cfg.colEl)) continue; // both are static in index.html; guard defensively
+    const saved = parseInt(localStorage.getItem(cfg.key), 10);
+    if (saved >= cfg.min && saved <= cfg.max) document.documentElement.style.setProperty(cfg.varOpen, `${saved}px`);
+
+    const resizer = document.createElement("div");
+    resizer.className = "col-resizer";
+    resizer.dataset.col = cfg.col;
+    resizer.tabIndex = 0;
+    resizer.setAttribute("role", "separator");
+    resizer.setAttribute("aria-orientation", "vertical");
+    // A distinct label per column so screen-reader users can tell the three separators apart.
+    const ariaKey = `resizeColumn${cfg.col.charAt(0).toUpperCase()}${cfg.col.slice(1)}`; // …Rail/…Workflow/…Context
+    resizer.setAttribute("aria-controls", cfg.colEl);
+    resizer.setAttribute("data-i18n-aria-label", ariaKey); // re-localized by applyLang
+    resizer.setAttribute("aria-label", t(ariaKey));
+    resizer.setAttribute("aria-valuemin", String(cfg.min));
+    resizer.setAttribute("aria-valuemax", String(cfg.max));
+    // Insert the handle next to the column it splits so tab/DOM order matches the visual boundary
+    // (WCAG 2.4.3). It stays inside the same position:relative container (.shell/.workspace), so its
+    // absolute positioning is unchanged. edge:"end" → after the column; edge:"start" (context) → before.
+    $(cfg.colEl).insertAdjacentElement(cfg.edge === "end" ? "afterend" : "beforebegin", resizer);
+
+    const applyWidth = (px, persist) => {
+      const width = Math.max(cfg.min, Math.min(cfg.max, Math.round(px)));
+      document.documentElement.style.setProperty(cfg.varOpen, `${width}px`);
+      resizer.setAttribute("aria-valuenow", String(width));
+      if (persist) localStorage.setItem(cfg.key, String(width));
+      return width;
+    };
+    applyWidth(widthOf(cfg.varOpen), false); // seed aria-valuenow from the current width
+
+    let fixedEdgeX = 0, dragging = false;
+    resizer.addEventListener("pointerdown", (event) => {
+      if (event.button !== 0 || !$(cfg.colEl)) return;
+      event.preventDefault();
+      dragging = true;
+      resizer.classList.add("dragging");
+      // Width = |pointer − the column's fixed (non-dragged) edge|, so it's correct in both LTR and
+      // RTL without sign juggling. inline-start is the left edge in LTR, the right edge in RTL.
+      // Capture the edge BEFORE setPointerCapture (which can throw), so the move handler is never
+      // left with a stale/zero edge.
+      const rect = $(cfg.colEl).getBoundingClientRect();
+      const rtl = document.documentElement.dir === "rtl";
+      fixedEdgeX = cfg.edge === "end" ? (rtl ? rect.right : rect.left) : (rtl ? rect.left : rect.right);
+      try { resizer.setPointerCapture(event.pointerId); } catch { /* pointer may be synthetic */ }
+    });
+    resizer.addEventListener("pointermove", (event) => {
+      if (dragging) applyWidth(Math.abs(event.clientX - fixedEdgeX), false);
+    });
+    const finish = (event) => {
+      if (!dragging) return;
+      dragging = false;
+      resizer.classList.remove("dragging");
+      try { resizer.releasePointerCapture(event.pointerId); } catch { /* pointer already released */ }
+      localStorage.setItem(cfg.key, String(Math.round(widthOf(cfg.varOpen))));
+    };
+    resizer.addEventListener("pointerup", finish);
+    resizer.addEventListener("pointercancel", finish);
+
+    resizer.addEventListener("keydown", (event) => {
+      // A physical Right arrow widens a start-edge (leading-boundary) column and narrows an end-edge
+      // one — and RTL flips that. Home/End jump to the limits.
+      const rtl = document.documentElement.dir === "rtl";
+      const rightWidens = (cfg.edge === "end") !== rtl;
+      const step = event.shiftKey ? 48 : 16;
+      const current = widthOf(cfg.varOpen);
+      let next;
+      if (event.key === "Home") next = cfg.min;
+      else if (event.key === "End") next = cfg.max;
+      else if (event.key === "ArrowRight") next = current + (rightWidens ? step : -step);
+      else if (event.key === "ArrowLeft") next = current + (rightWidens ? -step : step);
+      else return;
+      applyWidth(next, true);
+      event.preventDefault();
+    });
+  }
 }
 
 const SHELL_OVERLAYS = {
@@ -681,7 +818,7 @@ const SHELL_OVERLAYS = {
 };
 
 function shellOverlayButtons() {
-  return [$("railDrawerToggle"), $("emptyRailDrawerToggle"), $("workflowToggle"), $("contextDrawerToggle"), $("toggleContext")].filter(Boolean);
+  return [$("railDrawerToggle"), $("emptyRailDrawerToggle"), $("workflowToggle"), $("contextDrawerToggle"), $("toggleContext"), $("toggleWorkflow")].filter(Boolean);
 }
 
 function closeShellOverlay({ restoreFocus = true } = {}) {
@@ -698,6 +835,9 @@ function closeShellOverlay({ restoreFocus = true } = {}) {
   backdrop.hidden = true;
   activeShellOverlay = null;
   shellOverlayTrigger = null;
+  // Re-sync every toggle's is-active/aria-pressed/aria-expanded now that no overlay is open — closing via
+  // Escape/backdrop must not leave a toggle stuck "pressed" (the aria-expanded reset alone isn't enough).
+  applyShellChrome();
   if (restoreFocus) trigger?.focus();
 }
 
@@ -714,6 +854,9 @@ function openShellOverlay(kind, trigger) {
   shellOverlayButtons().forEach((button) => {
     button.setAttribute("aria-expanded", String(button === trigger || button.getAttribute("aria-controls") === panel.id));
   });
+  // Re-sync is-active/aria-pressed/aria-expanded now that this overlay is open — the manual loop above
+  // only sets aria-expanded, so without this the rail-toolbar toggles would stay visually un-pressed.
+  applyShellChrome();
   panel.focus();
 }
 
@@ -1433,19 +1576,25 @@ async function pollHealth() { try { await api("/api/health"); setConnected(true)
 
 /* ---------------- onboarding ---------------- */
 async function loadOnboard() {
+  // Re-rendering the list discards the old buttons; clear any elapsed-timer intervals still ticking
+  // on those detached nodes so they don't leak.
+  for (const timer of updateTimers.values()) clearInterval(timer);
+  updateTimers.clear();
   const list = $("onboardList"); list.textContent = "...";
   try {
     const s = await api("/api/agents/status");
     list.innerHTML = "";
     const rows = [
-      ...providers.map((item) => ({ name: item.label, ok: s.providers?.[item.id]?.installed, detail: s.providers?.[item.id]?.version || s.providers?.[item.id]?.detail, agent: item.id })),
+      ...providers.map((item) => ({ name: item.label, ok: s.providers?.[item.id]?.installed, detail: s.providers?.[item.id]?.version || s.providers?.[item.id]?.detail, autoTrusted: s.providers?.[item.id]?.autoTrusted, agent: item.id })),
       { name: "GitHub (gh)", ok: s.github.authed, detail: s.github.detail, agent: null },
     ];
     for (const r of rows) {
       const row = document.createElement("div"); row.className = "onboard-row";
       const state = r.ok ? t("installed") : t("notInstalled");
       if (!r.ok && r.detail) console.error(`[Agent Room: provider_check_failed] ${r.detail}`);
-      const detail = [state, r.ok ? r.detail : ""].filter(Boolean).join(" · ");
+      // Surface auto-trust: this provider's bundled executable was discovered and trusted for the
+      // user (no manual Trust & check), so they can see it happened rather than it being silent.
+      const detail = [state, r.ok ? r.detail : "", r.autoTrusted ? t("autoDetected") : ""].filter(Boolean).join(" · ");
       row.innerHTML = `<span class="onboard-dot ${r.ok ? "ok" : "bad"}" aria-hidden="true"></span><span class="ob-name">${esc(r.name)}</span><span class="ob-detail">${esc(detail)}</span>`;
       const actions = document.createElement("span"); actions.className = "ob-actions";
       if (r.agent && !r.ok) {
@@ -1454,15 +1603,59 @@ async function loadOnboard() {
         setupBtn.onclick = () => openCliSetupFromOnboard(r.agent);
         actions.appendChild(setupBtn);
       }
-      if (r.agent && providerInfo(r.agent).canUpdate) {
-        const btn = document.createElement("button"); btn.className = "btn-mini"; btn.textContent = t("update");
-        btn.onclick = () => updateAgentCli(r.agent, btn);
+      if (r.agent && r.ok && providerInfo(r.agent).canUpdate) {
+        // Rendered as "Checking…" first; refreshUpdateStates() then flips it to UPDATE (an update is
+        // available) or ✓ Updated (already latest), once the registry check returns.
+        const btn = document.createElement("button");
+        btn.className = "btn-mini update-btn"; btn.dataset.update = r.agent;
+        btn.textContent = t("checkingUpdate"); btn.disabled = true;
         actions.appendChild(btn);
       }
       if (actions.childElementCount > 0) row.appendChild(actions);
       list.appendChild(row);
     }
+    refreshUpdateStates();
   } catch (e) { list.textContent = localizedFailure(e); }
+}
+
+// Turn each "Checking…" update button into its real state using a registry version check.
+const updateTimers = new Map();
+
+// Reset a CLI update button to a plain, clickable "Update" — used whenever the availability check
+// couldn't produce a verdict (offline, registry hiccup, unparseable manifest), so a button is never
+// stranded on a disabled "Checking…" and the user can still try to update.
+function resetToPlainUpdate(btn) {
+  btn.disabled = false; btn.className = "btn-mini update-btn";
+  btn.textContent = t("update"); btn.title = "";
+  btn.onclick = () => updateAgentCli(btn.dataset.update, btn);
+}
+async function refreshUpdateStates() {
+  let checks;
+  try { checks = await api("/api/agents/update-check"); }
+  catch {
+    // Offline / check failed: offer a plain Update they can still click to try updating.
+    for (const btn of document.querySelectorAll(".update-btn[data-update]")) { btn.hidden = false; resetToPlainUpdate(btn); }
+    return;
+  }
+  for (const btn of document.querySelectorAll(".update-btn[data-update]")) {
+    const c = checks[btn.dataset.update];
+    if (!c || !c.installed) { btn.hidden = true; continue; }
+    btn.hidden = false;
+    if (c.updateAvailable) {
+      btn.disabled = false;
+      btn.className = "btn-mini update-btn update-available";
+      // Isolate the version so the LTR number/arrow render correctly inside an RTL button.
+      btn.innerHTML = c.latest ? `${esc(t("update"))} → ${bdi(c.latest, "ltr")}` : esc(t("update"));
+      btn.title = c.current && c.latest ? `${c.current} → ${c.latest}` : "";
+      btn.onclick = () => updateAgentCli(btn.dataset.update, btn);
+    } else if (c.checkFailed) {
+      // Couldn't reach the registry — offer a plain Update rather than a possibly-wrong "up to date".
+      resetToPlainUpdate(btn);
+    } else {
+      btn.disabled = true; btn.className = "btn-mini update-btn is-updated";
+      btn.textContent = t("updated"); btn.title = c.current || ""; btn.onclick = null;
+    }
+  }
 }
 function openCliSetupFromOnboard(agent) {
   // Keep the onboarding dialog open: closing it felt like Setup "broke" the
@@ -1507,12 +1700,33 @@ function openCliSetupDrawer(agent) {
   requestAnimationFrame(() => document.querySelector(`.setup-cli[data-agent="${agent}"]`)?.focus());
 }
 async function updateAgentCli(agent, btn) {
-  btn.disabled = true; btn.textContent = t("updating");
+  btn.disabled = true; btn.onclick = null; btn.title = "";
+  const startedAt = Date.now();
+  // "Updating…" is announced once; the ticking seconds go in an aria-hidden span so a slow
+  // `claude update`/`codex update` never looks frozen yet doesn't re-announce every second to a
+  // screen reader (the onboarding row is an aria-live status region).
+  btn.textContent = "";
+  const label = document.createElement("span"); label.textContent = t("updating");
+  const elapsed = document.createElement("span"); elapsed.className = "upd-elapsed"; elapsed.setAttribute("aria-hidden", "true");
+  btn.append(label, elapsed);
+  // Locale-aware compact seconds ("5s" / "٥ ث") so the ticker matches every other number in the app
+  // (Arabic-Indic digits in AR), instead of always-Western hand-formatted digits.
+  const secFmt = new Intl.NumberFormat(localeId(lang), { style: "unit", unit: "second", unitDisplay: "narrow" });
+  const tick = () => { elapsed.textContent = " " + secFmt.format(Math.round((Date.now() - startedAt) / 1000)); };
+  tick();
+  const timer = setInterval(tick, 1000);
+  updateTimers.set(agent, timer); // tracked so loadOnboard can clear a ticking timer on re-render
+  const restore = () => { btn.disabled = false; btn.onclick = () => updateAgentCli(agent, btn); };
   try {
     const r = await api("/api/agents/update", { method: "POST", body: JSON.stringify({ agent }) });
-    btn.textContent = r.ok ? "✓" : "!";
-    setTimeout(loadOnboard, 1000);
-  } catch (e) { btn.textContent = "!"; btn.title = localizedFailure(e); btn.disabled = false; }
+    clearInterval(timer); updateTimers.delete(agent);
+    btn.textContent = r.ok ? t("updated") : t("updateFailed");
+    if (r.ok) { setTimeout(loadOnboard, 1200); } // re-check: shows the new version + flips the button
+    else { btn.title = r.output || ""; restore(); } // let the user retry a failed update
+  } catch (e) {
+    clearInterval(timer); updateTimers.delete(agent);
+    btn.textContent = t("updateFailed"); btn.title = localizedFailure(e); restore();
+  }
 }
 
 /* project picker (new-session modal) */
@@ -2216,11 +2430,13 @@ $("approveGo").onclick = confirmExec;
 $("approveCancel").onclick = cancelExecApproval;
 $("approveModal").addEventListener("click", (e) => { if (e.target === $("approveModal")) cancelExecApproval(); });
 $("toggleRail").onclick = toggleRailCollapsed;
-$("toggleContext").onclick = toggleContextColumn;
-$("railDrawerToggle").onclick = () => toggleShellOverlay("rail", $("railDrawerToggle"));
-$("emptyRailDrawerToggle").onclick = () => toggleShellOverlay("rail", $("emptyRailDrawerToggle"));
-$("workflowToggle").onclick = () => toggleShellOverlay("workflow", $("workflowToggle"));
-$("contextDrawerToggle").onclick = () => toggleShellOverlay("context", $("contextDrawerToggle"));
+$("toggleContext").onclick = () => toggleColumn("context", $("toggleContext"));
+$("toggleWorkflow").onclick = () => toggleColumn("workflow", $("toggleWorkflow"));
+$("railDrawerToggle").onclick = () => toggleColumn("rail", $("railDrawerToggle"));
+$("emptyRailDrawerToggle").onclick = () => toggleColumn("rail", $("emptyRailDrawerToggle"));
+$("workflowToggle").onclick = () => toggleColumn("workflow", $("workflowToggle"));
+$("contextDrawerToggle").onclick = () => toggleColumn("context", $("contextDrawerToggle"));
+setupColumnResizers();
 $("shellOverlayBackdrop").onclick = () => closeShellOverlay();
 document.addEventListener("keydown", handleShellOverlayKeydown);
 window.addEventListener("resize", () => {
