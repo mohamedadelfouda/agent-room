@@ -3,6 +3,7 @@ import { approveProviderCommand, approvedProviderCommand, checkCommand } from ".
 import { discoverProviderCommands } from "./cli-discovery.js";
 import { logError, redact } from "./logger.js";
 import { provider } from "./providers/registry.js";
+import { deriveProviderReadiness } from "./readiness-model.js";
 
 const READINESS_TTL_MS = 30000;
 const readinessCache = new Map();
@@ -72,11 +73,20 @@ async function computeProviderReadiness(definition, discover) {
   // that a path was trusted on the user's behalf (see docs/PROVIDERS.md). The discovered absolute
   // path is deliberately NOT returned — it would carry the OS username into the diagnostics snapshot.
   let autoTrusted = false;
+  let discoveryFound = false;
   if (!status.ok && !approvedProviderCommand(definition.id) && !process.env[definition.commandEnv]) {
     const discovered = await autoTrustDiscoveredCommand(definition, discover);
-    if (discovered) { status = discovered.status; autoTrusted = true; }
+    if (discovered) { status = discovered.status; autoTrusted = true; discoveryFound = true; }
   }
-  const value = { installed: status.ok, version: status.version, detail: status.detail, autoTrusted };
+  // Dimensional readiness (installation/trust/auth/operational) alongside the flat fields, so the new
+  // Setup Doctor can derive its chip while every existing consumer keeps reading installed/version/detail.
+  const dimensions = deriveProviderReadiness({
+    check: status,
+    autoTrusted,
+    hasApprovedCommand: Boolean(approvedProviderCommand(definition.id)),
+    discoveryFound,
+  });
+  const value = { installed: status.ok, version: status.version, detail: status.detail, autoTrusted, dimensions };
   readinessCache.set(definition.id, { value, expiresAt: Date.now() + READINESS_TTL_MS });
   return value;
 }
