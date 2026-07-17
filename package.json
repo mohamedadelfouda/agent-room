@@ -14,11 +14,11 @@
     "make": "electron-forge make",
     "check": "node scripts/check-syntax.mjs",
     "lint": "eslint \"server/**/*.js\" \"public/**/*.js\" \"scripts/**/*.mjs\" \"test/**/*.{js,mjs}\"",
-    "test": "node --test \"test/unit/*.test.js\" \"test/git/*.test.js\"",
-    "test:coverage": "node --test --experimental-test-coverage --test-coverage-lines=75 --test-coverage-branches=70 --test-coverage-functions=70 \"test/unit/*.test.js\" \"test/git/*.test.js\"",
+    "test": "node --experimental-test-module-mocks --test \"test/unit/*.test.js\" \"test/git/*.test.js\"",
+    "test:coverage": "node --experimental-test-module-mocks --test --experimental-test-coverage --test-coverage-lines=75 --test-coverage-branches=70 --test-coverage-functions=70 \"test/unit/*.test.js\" \"test/git/*.test.js\"",
     "test:browser": "node test/browser/responsive-shell.mjs && node test/browser/sse-resync.mjs",
     "test:smoke": "node test/smoke/source-server.mjs",
-    "ci": "node scripts/check-syntax.mjs && node --test \"test/unit/*.test.js\" \"test/git/*.test.js\""
+    "ci": "node scripts/check-syntax.mjs && node --experimental-test-module-mocks --test \"test/unit/*.test.js\" \"test/git/*.test.js\""
   },
   "engines": {
     "node": ">=22"
