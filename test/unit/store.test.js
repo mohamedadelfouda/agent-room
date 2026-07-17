@@ -17,6 +17,7 @@ import {
   renameSession,
   deleteSession,
   SKIP_SESSION_WRITE,
+  directoryFsyncErrorIsFatal,
 } from "../../server/store.js";
 import { CURRENT_SESSION_SCHEMA_VERSION } from "../../server/session-schema.js";
 
@@ -61,6 +62,18 @@ test("a durable session write is fsync'd for power-loss durability", async (t) =
   assert.ok(syncs >= 1, "the durable transcript write called fsync");
   await rm(join(sessionsDir, `${s.id}.json`), { force: true }).catch(() => {});
   await rm(join(sessionsDir, `${s.id}.summary.json`), { force: true }).catch(() => {});
+});
+
+test("directoryFsyncErrorIsFatal surfaces real I/O failures but tolerates unsupported-platform ones", () => {
+  // Directory fsync isn't supported on Windows (syncing a dir handle throws EPERM — verified) or on some
+  // network filesystems (EINVAL); those must stay best-effort or every durable write would fail there. A
+  // real resource/I-O failure must surface so a caller never gets a false durability acknowledgement.
+  for (const code of ["EPERM", "EINVAL", "ENOTSUP", "EISDIR", undefined]) {
+    assert.equal(directoryFsyncErrorIsFatal({ code }), false, `tolerate ${code}`);
+  }
+  for (const code of ["ENOSPC", "EIO", "EMFILE", "ENFILE", "EDQUOT", "EROFS"]) {
+    assert.equal(directoryFsyncErrorIsFatal({ code }), true, `surface ${code}`);
+  }
 });
 
 test("concurrent addMessage calls on one session don't drop appends", async () => {

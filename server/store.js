@@ -244,16 +244,29 @@ async function replaceJson(filePath, data, { durable = true } = {}) {
   }
 }
 
-// fsync a directory so a rename inside it is durable. Best-effort — unsupported on Windows and some
-// filesystems (opening a directory for sync throws), where the temp-file fsync + atomic rename still
-// give crash consistency; skip rather than fail the write.
+// A rename is a directory-entry change, so the parent directory must be fsync'd for it to survive a power
+// cut. Directory fsync genuinely isn't supported everywhere — on Windows, syncing a directory handle throws
+// EPERM (verified on this platform), and some network filesystems throw EINVAL — where the temp-file fsync +
+// atomic rename already give crash consistency, so those stay best-effort. But a real resource/I-O failure
+// means the rename may NOT be durable, so it must surface rather than let the write report a false success.
+const DIRECTORY_FSYNC_FATAL = new Set(["ENOSPC", "EIO", "EMFILE", "ENFILE", "EDQUOT", "EROFS"]);
+
+// Exported so the "which directory-fsync failures are fatal" contract is unit-tested directly: the
+// end-to-end path is hard to isolate because the temp-file fsync shares the same FileHandle.sync.
+export function directoryFsyncErrorIsFatal(error) {
+  return DIRECTORY_FSYNC_FATAL.has(error?.code);
+}
+
 async function fsyncDir(dirPath) {
   let handle;
   try {
     handle = await fs.open(dirPath, "r");
     await handle.sync();
-  } catch {
-    /* directory fsync unsupported here — best-effort only */
+  } catch (error) {
+    // Skip the platform/filesystem "can't sync a directory" cases (Windows EPERM, EINVAL, and any code not
+    // recognised as a genuine failure); surface a real durability failure so a caller is never told a
+    // not-yet-durable write succeeded.
+    if (directoryFsyncErrorIsFatal(error)) throw error;
   } finally {
     await handle?.close().catch(() => {});
   }
