@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { getSetupStatus, installationType } from "../../server/setup-status.js";
+import { getSetupStatus, installationType, probeGitAvailable } from "../../server/setup-status.js";
 import { providerIds } from "../../server/providers/registry.js";
 
 // Injected probes keep this pure composition test off the disk and off the network.
@@ -70,4 +70,19 @@ test("getSetupStatus degrades to safe defaults when a probe returns no dimension
 
 test("installationType is source outside Electron", () => {
   assert.equal(installationType(), "source");
+});
+
+test("probeGitAvailable collapses concurrent probes, caches within its TTL, and re-probes on refresh", async () => {
+  // Mirrors providerReadiness's cache so a polling/re-checking Setup Doctor doesn't spawn `git --version`
+  // on every call. `run` is injected to count spawns without touching the real git binary.
+  let spawns = 0;
+  const run = async () => { spawns += 1; return { ok: true, version: "2.40" }; };
+  const [a, b] = await Promise.all([probeGitAvailable({ run }), probeGitAvailable({ run })]);
+  assert.deepEqual(a, { available: true, version: "2.40" });
+  assert.deepEqual(b, a); // concurrent calls collapse onto one in-flight probe
+  assert.equal(spawns, 1);
+  await probeGitAvailable({ run }); // within TTL → served from cache
+  assert.equal(spawns, 1);
+  await probeGitAvailable({ refresh: true, run }); // a re-check forces a fresh probe
+  assert.equal(spawns, 2);
 });

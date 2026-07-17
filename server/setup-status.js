@@ -14,9 +14,23 @@ export function installationType() {
   return process.versions.electron ? "desktop" : "source";
 }
 
-async function probeGitAvailable() {
-  const result = await checkCommand("git", { allowedCommands: new Set(["git"]) });
-  return { available: Boolean(result.ok), version: result.ok ? result.version : "" };
+const GIT_READINESS_TTL_MS = 30000;
+let gitReadinessCache = null; // { value, expiresAt } — mirrors provider-readiness.js's readinessCache.
+let gitReadinessInFlight = null;
+
+// A Setup Doctor that polls or re-checks must not spawn a fresh `git --version` per call, so mirror the
+// TTL cache + in-flight collapse providerReadiness already uses for the CLI probes. `refresh` forces a
+// re-probe (what a re-check passes); `run` is injectable so the cache is unit-testable off-process.
+export async function probeGitAvailable({ refresh = false, run = checkCommand } = {}) {
+  if (!refresh && gitReadinessCache && gitReadinessCache.expiresAt > Date.now()) return gitReadinessCache.value;
+  if (gitReadinessInFlight) return gitReadinessInFlight;
+  gitReadinessInFlight = (async () => {
+    const result = await run("git", { allowedCommands: new Set(["git"]) });
+    return { available: Boolean(result.ok), version: result.ok ? result.version : "" };
+  })()
+    .then((value) => { gitReadinessCache = { value, expiresAt: Date.now() + GIT_READINESS_TTL_MS }; return value; })
+    .finally(() => { gitReadinessInFlight = null; });
+  return gitReadinessInFlight;
 }
 
 export async function getSetupStatus({ refresh = false, probeReadiness = providerReadiness, probeGit = probeGitAvailable } = {}) {
@@ -37,7 +51,7 @@ export async function getSetupStatus({ refresh = false, probeReadiness = provide
         executeModes,
       };
     })),
-    probeGit(),
+    probeGit({ refresh }),
   ]);
   const capabilities = deriveSetupCapabilities({
     providers: entries.map((entry) => ({ provider: entry.provider, operational: entry.operational, executeModes: entry.executeModes })),
