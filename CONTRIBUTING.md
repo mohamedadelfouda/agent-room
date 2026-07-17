@@ -19,8 +19,8 @@ Use `pnpm start` for the browser-facing source server. Run `pnpm test:browser` w
 ## How contributions land
 
 - Fork or branch, make one coherent change with focused tests, and open a pull request.
-- **CI is the mandatory gate.** It re-runs the syntax check, unit tests, and lint/coverage on Ubuntu, Windows, and macOS for every pull request — you do not need the repository's review tooling or any Claude-specific tools to contribute.
-- **Only a maintainer merges to `main`.** `main` is a protected branch: a PR needs green CI and maintainer review before it can be merged.
+- **CI is the mandatory gate.** For every pull request it re-runs the syntax check and unit tests on Ubuntu, Windows, and macOS, plus lint and coverage on Ubuntu — you do not need the repository's review tooling or any Claude-specific tools to contribute.
+- **Only a maintainer merges to `main`.** Open a PR; a maintainer reviews and merges it once CI is green. Maintainers enforce this with branch protection (see below).
 
 ## Change boundaries
 
@@ -48,7 +48,7 @@ Keep one coherent change per PR. Explain the user impact, safety boundary, and v
 
 ## Maintainers: branch protection
 
-`main` is protected on GitHub (Settings → Branches → rule for `main`) so external contributions land only through review:
+Protect `main` on GitHub (Settings → Branches → rule for `main`) so external contributions land only through review. This is a required, one-time setup step — until it is configured, CI runs on pull requests but is **not blocking** and pushes to `main` are not restricted. In the branch rule:
 
 - Require a pull request before merging.
 - Require these status checks to pass: `check + test` (Ubuntu / Windows / macOS), `lint + coverage`, and `source-only smoke` (Ubuntu / Windows / macOS).
