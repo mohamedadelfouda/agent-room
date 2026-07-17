@@ -108,7 +108,11 @@ h1, h2, h3, p { margin: 0; }
 .col-resizer::before { content: ""; position: absolute; inset-block: 0; inset-inline: 3px; background: transparent; transition: background .12s var(--ease); }
 .col-resizer:hover::before, .col-resizer:focus-visible::before, .col-resizer.dragging::before { background: var(--accent); }
 .col-resizer:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
-@media (max-width: 1100px) { .col-resizer { display: none; } }
+/* Hide each resizer only once its column stops being an inline, resizable column: the rail stays inline
+   down to 860px, the workflow/context columns to 1100px. A blanket 1100px rule would hide the rail's
+   resizer while the rail is still a resizable inline column between 861–1100px. */
+@media (max-width: 1100px) { .col-resizer[data-col="workflow"], .col-resizer[data-col="context"] { display: none; } }
+@media (max-width: 860px) { .col-resizer[data-col="rail"] { display: none; } }
 html.rail-collapsed .col-resizer[data-col="rail"],
 html.workflow-hidden .col-resizer[data-col="workflow"],
 html.context-hidden .col-resizer[data-col="context"] { display: none; }
@@ -128,7 +132,7 @@ html.context-hidden .col-resizer[data-col="context"] { display: none; }
 .brand-name { display: flex; flex-direction: column; line-height: 1.15; min-width: 0; flex: 1; }
 .brand-name strong { font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .brand-name small { color: var(--muted); font-size: 10px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-#toggleContext.is-active { color: var(--accent); border-color: var(--accent-line); background: var(--accent-soft); }
+#toggleContext.is-active, #toggleWorkflow.is-active { color: var(--accent); border-color: var(--accent-line); background: var(--accent-soft); }
 
 /* Rail toolbar: the per-app tool buttons + language toggle, on their own row so the brand name is
    never squeezed by them (they used to share the 52px brand row and truncated "Agent Room"). */
@@ -176,6 +180,7 @@ html.context-hidden .col-resizer[data-col="context"] { display: none; }
 html.rail-collapsed .brand-name,
 html.rail-collapsed .rail-toolbar,
 html.rail-collapsed .rail-tools,
+html.rail-collapsed .rail-label,
 html.rail-collapsed .session-list,
 html.rail-collapsed #connText { display: none !important; }
 html.rail-collapsed .brand { justify-content: center; }
@@ -531,6 +536,7 @@ details.tech pre { margin-top: 8px; background: var(--bg); border: 1px solid var
   html.rail-collapsed .rail.open .brand-name,
   html.rail-collapsed .rail.open .rail-toolbar { display: flex !important; }
   html.rail-collapsed .rail.open .rail-tools { display: grid !important; }
+  html.rail-collapsed .rail.open .rail-label { display: block !important; }
   html.rail-collapsed .rail.open .session-list { display: flex !important; }
   html.rail-collapsed .rail.open #connText { display: inline !important; }
   html.rail-collapsed .rail.open .brand,

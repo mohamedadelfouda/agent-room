@@ -651,13 +651,31 @@ function applyShellChrome() {
   const contextBtn = $("toggleContext");
   if (contextBtn) {
     const contextHidden = root.classList.contains("context-hidden");
-    contextBtn.classList.toggle("is-active", !contextHidden);
-    contextBtn.setAttribute("aria-pressed", String(!contextHidden));
-    contextBtn.setAttribute("aria-expanded", String(window.matchMedia(COLUMN_TOGGLES.context.overlayBelow).matches
+    // Below the breakpoint the button toggles an overlay, so its pressed/active state must track whether
+    // that overlay is open — not the persisted collapse class, which would leave it stuck "pressed" after
+    // the overlay closes. Above the breakpoint it reflects the inline column's collapse state. One value
+    // drives is-active, aria-pressed, and aria-expanded so they can't disagree.
+    const contextActive = window.matchMedia(COLUMN_TOGGLES.context.overlayBelow).matches
       ? activeShellOverlay === "context"
-      : !contextHidden));
+      : !contextHidden;
+    contextBtn.classList.toggle("is-active", contextActive);
+    contextBtn.setAttribute("aria-pressed", String(contextActive));
+    contextBtn.setAttribute("aria-expanded", String(contextActive));
     contextBtn.title = t("toggleContext");
     contextBtn.setAttribute("aria-label", t("toggleContext"));
+  }
+  // The rail-toolbar workflow toggle is the desktop control for the room-flow column (the topbar ⇥ is
+  // hidden at desktop widths), mirroring the context toggle. Same overlay-aware active/expanded state.
+  const workflowBtn = $("toggleWorkflow");
+  if (workflowBtn) {
+    const workflowActive = window.matchMedia(COLUMN_TOGGLES.workflow.overlayBelow).matches
+      ? activeShellOverlay === "workflow"
+      : !root.classList.contains("workflow-hidden");
+    workflowBtn.classList.toggle("is-active", workflowActive);
+    workflowBtn.setAttribute("aria-pressed", String(workflowActive));
+    workflowBtn.setAttribute("aria-expanded", String(workflowActive));
+    workflowBtn.title = t("workflowNav");
+    workflowBtn.setAttribute("aria-label", t("workflowNav"));
   }
   // Keep the topbar ☰/⇥/◫ toggles' aria-expanded correct in BOTH modes and across resizes: at wide
   // sizes it reflects the inline column's collapse state; below the breakpoint it reflects whether
@@ -800,7 +818,7 @@ const SHELL_OVERLAYS = {
 };
 
 function shellOverlayButtons() {
-  return [$("railDrawerToggle"), $("emptyRailDrawerToggle"), $("workflowToggle"), $("contextDrawerToggle"), $("toggleContext")].filter(Boolean);
+  return [$("railDrawerToggle"), $("emptyRailDrawerToggle"), $("workflowToggle"), $("contextDrawerToggle"), $("toggleContext"), $("toggleWorkflow")].filter(Boolean);
 }
 
 function closeShellOverlay({ restoreFocus = true } = {}) {
@@ -817,6 +835,9 @@ function closeShellOverlay({ restoreFocus = true } = {}) {
   backdrop.hidden = true;
   activeShellOverlay = null;
   shellOverlayTrigger = null;
+  // Re-sync every toggle's is-active/aria-pressed/aria-expanded now that no overlay is open — closing via
+  // Escape/backdrop must not leave a toggle stuck "pressed" (the aria-expanded reset alone isn't enough).
+  applyShellChrome();
   if (restoreFocus) trigger?.focus();
 }
 
@@ -833,6 +854,9 @@ function openShellOverlay(kind, trigger) {
   shellOverlayButtons().forEach((button) => {
     button.setAttribute("aria-expanded", String(button === trigger || button.getAttribute("aria-controls") === panel.id));
   });
+  // Re-sync is-active/aria-pressed/aria-expanded now that this overlay is open — the manual loop above
+  // only sets aria-expanded, so without this the rail-toolbar toggles would stay visually un-pressed.
+  applyShellChrome();
   panel.focus();
 }
 
@@ -2397,6 +2421,7 @@ $("approveCancel").onclick = cancelExecApproval;
 $("approveModal").addEventListener("click", (e) => { if (e.target === $("approveModal")) cancelExecApproval(); });
 $("toggleRail").onclick = toggleRailCollapsed;
 $("toggleContext").onclick = () => toggleColumn("context", $("toggleContext"));
+$("toggleWorkflow").onclick = () => toggleColumn("workflow", $("toggleWorkflow"));
 $("railDrawerToggle").onclick = () => toggleColumn("rail", $("railDrawerToggle"));
 $("emptyRailDrawerToggle").onclick = () => toggleColumn("rail", $("emptyRailDrawerToggle"));
 $("workflowToggle").onclick = () => toggleColumn("workflow", $("workflowToggle"));

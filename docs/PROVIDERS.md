@@ -22,7 +22,7 @@ The browser reads `GET /api/providers`, so a registered provider automatically a
 
 Catalog registration makes a provider visible, but it is not the whole integration. The adapter must implement the capability boundaries it advertises, and its native executable must be the provider's registered command or an explicitly selected canonical absolute path. Collaboration requires at least two enabled providers; debate intentionally requires exactly two.
 
-Bare commands are resolved from the host's native CLI search path. A native executable discovered at a curated package layout (see discovery above) is trusted automatically after a successful `--version` check; a *custom* absolute executable the user supplies is accepted only after the user presses **Trust & check**. Either way the host stores the canonical path (with a SHA-256 fingerprint) for the current app process. Supplying a path in a session request never trusts that path by itself.
+Bare commands are resolved from the host's native CLI search path. A native executable discovered at a curated package layout (see discovery above) is trusted automatically after a successful `--version` check; a *custom* absolute executable the user supplies is accepted only after the user presses **Trust & check**. Either way the host persists the canonical path and its SHA-256 fingerprint to the trusted-CLI store, so the trust survives a server restart, and re-verifies the executable's identity on each use — a later fingerprint mismatch blocks it until **Trust & check** is run again. Supplying a path in a session request never trusts that path by itself.
 
 ## Adapter contract
 

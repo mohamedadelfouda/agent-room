@@ -37,11 +37,26 @@ export function trustedProviderCliPaths(definition) {
   return [process.env[definition.commandEnv], approvedProviderCommand(definition.id)].filter(Boolean);
 }
 
+const inFlightReadiness = new Map();
+
 export async function providerReadiness(providerId, { refresh = false, discover = discoverProviderCommands } = {}) {
   const definition = provider(providerId);
   if (!definition) return { installed: false, version: "", detail: "Unknown provider" };
   const cached = readinessCache.get(definition.id);
   if (!refresh && cached && cached.expiresAt > Date.now()) return cached.value;
+  // Collapse concurrent checks for the same provider onto a single in-flight probe. Otherwise two
+  // parallel checks race: the slower one's initial command check fails, the faster one auto-trusts a
+  // discovered command in the meantime, and the slower one then sees a command is approved, skips its
+  // own discovery, and caches its now-stale failure for the whole TTL. Sharing one probe removes the
+  // race entirely. (get→set is synchronous, so two callers in the same tick can't both create a probe.)
+  const existing = inFlightReadiness.get(definition.id);
+  if (existing) return existing;
+  const probe = computeProviderReadiness(definition, discover).finally(() => inFlightReadiness.delete(definition.id));
+  inFlightReadiness.set(definition.id, probe);
+  return probe;
+}
+
+async function computeProviderReadiness(definition, discover) {
   let status = await checkCommand(
     approvedProviderCommand(definition.id) || configuredProviderCommand(definition),
     {
