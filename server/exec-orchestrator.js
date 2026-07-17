@@ -12,6 +12,7 @@ import path from "node:path";
 import { assertTrustedProject, projectIdentity } from "./project.js";
 import { githubRepository } from "./github-remote.js";
 import { claimSessionActivity } from "./session-activity.js";
+import { createExecAttempt, requestExecCancellation, execWasCancelled, trackExecChild, claimExecTerminal, enterExecFinalizing, execIsFinalizing, EXEC_STOPPED_MESSAGE } from "./exec-state.js";
 
 const activeExec = new Map();
 const decisionLocks = new Map();
@@ -26,12 +27,69 @@ function withDecisionLock(sessionId, taskId, task) {
   return run;
 }
 export function isExecuting(id) { return activeExec.has(id); }
-export async function stopExec(id) {
+
+// Wait, bounded, for the run body to unwind after cancellation (its finally resolves state.settle).
+// Returns true if it settled, false on timeout — mirrors settlePendingProviders on the run side.
+function settleExec(state, timeoutMs) {
+  if (!state.settle) return Promise.resolve(true);
+  let timer;
+  const timedOut = new Promise((resolve) => {
+    timer = setTimeout(() => resolve(false), timeoutMs);
+    timer.unref?.();
+  });
+  return Promise.race([state.settle.then(() => true), timedOut]).finally(() => clearTimeout(timer));
+}
+
+// Force-finalize a run whose body did not unwind within the settle window. This is reachable not
+// only when a provider child is truly unkillable, but also when the body is merely slow to unwind:
+// graceful child termination plus the run body's own clone cleanup (fs.rm of the disposable worktree)
+// can, on a large repo or under antivirus/indexer contention, exceed settleTimeoutMs. Releases the
+// reviewer's MCP project scope (if the reviewer is what stalled) and the activity claim, and clears
+// the registry so the session can't stay wedged as 409 "busy". The disposable clone is deleted by the
+// run body's own catch/finally whenever it eventually unwinds; only in the rare truly-stuck case does
+// it linger — git-ignored and unreferenced by any session record, so it can never be merged or
+// trusted — until reconcileExecutionWorktrees reclaims it on the next startup. Idempotent via the
+// single terminal claim, so this and the body's finally never double-release or double-emit.
+function finalizeStalledExecStop(id, state) {
+  // A cancelling run that stalled past the settle window genuinely stopped → claim "stopped" and
+  // surface exec_error. A *finalizing* run has already committed its result (its exec_ready is imminent
+  // or emitted); if only its slow, recoverable clone-cleanup stalled we still release the session so it
+  // can't wedge as busy, but claim "finished" and stay silent — a forced exec_error would contradict
+  // that exec_ready. `finalizing` is read before the idempotent claim flips status; a run that finished
+  // normally in the meantime makes the claim (and this whole call) a no-op.
+  const finalizing = execIsFinalizing(state);
+  if (!claimExecTerminal(state, finalizing ? "finished" : "stopped")) return;
+  if (activeExec.get(id) === state) activeExec.delete(id);
+  state.releaseProjectScope?.();
+  state.releaseActivity?.();
+  if (!finalizing) state.emit?.({ type: "exec_error", error: EXEC_STOPPED_MESSAGE });
+}
+
+// Stop an in-flight execution. Distinguishes: already_finished (nothing running), process_terminated
+// (a child was killed), stop_requested (cancel recorded, nothing to kill yet). Terminates children,
+// then waits bounded for the body to unwind; if it can't, force-finalizes so the session stays usable.
+export async function stopExec(id, { settleTimeoutMs = 5000 } = {}) {
   const s = activeExec.get(id);
-  if (!s) return false;
-  s.cancelled = true;
+  if (!s) return { stopped: false, status: "already_finished" };
+  if (!requestExecCancellation(s)) {
+    // The run is no longer `running`: either a Stop is already in flight, or it entered its
+    // non-cancellable finalizing save. Wait bounded for it to unwind; if it stalls, force-finalize so
+    // the session can't wedge as busy (e.g. a slow clone delete inside the blocked_secret finalize).
+    // finalizeStalledExecStop distinguishes a stalled *cancel* (surfaces exec_error) from a stalled
+    // *finalize* (releases silently — its result stands, exec_ready imminent), so neither leaves the
+    // session stuck. `finalizing` (captured before the await) only picks this Stop's reported status.
+    const finalizing = execIsFinalizing(s);
+    if (!(await settleExec(s, settleTimeoutMs))) finalizeStalledExecStop(id, s);
+    return finalizing ? { stopped: false, status: "already_finished" } : { stopped: true, status: "stop_requested" };
+  }
   const results = await Promise.all([...s.children].map((child) => terminateProcess(child)));
-  return results.every(Boolean);
+  if (!(await settleExec(s, settleTimeoutMs))) finalizeStalledExecStop(id, s);
+  return {
+    stopped: results.every(Boolean),
+    // `process_terminated` only when at least one child was actually killed — not merely when children
+    // existed (an all-failed terminate must not masquerade as a successful process termination).
+    status: results.some(Boolean) ? "process_terminated" : "stop_requested",
+  };
 }
 
 // Cancel every in-flight execution and kill its child processes — used at shutdown so an
@@ -39,7 +97,7 @@ export async function stopExec(id) {
 // finally block then clears its registry entry.
 export async function abortAllExecutions() {
   for (const [, s] of activeExec) {
-    s.cancelled = true;
+    requestExecCancellation(s);
     // Shutdown path: SIGKILL now — the server's ~1500ms exit would beat the SIGTERM→SIGKILL
     // escalation timer, leaving a detached executor/reviewer running after the server exits.
     await Promise.all([...s.children].map((child) => terminateProcess(child, { immediate: true })));
@@ -203,12 +261,30 @@ export function runExecuteAndReview(sessionId, req, emit) {
 }
 
 async function runExecuteAndReviewClaimed(sessionId, req, emit, releaseActivity) {
-  const state = { cancelled: false, children: new Set() };
+  const state = createExecAttempt();
+  // stopExec needs the emitter and the activity releaser to force-finalize a run whose body is
+  // wedged and whose own finally never runs (see finalizeStalledExecStop). settle resolves in the
+  // finally so a normal Stop waits for the real unwind instead of racing it.
+  state.emit = emit;
+  state.releaseActivity = releaseActivity;
+  let settleResolve;
+  state.settle = new Promise((resolve) => { settleResolve = resolve; });
   let pendingWorktree = null;
   let pendingWorktreeNeedsSecretPurge = false;
   let projectPath = "";
+  let terminalError = null;
   activeExec.set(sessionId, state);
-  const registerChild = (c) => { state.children.add(c); c.once("close", () => state.children.delete(c)); };
+  const registerChild = (c) => {
+    // If a Stop already landed, trackExecChild refuses the child and we kill it immediately, so no
+    // git/provider process ever runs past an accepted Stop (atomic with the spawn — see exec-state).
+    // A refused child is never added to state.children, so this fire-and-forget kill is its only
+    // termination attempt — log a genuine failure instead of silently orphaning the process.
+    if (!trackExecChild(state, c)) {
+      terminateProcess(c, { immediate: true })
+        .then((killed) => { if (!killed) logError("orphaned execution child could not be killed", String(c.pid ?? "")); })
+        .catch(() => {});
+    }
+  };
 
   try {
     const session = await getSession(sessionId);
@@ -235,11 +311,16 @@ async function runExecuteAndReviewClaimed(sessionId, req, emit, releaseActivity)
       config: { ...(req.agents?.[executor] || {}), connectorSessionId: provider(executor).capabilities?.connectors && Object.values(session.connectors || {}).some((item) => item.enabled) ? session.id : "" },
       onEvent: (event) => emit({ type: "exec_activity", agent: executor, event: event?.text ? { ...event, text: redact(event.text) } : event }),
       registerChild,
+      isCancelled: () => execWasCancelled(state),
     });
     pendingWorktree = execResult.worktree;
 
     const blockSecretExecution = async ({ diff, secretFindings }) => {
       pendingWorktreeNeedsSecretPurge = true;
+      // Commit to finalizing before persisting the blocked record. A Stop that already landed makes
+      // this throw (the catch discards the clone with its secrets purged); a Stop that lands during the
+      // saves below is then refused, so it can't force-finalize the session mid-write.
+      if (!enterExecFinalizing(state)) throw new Error(EXEC_STOPPED_MESSAGE);
       emit({ type: "exec_phase", phase: "blocked_secret", agent: executor });
       await mutateSession(sessionId, (current) => {
         current.executions ||= [];
@@ -273,7 +354,7 @@ async function runExecuteAndReviewClaimed(sessionId, req, emit, releaseActivity)
       return;
     }
 
-    if (state.cancelled) throw new Error("Execution stopped by user");
+    if (execWasCancelled(state)) throw new Error(EXEC_STOPPED_MESSAGE);
 
     // Materialize and scan the exact immutable tree that the reviewer and user are asked
     // to approve. Later filesystem changes are never substituted for this tree.
@@ -286,27 +367,38 @@ async function runExecuteAndReviewClaimed(sessionId, req, emit, releaseActivity)
 
     // 2) Reviewer reads the diff (read-only, no writing).
     let review = null;
-    if (reviewer && provider(reviewer) && !state.cancelled) {
+    if (reviewer && provider(reviewer) && !execWasCancelled(state)) {
       emit({ type: "exec_phase", phase: "reviewing", agent: reviewer });
       const reviewerProvider = provider(reviewer);
       const mcpProject = reviewerProvider.capabilities?.projectTransport === "mcp";
       const releaseScope = mcpProject ? await registerProjectScope(session.id, execResult.worktree.path) : null;
+      // Expose the reviewer's scope release to stopExec's force-finalize: if the reviewer is what
+      // stalls past the settle window, the local finally below never runs, so finalizeStalledExecStop
+      // must free this scope too. The release closure is idempotent, so a later local release no-ops.
+      state.releaseProjectScope = releaseScope;
       let r;
       try {
+        // registerProjectScope (fs.realpath) above and scratchWorkspacePath() here both await, so a
+        // Stop can be accepted between the guard on the `if` above and the spawn below. Re-check after
+        // the last await and before running, so an accepted Stop never starts the reviewer process —
+        // the registerChild guard only kills *after* spawn. The finally still releases the scope.
+        const cwd = mcpProject ? await scratchWorkspacePath() : execResult.worktree.path;
+        if (execWasCancelled(state)) throw new Error(EXEC_STOPPED_MESSAGE);
         r = await reviewerProvider.run({
           prompt: reviewPrompt(task, reviewedResult),
           config: { ...(req.agents?.[reviewer] || {}), permission: mcpProject ? "project" : "planread", mcpSessionId: mcpProject ? session.id : "" },
-          cwd: mcpProject ? await scratchWorkspacePath() : execResult.worktree.path,
+          cwd,
           onEvent: (event) => emit({ type: "exec_activity", agent: reviewer, event: event?.text ? { ...event, text: redact(event.text) } : event }),
           registerChild,
         });
       } finally {
         releaseScope?.();
+        state.releaseProjectScope = null;
       }
       review = { agent: reviewer, text: redact(r.text), meta: { model: r.model ?? null, durationMs: r.durationMs ?? null, outputTruncated: Boolean(r.outputTruncated) } };
     }
 
-    if (state.cancelled) throw new Error("Execution stopped by user");
+    if (execWasCancelled(state)) throw new Error(EXEC_STOPPED_MESSAGE);
     const postReviewSnapshot = await prepareReviewSnapshot({ projectPath: project.path, worktree: execResult.worktree });
     if (postReviewSnapshot.treeSha !== reviewSnapshot.treeSha) {
       pendingWorktreeNeedsSecretPurge = true;
@@ -324,6 +416,10 @@ async function runExecuteAndReviewClaimed(sessionId, req, emit, releaseActivity)
       secretFindings: reviewSnapshot.secretFindings,
       review, status: "awaiting_user", createdAt: new Date().toISOString(),
     };
+    // Commit to finalizing before persisting the awaiting_user record. A Stop that already landed makes
+    // this throw (the catch discards the clone); a Stop that lands during the save/emit below is then
+    // refused, so it can't force-finalize the session mid-write and race a spurious exec_error.
+    if (!enterExecFinalizing(state)) throw new Error(EXEC_STOPPED_MESSAGE);
     await mutateSession(sessionId, (current) => {
       current.executions ||= [];
       current.executions.push(record);
@@ -331,21 +427,32 @@ async function runExecuteAndReviewClaimed(sessionId, req, emit, releaseActivity)
     pendingWorktree = null;
     emit({ type: "exec_ready", taskId: record.taskId });
   } catch (err) {
+    // Always discard this run's isolated workspace, regardless of who wins the terminal claim below
+    // — the clone must never linger. The terminal event + activity release are emitted once, in the
+    // finally, so a stalled-Stop finalize and this path can't both surface the error or double-free.
     if (pendingWorktree) await cleanupExecutionWorkspace(projectPath, pendingWorktree, { purgeSecrets: pendingWorktreeNeedsSecretPurge });
-    const safeMessage = redact(err?.message || String(err));
-    logError("execution failed", safeMessage);
-    emit({ type: "exec_error", error: safeMessage });
-    try {
-      await mutateSession(sessionId, (current) => {
-        current.messages.push({ id: crypto.randomUUID(), createdAt: new Date().toISOString(), author: "system", content: `فشل التنفيذ: ${safeMessage}`, phase: "exec_error", mode: current.mode });
-      });
-    } catch {}
+    terminalError = redact(err?.message || String(err));
+    logError("execution failed", terminalError);
   } finally {
     try {
       await Promise.all([...state.children].map((child) => terminateProcess(child)));
     } finally {
-      activeExec.delete(sessionId);
-      releaseActivity();
+      // Claim the single terminal transition. If a stalled Stop already force-finalized this run it
+      // claimed "stopped" and released, so this no-ops; otherwise we release the claim exactly once
+      // and surface any error the run body raised (including "stopped by user").
+      if (claimExecTerminal(state, "finished")) {
+        if (activeExec.get(sessionId) === state) activeExec.delete(sessionId);
+        releaseActivity();
+        if (terminalError) {
+          emit({ type: "exec_error", error: terminalError });
+          try {
+            await mutateSession(sessionId, (current) => {
+              current.messages.push({ id: crypto.randomUUID(), createdAt: new Date().toISOString(), author: "system", content: `فشل التنفيذ: ${terminalError}`, phase: "exec_error", mode: current.mode });
+            });
+          } catch {}
+        }
+      }
+      settleResolve();
     }
   }
 }
