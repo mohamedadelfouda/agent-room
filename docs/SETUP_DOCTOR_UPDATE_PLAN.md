@@ -196,7 +196,7 @@ project (session-scoped, see [project-trust](../server/index.js)).
 ```json
 {
   "discussion":      { "available": true, "readyProviders": 2 },
-  "executionEngine": { "available": true, "executorCandidates": ["codex"], "reviewerCandidates": ["claude"] },
+  "executionEngine": { "available": true, "executorCandidates": ["codex"], "reviewerCandidates": ["codex", "claude"] },
   "gitFeatures":     { "available": true }
 }
 ```
@@ -210,8 +210,14 @@ project (session-scoped, see [project-trust](../server/index.js)).
 }
 ```
 
-Executor/reviewer candidates derive from `provider.capabilities.executeModes`
-(today only Codex has `["run"]`).
+**Executor** candidates derive from `provider.capabilities.executeModes` (today
+only Codex has `["run"]`; `executor.js` enforces it at runtime). **Reviewer**
+candidates are any ready provider — reviewing needs no execute mode, so the pool
+is every ready provider, the executor included (hence `["codex", "claude"]`
+above, not `["claude"]`). The executor ≠ reviewer rule is enforced per-request by
+[`exec-orchestrator.js`](../server/exec-orchestrator.js), which rejects a run
+whose executor and reviewer match — the executor is **not** pre-excluded from the
+reviewer pool.
 
 ---
 
