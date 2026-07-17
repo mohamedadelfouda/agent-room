@@ -458,13 +458,13 @@ export async function deleteSessionRecovery(recoveryId) {
   });
 }
 
-export async function createSession(title = "جلسة جديدة") {
+export async function createSession(title = "New session") {
   await ensureDirs();
   const now = new Date().toISOString();
   const session = {
     id: crypto.randomUUID(),
     sessionSchemaVersion: CURRENT_SESSION_SCHEMA_VERSION,
-    title: truncateTitle(String(title || "جلسة جديدة").trim()),
+    title: truncateTitle(String(title || "New session").trim()),
     status: "idle",
     mode: "collaboration",
     createdAt: now,
