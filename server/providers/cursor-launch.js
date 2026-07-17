@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { readFile, readdir, access, realpath } from "node:fs/promises";
+import { constants } from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { validateTrustedLaunchDescriptor } from "./cursor-qualification.js";
@@ -39,6 +40,15 @@ async function exists(filePath) {
   try { await access(filePath); return true; } catch { return false; }
 }
 
+// The node runtime is launched directly, so on POSIX it must carry the execute bit — a 0644 `node` exists
+// but the launch fails with EACCES, so existence alone would pass a descriptor that can never run. Windows
+// has no execute-bit concept for a file, so existence is enough there. Mirrors resolveAllowedCommand's
+// check in server/process.js.
+async function isExecutable(filePath, platform) {
+  try { await access(filePath, platform === "win32" ? constants.F_OK : constants.X_OK); return true; }
+  catch { return false; }
+}
+
 async function fingerprint(filePath) {
   return `sha256:${createHash("sha256").update(await readFile(filePath)).digest("hex")}`;
 }
@@ -70,7 +80,7 @@ export async function buildCursorLaunchDescriptor({ installRoot, platform = proc
   const nominalRoot = path.join(versionsDir, latest.name);
   const nominalExecutable = path.join(nominalRoot, platform === "win32" ? "node.exe" : "node");
   const nominalEntry = path.join(nominalRoot, "index.js");
-  if (!(await exists(nominalExecutable))) return { ok: false, reason: `node runtime missing in ${nominalRoot}` };
+  if (!(await isExecutable(nominalExecutable, platform))) return { ok: false, reason: `node runtime missing or not executable in ${nominalRoot}` };
   if (!(await exists(nominalEntry))) return { ok: false, reason: `index.js missing in ${nominalRoot}` };
   // The sandbox binary backs execution containment. On installs/platforms without it, executor
   // qualification fails closed on cursorSandboxTrusted rather than the build guessing a wrong path.

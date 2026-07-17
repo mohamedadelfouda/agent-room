@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, writeFile, rm, access, symlink } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, rm, access, chmod, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { buildCursorLaunchDescriptor, versionSortKey } from "../../server/providers/cursor-launch.js";
@@ -16,6 +16,7 @@ async function fakeInstall(versions = { "2026.07.16-899851b": true }) {
     const dir = path.join(root, "versions", name);
     await mkdir(dir, { recursive: true });
     await writeFile(path.join(dir, EXE), "binary");
+    if (process.platform !== "win32") await chmod(path.join(dir, EXE), 0o755); // the node runtime is launched directly, so it must be executable
     await writeFile(path.join(dir, "index.js"), "console.log('cursor');");
     if (withSandbox) await writeFile(path.join(dir, SANDBOX), "sandbox");
   }
@@ -77,6 +78,22 @@ test("reports absence instead of throwing when the install or entry point is mis
     const result = await buildCursorLaunchDescriptor({ installRoot: root });
     assert.equal(result.ok, false);
     assert.match(result.reason, /index\.js missing/);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+// win32 has no execute-bit concept and root bypasses X_OK, so the execute-bit requirement is only
+// enforceable on a non-root POSIX host (where CI runs it).
+const SKIP_EXEC_BIT = process.platform === "win32" || process.getuid?.() === 0;
+test("a node runtime that exists but is not executable is rejected (POSIX)", { skip: SKIP_EXEC_BIT }, async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "cursor-agent-"));
+  try {
+    const dir = path.join(root, "versions", "2026.07.16-899851b");
+    await mkdir(dir, { recursive: true });
+    await writeFile(path.join(dir, EXE), "binary"); // left 0644 (not executable) → would fail with EACCES at launch
+    await writeFile(path.join(dir, "index.js"), "console.log('cursor');");
+    const result = await buildCursorLaunchDescriptor({ installRoot: root });
+    assert.equal(result.ok, false);
+    assert.match(result.reason, /not executable/);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
