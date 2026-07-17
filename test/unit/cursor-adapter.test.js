@@ -39,6 +39,9 @@ test("parseCursorResult reads the single json result object and fails closed on 
   assert.equal(parseCursorResult("not json"), null);
   // tolerate a stray leading line before the json object
   assert.equal(parseCursorResult('warning: something\n{"result":"r","is_error":false}').result, "r");
+  // a changed/malformed shape whose `result` is not a string is parsed as-is — runCursor then fails closed
+  // ("completed without a review") instead of coercing it to garbage text like "[object Object]".
+  assert.notEqual(typeof parseCursorResult('{"type":"result","is_error":false,"result":{"unexpected":"shape"}}').result, "string");
 });
 
 test("parseCursorModels extracts model ids from the --list-models table", () => {

@@ -117,7 +117,10 @@ export async function runCursor({ prompt, config, cwd, onEvent, registerChild })
     Object.assign(error, meta);
     throw error;
   }
-  const text = String(parsed.result || "").trim();
+  // Fail closed: only a string `result` is a real review. A malformed / changed shape (object, array, …)
+  // becomes "" and routes into the "completed without a review" error below — never coerced into garbage
+  // text like "[object Object]" and returned as a successful review. Mirrors the error path's guard above.
+  const text = typeof parsed.result === "string" ? parsed.result.trim() : "";
   if (!text) { const error = new Error("Cursor completed without a review"); Object.assign(error, meta); throw error; }
   return { text, sessionId: parsed.session_id || null, outputTruncated: Boolean(processResult.stdoutTruncated), ...meta };
 }
