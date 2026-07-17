@@ -1610,38 +1610,72 @@ async function loadOnboard() {
   updateTimers.clear();
   const list = $("onboardList"); list.textContent = "...";
   try {
-    const s = await api("/api/agents/status");
+    const status = await api("/api/setup/status");
     list.innerHTML = "";
-    const rows = [
-      ...providers.map((item) => ({ name: item.label, ok: s.providers?.[item.id]?.installed, detail: s.providers?.[item.id]?.version || s.providers?.[item.id]?.detail, autoTrusted: s.providers?.[item.id]?.autoTrusted, agent: item.id })),
-      { name: "GitHub (gh)", ok: s.github.authed, detail: s.github.detail, agent: null },
-    ];
-    for (const r of rows) {
+
+    // Agent Room's value is two agents comparing/reviewing, so it needs two providers — say why, so a
+    // one-provider setup reads as "one step to go", not "broken".
+    const why = document.createElement("p");
+    why.className = "onboard-why"; why.textContent = t("doctorWhyTwo");
+    list.appendChild(why);
+
+    for (const p of status.providers || []) {
+      const info = providerInfo(p.provider);
+      const ready = Boolean(p.operational?.available);
+      const missing = p.installation?.state === "missing";
+      const version = ready ? (p.installation?.version || "") : "";
+      const stateLabel = ready ? t("ready") : missing ? t("notInstalled") : t("needsTrust");
       const row = document.createElement("div"); row.className = "onboard-row";
-      const state = r.ok ? t("installed") : t("notInstalled");
-      if (!r.ok && r.detail) console.error(`[Agent Room: provider_check_failed] ${r.detail}`);
-      // Surface auto-trust: this provider's bundled executable was discovered and trusted for the
-      // user (no manual Trust & check), so they can see it happened rather than it being silent.
-      const detail = [state, r.ok ? r.detail : "", r.autoTrusted ? t("autoDetected") : ""].filter(Boolean).join(" · ");
-      row.innerHTML = `<span class="onboard-dot ${r.ok ? "ok" : "bad"}" aria-hidden="true"></span><span class="ob-name">${esc(r.name)}</span><span class="ob-detail">${esc(detail)}</span>`;
+      row.innerHTML = `<span class="onboard-dot ${ready ? "ok" : "bad"}" aria-hidden="true"></span><span class="ob-name">${bdi(p.label, "ltr")}</span><span class="ob-detail">${esc([stateLabel, version].filter(Boolean).join(" · "))}</span>`;
       const actions = document.createElement("span"); actions.className = "ob-actions";
-      if (r.agent && !r.ok) {
+      // Missing entirely → link to the provider's official install page (we never run the install for the
+      // user — that stays their explicit action). An https guard keeps a bad registry value from becoming a link.
+      if (missing && /^https:\/\//.test(p.installUrl || "")) {
+        const link = document.createElement("a");
+        link.className = "btn-mini"; link.href = p.installUrl; link.target = "_blank"; link.rel = "noreferrer noopener";
+        link.textContent = t("openInstallPage");
+        const newTab = document.createElement("span"); newTab.className = "sr-only"; newTab.textContent = ` ${t("opensInNewTab")}`;
+        link.appendChild(newTab);
+        actions.appendChild(link);
+      }
+      if (!ready) {
         const setupBtn = document.createElement("button"); setupBtn.className = "btn-mini"; setupBtn.textContent = t("setupCli");
-        setupBtn.setAttribute("aria-label", t("setupProviderCli")(providerInfo(r.agent).label));
-        setupBtn.onclick = () => openCliSetupFromOnboard(r.agent);
+        setupBtn.setAttribute("aria-label", t("setupProviderCli")(info.label));
+        setupBtn.onclick = () => openCliSetupFromOnboard(p.provider);
         actions.appendChild(setupBtn);
       }
-      if (r.agent && r.ok && providerInfo(r.agent).canUpdate) {
-        // Rendered as "Checking…" first; refreshUpdateStates() then flips it to UPDATE (an update is
-        // available) or ✓ Updated (already latest), once the registry check returns.
+      if (ready && info.canUpdate) {
+        // "Checking…" first; refreshUpdateStates() flips it to Update / ✓ Updated once the registry check returns.
         const btn = document.createElement("button");
-        btn.className = "btn-mini update-btn"; btn.dataset.update = r.agent;
+        btn.className = "btn-mini update-btn"; btn.dataset.update = p.provider;
         btn.textContent = t("checkingUpdate"); btn.disabled = true;
         actions.appendChild(btn);
       }
       if (actions.childElementCount > 0) row.appendChild(actions);
       list.appendChild(row);
     }
+
+    // Git — needed for execution on the user's code.
+    const git = status.git || {};
+    const gitRow = document.createElement("div"); gitRow.className = "onboard-row";
+    gitRow.innerHTML = `<span class="onboard-dot ${git.available ? "ok" : "bad"}" aria-hidden="true"></span><span class="ob-name">Git</span><span class="ob-detail">${esc([git.available ? t("installed") : t("notInstalled"), git.available ? (git.version || "") : ""].filter(Boolean).join(" · "))}</span>`;
+    list.appendChild(gitRow);
+
+    // Capabilities: what this setup can do now, and what's still locked (with why) — never a dead end.
+    const caps = status.capabilities || {};
+    const capBox = document.createElement("div"); capBox.className = "onboard-caps";
+    const capTitle = document.createElement("p"); capTitle.className = "onboard-caps-title"; capTitle.textContent = t("doctorCapabilitiesTitle");
+    capBox.appendChild(capTitle);
+    for (const c of [
+      { available: Boolean(caps.discussion?.available), name: t("doctorCapDiscussion"), need: t("doctorNeedTwoProviders") },
+      { available: Boolean(caps.executionEngine?.available), name: t("doctorCapExecution"), need: caps.discussion?.available ? t("doctorNeedGit") : t("doctorNeedExecution") },
+    ]) {
+      const capRow = document.createElement("div"); capRow.className = `onboard-cap ${c.available ? "cap-ready" : "cap-locked"}`;
+      capRow.innerHTML = `<span class="cap-dot" aria-hidden="true"></span><span class="cap-name">${esc(c.name)}</span><span class="cap-hint">${esc(c.available ? t("available") : c.need)}</span>`;
+      capBox.appendChild(capRow);
+    }
+    list.appendChild(capBox);
+
     refreshUpdateStates();
   } catch (e) { list.textContent = localizedFailure(e); }
 }

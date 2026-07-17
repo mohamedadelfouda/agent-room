@@ -34,6 +34,9 @@ export async function getSetupStatus({ refresh = false, probeReadiness = provide
         auth: dimensions.auth || { state: "unknown", observedAt: null },
         operational: dimensions.operational || { available: false, reasonCode: "not_installed" },
         canExecute: executeModes.length > 0,
+        // Public docs/install page the Doctor's "open install page" button links to (never a shell command
+        // the app runs — installs stay the user's explicit action). Empty when the provider defines none.
+        installUrl: definition?.install?.url || "",
         executeModes,
       };
     })),

@@ -461,6 +461,16 @@ details.tech pre { margin-top: 8px; background: var(--bg); border: 1px solid var
 .onboard-row .ob-name { font-weight: 600; }
 .onboard-row .ob-detail { color: var(--faint); font-size: 12px; margin-inline-start: auto; text-align: end; max-width: 55%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .onboard-row .ob-actions { margin-inline-start: auto; display: flex; gap: 6px; }
+.onboard-why { color: var(--faint); font-size: 12.5px; line-height: 1.6; margin: 2px 2px 4px; }
+.onboard-caps { margin-top: 6px; padding-top: 10px; border-top: 1px solid var(--line-soft); display: flex; flex-direction: column; gap: 6px; }
+.onboard-caps-title { color: var(--faint); font-size: 12px; margin: 0 2px 2px; }
+.onboard-cap { display: flex; align-items: center; gap: 10px; padding: 3px 2px; }
+.onboard-cap .cap-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; background: var(--faint); }
+.onboard-cap.cap-ready .cap-dot { background: var(--ok); }
+.onboard-cap .cap-name { font-size: 13px; }
+.onboard-cap.cap-locked .cap-name { color: var(--faint); }
+.onboard-cap .cap-hint { margin-inline-start: auto; font-size: 12px; color: var(--faint); }
+.onboard-cap.cap-ready .cap-hint { color: var(--ok); }
 /* "Update available" reads as an actionable outlined button; the state is carried by the border,
    background and weight (not colour alone), and the label text stays high-contrast (--text). */
 .update-btn.update-available { border-color: var(--accent-line); background: var(--accent-soft); color: var(--text); font-weight: 600; }

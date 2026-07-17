@@ -24,6 +24,7 @@ test("getSetupStatus composes provider dimensions, Git, and capabilities", async
     assert.ok(entry.provider && entry.label);
     assert.equal(entry.installation.state, "installed");
     assert.equal(typeof entry.canExecute, "boolean");
+    assert.match(entry.installUrl, /^https:\/\//); // public https docs link for the "open install page" button
     assert.equal("executeModes" in entry, false); // internal field must not leak to the response
   }
 
