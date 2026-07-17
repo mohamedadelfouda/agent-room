@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { chatPrompt, collaborationPrompt, debatePrompt, executionPrompt, synthesisPrompt, transcriptFor } from "../../server/prompts.js";
+import { chatPrompt, collaborationPrompt, controlRepairPrompt, debatePrompt, executionPrompt, synthesisPrompt, transcriptFor } from "../../server/prompts.js";
 
 const session = { messages: [] };
 const base = { session, agentLabel: "Claude", role: "Collaborator", totalRounds: 5, userTask: "design X" };
@@ -88,6 +88,16 @@ test("a rebuttal carries both the anchored proposition and the versioned control
   assert.match(prompt, /What to debate/);
   assert.match(prompt, /Ship the mini-eval before adding a provider\./);
   assertControlContract(prompt, 3);
+});
+
+test("controlRepairPrompt bounds a huge prior answer to a head+tail excerpt", () => {
+  const huge = `HEAD_MARKER ${"x".repeat(60000)} TAIL_MARKER`;
+  const prompt = controlRepairPrompt({ agentLabel: "Claude", priorAnswer: huge, targetVersion: 2 });
+  assert.ok(prompt.length < 10000, `expected a bounded prompt, got ${prompt.length} chars`);
+  assert.match(prompt, /HEAD_MARKER/);   // start preserved
+  assert.match(prompt, /TAIL_MARKER/);   // end preserved
+  assert.match(prompt, /\[truncated\]/); // middle elided
+  assertControlContract(prompt, 2);      // still carries the versioned control contract
 });
 
 test("synthesis receives an immutable official outcome to explain", () => {

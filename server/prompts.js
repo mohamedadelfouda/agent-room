@@ -2,6 +2,15 @@ function clean(text) {
   return String(text ?? "").trim();
 }
 
+// Head+tail excerpt for text that may be huge (agent turns can reach several MB). Keeps the
+// start and end — enough to identify the answer — without ever blowing the prompt window.
+function boundedExcerpt(text, max) {
+  const value = clean(text);
+  if (value.length <= max) return value;
+  const head = Math.ceil(max * 0.75);
+  return `${value.slice(0, head)}\n…[truncated]…\n${value.slice(value.length - (max - head))}`;
+}
+
 export function transcriptFor(session, maxChars = 24000) {
   const msgs = session.messages ?? [];
   const SEP = "\n\n---\n\n";
@@ -123,7 +132,7 @@ export function controlRepairPrompt({ agentLabel, priorAnswer, targetVersion = 1
   return `You're ${agentLabel}. Your previous reply stands, but its machine-readable control block was missing or invalid, so the session could not read your position. Do NOT rewrite or change your answer — output ONLY the corrected control block for that same answer, and nothing else.
 ${controlInstruction(targetVersion, itemRegistry)}
 Your previous answer, for reference (do not repeat it):
-${clean(priorAnswer)}`;
+${boundedExcerpt(priorAnswer, 4000)}`;
 }
 
 export function collaborationPrompt({ session, agentLabel, role, round, totalRounds, userTask, projectSnapshot = "", targetVersion = 1, itemRegistry = [] }) {

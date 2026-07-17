@@ -2,18 +2,26 @@ const OPEN_TAG = "<agent-control>";
 const CLOSE_TAG = "</agent-control>";
 const CONTROL_VERSION = 2;
 
-// Locate the last complete <agent-control>…</agent-control> block with linear, case-insensitive
-// scans instead of a backtracking regex. Agent turns can reach several MB (see output-limits),
-// and a lazy `<agent-control>[\s\S]*?</agent-control>` over many unclosed tags is O(n²) — a
-// synchronous scan that would freeze the single Node event loop for the whole server. indexOf/
-// lastIndexOf are linear and cannot backtrack, so cost stays O(n) on any input.
-function lastControlBlock(source) {
+// Every complete <agent-control>…</agent-control> block, scanned left-to-right with each open
+// paired to the NEXT close (non-overlapping) — the same semantics the original lazy regex had,
+// but with linear indexOf scans that can't backtrack. Agent turns can reach several MB (see
+// output-limits), and a lazy `<agent-control>[\s\S]*?</agent-control>` over many unclosed tags is
+// O(n²) — a synchronous scan that would freeze the single Node event loop for the whole server.
+// One shared scanner keeps parse/strip/raw agreeing on exactly which spans are blocks.
+function controlBlocks(source) {
   const lower = source.toLowerCase();
-  const closeAt = lower.lastIndexOf(CLOSE_TAG);
-  if (closeAt === -1) return null;
-  const openAt = lower.lastIndexOf(OPEN_TAG, closeAt);
-  if (openAt === -1) return null;
-  return { raw: source.slice(openAt, closeAt + CLOSE_TAG.length), inner: source.slice(openAt + OPEN_TAG.length, closeAt) };
+  const blocks = [];
+  let cursor = 0;
+  for (;;) {
+    const openAt = lower.indexOf(OPEN_TAG, cursor);
+    if (openAt === -1) break;
+    const closeAt = lower.indexOf(CLOSE_TAG, openAt + OPEN_TAG.length);
+    if (closeAt === -1) break;
+    const end = closeAt + CLOSE_TAG.length;
+    blocks.push({ start: openAt, end, raw: source.slice(openAt, end), inner: source.slice(openAt + OPEN_TAG.length, closeAt) });
+    cursor = end;
+  }
+  return blocks;
 }
 const CONVERGENCE = new Set(["converged", "open", "not_evaluated"]);
 const GOAL_STATUS = new Set(["satisfied", "incomplete", "blocked", "needs_user"]);
@@ -158,26 +166,21 @@ export function parseAgentControl(text) {
   // not invalidate an otherwise well-formed block — that brittleness was the main cause of
   // false `invalid_control` stops when agents had genuinely agreed. JSON shape and the
   // version-2 schema stay strict below, so a malformed or off-contract block still fails closed.
-  const block = lastControlBlock(String(text || ""));
+  const block = controlBlocks(String(text || "")).at(-1);
   if (!block) return invalidControl();
   try { return validatedControl(JSON.parse(block.inner)) || invalidControl(); }
   catch { return invalidControl(); }
 }
 
 export function stripAgentControl(text) {
-  // Remove every complete block left-to-right with linear indexOf scans (no regex backtracking;
-  // see lastControlBlock). A stray unclosed tag is left as ordinary text rather than scanned for.
+  // Remove every complete block the shared scanner found, leaving the prose around them.
   const source = String(text || "");
-  const lower = source.toLowerCase();
+  const blocks = controlBlocks(source);
   let result = "";
   let cursor = 0;
-  for (;;) {
-    const openAt = lower.indexOf(OPEN_TAG, cursor);
-    if (openAt === -1) break;
-    const closeAt = lower.indexOf(CLOSE_TAG, openAt + OPEN_TAG.length);
-    if (closeAt === -1) break;
-    result += source.slice(cursor, openAt);
-    cursor = closeAt + CLOSE_TAG.length;
+  for (const block of blocks) {
+    result += source.slice(cursor, block.start);
+    cursor = block.end;
   }
   return (result + source.slice(cursor)).trimEnd();
 }
@@ -186,7 +189,7 @@ export function stripAgentControl(text) {
 // when a control fails to validate, storing what the agent actually emitted turns an opaque
 // invalid_control into something the user can see and act on.
 export function rawAgentControl(text) {
-  return lastControlBlock(String(text || ""))?.raw || "";
+  return controlBlocks(String(text || "")).at(-1)?.raw || "";
 }
 
 function validRegistryItem(registryItem) {

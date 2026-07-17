@@ -362,6 +362,40 @@ test("an unrepairable control block is surfaced verbatim for diagnosis", async (
   }
 });
 
+test("an emitted-but-schema-invalid control block is stored verbatim, not the fallback", async (t) => {
+  const session = await createSession("control-verbatim");
+  const badBlock = `<agent-control>${JSON.stringify({ controlVersion: 2, convergence: "bogus", goalStatus: "satisfied", substantiveDelta: false, itemProposals: [], targetVersion: 1 })}</agent-control>`;
+  const result = (text) => ({ text, model: "test", durationMs: 1, exitCode: 0, sessionId: null });
+  let claudeCalls = 0;
+  t.mock.method(provider("claude"), "run", async () => {
+    claudeCalls += 1;
+    if (claudeCalls === 1) return result("Claude opening proposal");
+    return result(`Claude agrees.\n${badBlock}`); // round 2 and the repair both emit the invalid block
+  });
+  t.mock.method(provider("codex"), "run", async () => result(`Codex.\n${controlBlock("satisfied", [])}`));
+
+  try {
+    await runOrchestration(session.id, {
+      mode: "collaboration",
+      rounds: 2,
+      content: "Plan the change",
+      finalizer: "none",
+      agents: { claude: { enabled: true, role: "Collaborator" }, codex: { enabled: true, role: "Collaborator" } },
+    }, () => {});
+
+    const saved = await getSession(session.id);
+    assert.equal(claudeCalls, 3); // opening + round 2 + one repair (both invalid)
+    const claudeRound2 = saved.messages.find((m) => m.agent === "claude" && m.round === 2 && m.phase === "collaboration");
+    assert.equal(claudeRound2.control.valid, false);
+    assert.match(claudeRound2.meta.controlInvalidRaw, /"convergence":"bogus"/); // the actual block, verbatim
+    assert.notEqual(claudeRound2.meta.controlInvalidRaw, "(no control block emitted)");
+    assert.match(claudeRound2.content, /Claude agrees\./); // reader-facing answer preserved, block stripped
+    assert.doesNotMatch(claudeRound2.content, /agent-control/);
+  } finally {
+    await cleanupSession(session.id);
+  }
+});
+
 test("a debate runs opening then rebuttal, converges early, and finalizes once", async (t) => {
   const session = await createSession("debate-convergence");
   let claudeCalls = 0;

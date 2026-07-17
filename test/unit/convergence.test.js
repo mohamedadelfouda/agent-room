@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { parseAgentControl, stripAgentControl, assessRound } from "../../server/convergence.js";
+import { parseAgentControl, stripAgentControl, rawAgentControl, assessRound } from "../../server/convergence.js";
 
 function legacyBlock(overrides = {}) {
   return `<agent-control>${JSON.stringify({
@@ -83,6 +83,24 @@ test("a well-formed control survives reader-facing prose around it", () => {
   assert.equal(parseAgentControl(`intro\n${block()}\n\`\`\``).valid, true);
   // A schema-invalid block still fails closed even with surrounding prose.
   assert.equal(parseAgentControl(`${block({ confidence: 0.9 })}\ntrailing`).valid, false);
+});
+
+test("parse, strip, and raw agree on block boundaries (unclosed/extra tags)", () => {
+  const valid = block();
+  // Clean block with prose around it: valid, stripped out, raw = the block. All three agree.
+  const clean = `intro ${valid} outro`;
+  assert.equal(parseAgentControl(clean).valid, true);
+  assert.equal(rawAgentControl(clean), valid);
+  assert.doesNotMatch(stripAgentControl(clean), /agent-control/);
+  assert.match(stripAgentControl(clean), /intro/);
+  assert.match(stripAgentControl(clean), /outro/);
+  // A stray unclosed open tag before the real block: first-open pairs with the first close, so
+  // the whole span is ONE (malformed) block — parse fails on the noisy inner, and strip/raw
+  // treat exactly that same span. No disagreement between the three functions.
+  const noisy = `<agent-control>stray ${valid}`;
+  assert.equal(parseAgentControl(noisy).valid, false);
+  assert.equal(rawAgentControl(noisy), noisy);
+  assert.equal(stripAgentControl(noisy), "");
 });
 
 test("the final control block is authoritative and all blocks are stripped", () => {

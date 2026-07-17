@@ -49,7 +49,7 @@ Agreement and completion are orthogonal.
 | `satisfied` | The requested thinking task is complete. | Yes |
 | `needs_user` | The proposal is settled but requires an explicit user choice. | Yes |
 | `blocked` | The proposal is settled but requires external validation or another outside step. | Yes |
-| `incomplete` | More agent work may still materially improve the answer. | No |
+| `incomplete` | More agent work may still materially improve the answer. | By agreement only, when no agent step is pending (§13) |
 
 Completion is aggregated conservatively in this order:
 

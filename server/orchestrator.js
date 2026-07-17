@@ -132,6 +132,7 @@ function lastSubstantiveAnswer(session, limit = 4000) {
   for (let i = messages.length - 1; i >= 0; i -= 1) {
     const message = messages[i];
     if (message.author !== "agent") continue;
+    if (message.meta?.status === "partial") continue; // a partial/aborted turn is not a final answer to debate
     const content = String(message.content || "").trim();
     if (content) return content.length > limit ? `${content.slice(0, limit)}\n…[truncated]` : content;
   }
@@ -192,7 +193,9 @@ function terminalOutcomeReport(outcome) {
     const settledOnly = outcome.completionState !== "satisfied";
     const head = settledOnly ? "الوكلاء اتفقوا واستقرّوا على إجابة واحدة" : "الوكلاء اتفقوا والمهمة اكتملت";
     const tail = outcome.stoppedEarly ? `في الجولة ${round} — تم إيقاف الجولات المتبقية.` : `في الجولة الأخيرة (${round}).`;
-    const deeper = settledOnly ? " لو عايز تعميق أكتر، ارفع عدد الجولات." : "";
+    // Not "raise the rounds" — the same convergence guard would just stop again with nothing new;
+    // a follow-up question or a narrowed scope is what actually moves a settled discussion forward.
+    const deeper = settledOnly ? " لو عايز تعميق أكتر، ابعت سؤال متابعة أو حدّد الجزء اللي عايز توسّعه." : "";
     // An agreed stop can still leave open items needing a NON-agent action (a user decision, an
     // external check). completionState=incomplete would otherwise map this to a plain settled
     // outcome and hide the required step — so surface those items instead of dropping them.
