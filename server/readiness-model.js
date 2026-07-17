@@ -75,7 +75,7 @@ export function deriveSetupCapabilities({ providers = [], gitAvailable = false }
   // (exec-orchestrator only requires executor !== reviewer). Deriving executors from executeModes keeps
   // the contract honest so a UI built on it never offers a non-executor as the executor.
   const executorCandidates = enoughAgents
-    ? ready.filter((entry) => Array.isArray(entry.capabilities?.executeModes) && entry.capabilities.executeModes.length > 0).map((entry) => entry.provider)
+    ? ready.filter((entry) => Array.isArray(entry.executeModes) && entry.executeModes.length > 0).map((entry) => entry.provider)
     : [];
   const reviewerCandidates = enoughAgents ? readyIds : [];
   return {
