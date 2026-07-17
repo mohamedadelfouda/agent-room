@@ -1603,14 +1603,33 @@ function setConnected(ok) {
 async function pollHealth() { try { await api("/api/health"); setConnected(true); } catch { setConnected(false); } }
 
 /* ---------------- onboarding ---------------- */
-async function loadOnboard() {
+const GIT_INSTALL_URL = "https://git-scm.com/downloads";
+
+// An external "open install page" link for a missing tool — never runs the install (that stays the user's
+// explicit action, SETUP_DOCTOR_UPDATE_PLAN §9). The https guard stops a bad/absent URL from becoming a
+// link; the aria-label names the target so several links don't all read as a bare "Open install page";
+// rel+target isolate the new tab (announced via an sr-only hint). Returns null when there's no usable URL.
+function installLink(url, targetLabel) {
+  if (!/^https:\/\//.test(url || "")) return null;
+  const link = document.createElement("a");
+  link.className = "btn-mini"; link.href = url; link.target = "_blank"; link.rel = "noreferrer noopener";
+  link.textContent = t("openInstallPage");
+  link.setAttribute("aria-label", `${t("openInstallPage")} — ${targetLabel}`);
+  const newTab = document.createElement("span"); newTab.className = "sr-only"; newTab.textContent = ` ${t("opensInNewTab")}`;
+  link.appendChild(newTab);
+  return link;
+}
+
+// `refresh` (from an explicit Re-check or a post-setup/-update re-render) forces a fresh probe; the initial
+// open serves the ≤30s cache. Mirrors providerReadiness's refresh semantics (SETUP_DOCTOR_UPDATE_PLAN §10).
+async function loadOnboard(refresh = false) {
   // Re-rendering the list discards the old buttons; clear any elapsed-timer intervals still ticking
   // on those detached nodes so they don't leak.
   for (const timer of updateTimers.values()) clearInterval(timer);
   updateTimers.clear();
   const list = $("onboardList"); list.textContent = "...";
   try {
-    const status = await api("/api/setup/status");
+    const status = await api("/api/setup/status" + (refresh ? "?refresh=1" : ""));
     list.innerHTML = "";
 
     // Agent Room's value is two agents comparing/reviewing, so it needs two providers — say why, so a
@@ -1626,18 +1645,10 @@ async function loadOnboard() {
       const version = ready ? (p.installation?.version || "") : "";
       const stateLabel = ready ? t("ready") : missing ? t("notInstalled") : t("needsTrust");
       const row = document.createElement("div"); row.className = "onboard-row";
-      row.innerHTML = `<span class="onboard-dot ${ready ? "ok" : "bad"}" aria-hidden="true"></span><span class="ob-name">${bdi(p.label, "ltr")}</span><span class="ob-detail">${esc([stateLabel, version].filter(Boolean).join(" · "))}</span>`;
+      row.innerHTML = `<span class="onboard-dot ${ready ? "ok" : "bad"}" aria-hidden="true"></span><span class="ob-name">${bdi(p.label, "ltr")}</span><span class="ob-detail">${esc(stateLabel)}${version ? ` · ${bdi(version, "ltr")}` : ""}</span>`;
       const actions = document.createElement("span"); actions.className = "ob-actions";
-      // Missing entirely → link to the provider's official install page (we never run the install for the
-      // user — that stays their explicit action). An https guard keeps a bad registry value from becoming a link.
-      if (missing && /^https:\/\//.test(p.installUrl || "")) {
-        const link = document.createElement("a");
-        link.className = "btn-mini"; link.href = p.installUrl; link.target = "_blank"; link.rel = "noreferrer noopener";
-        link.textContent = t("openInstallPage");
-        const newTab = document.createElement("span"); newTab.className = "sr-only"; newTab.textContent = ` ${t("opensInNewTab")}`;
-        link.appendChild(newTab);
-        actions.appendChild(link);
-      }
+      // Missing entirely → an install-page link (we never run the install — the user's explicit action).
+      if (missing) { const link = installLink(p.installUrl, info.label); if (link) actions.appendChild(link); }
       if (!ready) {
         const setupBtn = document.createElement("button"); setupBtn.className = "btn-mini"; setupBtn.textContent = t("setupCli");
         setupBtn.setAttribute("aria-label", t("setupProviderCli")(info.label));
@@ -1655,10 +1666,15 @@ async function loadOnboard() {
       list.appendChild(row);
     }
 
-    // Git — needed for execution on the user's code.
+    // Git — needed for execution on the user's code. Missing → an install-instructions link (§9: Agent Room
+    // never installs Git for the user), the same affordance a missing provider gets.
     const git = status.git || {};
     const gitRow = document.createElement("div"); gitRow.className = "onboard-row";
-    gitRow.innerHTML = `<span class="onboard-dot ${git.available ? "ok" : "bad"}" aria-hidden="true"></span><span class="ob-name">Git</span><span class="ob-detail">${esc([git.available ? t("installed") : t("notInstalled"), git.available ? (git.version || "") : ""].filter(Boolean).join(" · "))}</span>`;
+    gitRow.innerHTML = `<span class="onboard-dot ${git.available ? "ok" : "bad"}" aria-hidden="true"></span><span class="ob-name">Git</span><span class="ob-detail">${esc(git.available ? t("installed") : t("notInstalled"))}${git.available && git.version ? ` · ${bdi(git.version, "ltr")}` : ""}</span>`;
+    if (!git.available) {
+      const link = installLink(GIT_INSTALL_URL, "Git");
+      if (link) { const actions = document.createElement("span"); actions.className = "ob-actions"; actions.appendChild(link); gitRow.appendChild(actions); }
+    }
     list.appendChild(gitRow);
 
     // Capabilities: what this setup can do now, and what's still locked (with why) — never a dead end.
@@ -1730,12 +1746,12 @@ function openCliSetupFromOnboard(agent) {
     try {
       const result = await api("/api/cli/discover", { method: "POST", body: JSON.stringify({ provider: agent }) });
       if (result.resolved) {
-        await loadOnboard();
+        await loadOnboard(true);
         return;
       }
       if (result.candidates?.length === 1) {
         const ok = await applyDiscoveredCommand(agent, result.candidates[0]);
-        await loadOnboard();
+        await loadOnboard(true);
         if (!ok) openCliSetupDrawer(agent);
         return;
       }
@@ -1783,7 +1799,7 @@ async function updateAgentCli(agent, btn) {
     const r = await api("/api/agents/update", { method: "POST", body: JSON.stringify({ agent }) });
     clearInterval(timer); updateTimers.delete(agent);
     btn.textContent = r.ok ? t("updated") : t("updateFailed");
-    if (r.ok) { setTimeout(loadOnboard, 1200); } // re-check: shows the new version + flips the button
+    if (r.ok) { setTimeout(() => loadOnboard(true), 1200); } // re-check: shows the new version + flips the button
     else { btn.title = r.output || ""; restore(); } // let the user retry a failed update
   } catch (e) {
     clearInterval(timer); updateTimers.delete(agent);
@@ -2479,7 +2495,7 @@ $("openOnboard").onclick = openOnboard;
 $("diagnosticsBtn").onclick = () => {
   if (confirm(t("diagnosticsConfirm"))) location.href = "/api/diagnostics";
 };
-$("onboardRefresh").onclick = loadOnboard;
+$("onboardRefresh").onclick = () => loadOnboard(true);
 $("onboardDone").onclick = closeOnboard;
 $("onboardModal").addEventListener("click", (e) => { if (e.target === $("onboardModal")) closeOnboard(); });
 $("execToggle").onclick = toggleExec;

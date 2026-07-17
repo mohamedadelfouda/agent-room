@@ -469,8 +469,9 @@ details.tech pre { margin-top: 8px; background: var(--bg); border: 1px solid var
 .onboard-cap.cap-ready .cap-dot { background: var(--ok); }
 .onboard-cap .cap-name { font-size: 13px; }
 .onboard-cap.cap-locked .cap-name { color: var(--faint); }
+/* The "ready" state is carried by the dot + name colour; the hint text stays --faint (never --ok) so it
+   clears WCAG AA contrast — --ok on the light-theme surface is 3.37:1, under 4.5:1 for this 12px text. */
 .onboard-cap .cap-hint { margin-inline-start: auto; font-size: 12px; color: var(--faint); }
-.onboard-cap.cap-ready .cap-hint { color: var(--ok); }
 /* "Update available" reads as an actionable outlined button; the state is carried by the border,
    background and weight (not colour alone), and the label text stays high-contrast (--text). */
 .update-btn.update-available { border-color: var(--accent-line); background: var(--accent-soft); color: var(--text); font-weight: 600; }

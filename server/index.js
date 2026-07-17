@@ -474,7 +474,7 @@ const server = http.createServer(async (req, res) => {
     }
     // Local, no-network readiness for the Setup Doctor: dimensional provider state + Git + capabilities.
     if (req.method === "GET" && url.pathname === "/api/setup/status") {
-      return json(res, 200, await getSetupStatus());
+      return json(res, 200, await getSetupStatus({ refresh: url.searchParams.get("refresh") === "1" }));
     }
     // Reads the npm registry (network) to report which agent CLIs have a newer version, so the UI can
     // show UPDATE vs UPDATED. Separate from status so status stays fast/offline; fails soft.
