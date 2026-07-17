@@ -922,7 +922,12 @@ function renderMessages() {
     const speaker = latest.author === "agent" ? providerInfo(latest.agent).label : t("system");
     const announcement = $("conversationAnnouncements");
     announcement.textContent = "";
-    requestAnimationFrame(() => { announcement.textContent = `${t("newMessageFrom")(speaker)}: ${String(latest.content || "").slice(0, 500)}`; });
+    // Announce the same localized text the reader sees. For a round-summary that's the report rendered
+    // from meta.outcome (sentence + items), not the server's stored Arabic `content`, so a screen-reader
+    // user hears it in their language too.
+    const outcome = latest.meta?.outcome ? discussionOutcomeReport(latest.meta.outcome, lang) : null;
+    const body = outcome?.text ? [outcome.text, ...outcome.items].join(" ") : String(latest.content || "");
+    requestAnimationFrame(() => { announcement.textContent = `${t("newMessageFrom")(speaker)}: ${body.slice(0, 500)}`; });
   }
 }
 
