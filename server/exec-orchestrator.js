@@ -301,6 +301,12 @@ async function runExecuteAndReviewClaimed(sessionId, req, emit, releaseActivity)
     if (!provider(executor)) throw expectedApiError("executor_unknown", "Unknown executor", 400);
     if (!provider(reviewer)) throw expectedApiError("reviewer_unknown", "Unknown reviewer", 400);
     if (executor === reviewer) throw expectedApiError("executor_reviewer_same", "Executor and reviewer must be different", 400);
+    // Reject a review-only provider chosen as executor here — early, before any exec_started/clone, with a
+    // dedicated code — rather than late and generic from executor.js's capability guard (which stays as
+    // defense in depth). This is the role/capability boundary that makes executor assignment honest.
+    if (!provider(executor).capabilities?.executeModes?.includes(mode)) {
+      throw expectedApiError("executor_cannot_execute", `${provider(executor).label} has no safe ${mode} execution mode`, 400);
+    }
     const task = String(req.task || "").trim();
     if (!task) throw expectedApiError("execution_task_required", "Execution task is empty", 400);
 

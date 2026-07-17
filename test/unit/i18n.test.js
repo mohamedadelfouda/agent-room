@@ -58,6 +58,7 @@ test("known API, connector, and decision identifiers resolve to catalog keys", (
   assert.equal(errorMessageKey({ code: "executor_unknown" }), "errorExecutorUnknown");
   assert.equal(errorMessageKey({ code: "reviewer_unknown" }), "errorReviewerUnknown");
   assert.equal(errorMessageKey({ code: "executor_reviewer_same" }), "errorExecutorReviewerSame");
+  assert.equal(errorMessageKey({ code: "executor_cannot_execute" }), "errorExecutorCannotExecute");
   assert.equal(errorMessageKey({ code: "execution_task_required" }), "errorExecutionTaskRequired");
   assert.equal(errorMessageKey({ code: "execution_stopped" }), "errorExecutionStopped");
   assert.equal(errorMessageKey({ code: "execution_failed" }), "executionFailed");
@@ -76,6 +77,7 @@ test("known API, connector, and decision identifiers resolve to catalog keys", (
     errorMessageKey({ code: "executor_unknown" }),
     errorMessageKey({ code: "reviewer_unknown" }),
     errorMessageKey({ code: "executor_reviewer_same" }),
+    errorMessageKey({ code: "executor_cannot_execute" }),
     errorMessageKey({ code: "execution_task_required" }),
     errorMessageKey({ code: "execution_stopped" }),
     errorMessageKey({ code: "execution_failed" }),
