@@ -35,3 +35,14 @@ AGENT_ROOM_FIX_PLAN_v2.1_AMENDMENTS.md
 
 # Remaining-work / plan draft — local only.
 AGENT_ROOM_REMAINING_WORK.md
+
+# Auto Claude data directory
+.auto-claude/
+
+# Auto Claude generated files
+.auto-claude-security.json
+.auto-claude-status
+.claude_settings.json
+.worktrees/
+.security-key
+logs/security/
