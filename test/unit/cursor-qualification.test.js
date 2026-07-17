@@ -56,6 +56,7 @@ test("each descriptor invariant fails closed on its own", () => {
     [{ entryPointFingerprint: "" }, /entryPointFingerprint is required/],
     [{ fixedPrefixArgs: [] }, /non-empty array/],
     [{ fixedPrefixArgs: [NODE, ENTRY] }, /entryPoint must be the first/],
+    [{ fixedPrefixArgs: [ENTRY, "--force"] }, /only fixed-prefix arg/], // trailing args would smuggle a Cursor flag past the noForce evidence
     [{ platform: "linux" }, /platform must be "win32"/],
     [{ arch: "arm64" }, /arch must be "x64"/],
   ];

@@ -111,6 +111,10 @@ export function validateTrustedLaunchDescriptor(descriptor, { trustedRoot = null
       violations.push("fixedPrefixArgs must include the entryPoint");
     } else if (entryIndex !== 0) {
       violations.push("entryPoint must be the first fixed-prefix arg (trusted node → trusted index.js → request args)");
+    } else if (prefix.length !== 1) {
+      // The fixed prefix is exactly [entryPoint]. Anything after it is forwarded to Cursor as a launch
+      // flag (e.g. --force), which would silently defeat the separate noForce qualification evidence.
+      violations.push("entryPoint must be the only fixed-prefix arg (trailing args are forwarded to Cursor)");
     }
     // No Node flag may appear before the entry point — it would run code before Cursor starts.
     const beforeEntry = entryIndex === -1 ? prefix : prefix.slice(0, entryIndex);
