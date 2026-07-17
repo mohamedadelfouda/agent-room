@@ -42,7 +42,8 @@ body:
       label: Diagnostics export (recommended)
       description: >-
         Attach the output of the in-app "Export diagnostic data" control (it opens /api/diagnostics).
-        It is already redacted — no credentials, absolute paths, or session content — and captures
-        versions, platform, and provider readiness so we can reproduce faster. Review it before pasting.
+        It redacts usernames and credentials and captures versions, platform, and provider readiness so
+        we can reproduce faster — but it is not guaranteed free of absolute project paths, so review it
+        and remove anything sensitive before pasting.
     validations:
       required: false
