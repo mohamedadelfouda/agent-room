@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readFile, readdir, rm, stat, writeFile, utimes } from "node:fs/promises";
+import { open, readFile, readdir, rm, stat, writeFile, utimes } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import {
@@ -42,6 +42,25 @@ test("concurrent saves of one session store one complete payload — never torn 
   } finally {
     await cleanup(s.id);
   }
+});
+
+test("a durable session write is fsync'd for power-loss durability", async (t) => {
+  // Round-trip tests can't catch a silently dropped fsync — spy on FileHandle.sync via its prototype and
+  // confirm the durable transcript write actually syncs. (The best-effort directory fsync may also fire.)
+  const probe = await open(join(sessionsDir, ".sync-probe.tmp"), "w");
+  const proto = Object.getPrototypeOf(probe);
+  await probe.close();
+  await rm(join(sessionsDir, ".sync-probe.tmp"), { force: true });
+  const realSync = proto.sync;
+  let syncs = 0;
+  t.mock.method(proto, "sync", async function spy(...args) { syncs += 1; return realSync.apply(this, args); });
+
+  const s = await createSession("durability-fsync-test");
+  syncs = 0; // measure only this save, not the create's own writes
+  await saveSession(s);
+  assert.ok(syncs >= 1, "the durable transcript write called fsync");
+  await rm(join(sessionsDir, `${s.id}.json`), { force: true }).catch(() => {});
+  await rm(join(sessionsDir, `${s.id}.summary.json`), { force: true }).catch(() => {});
 });
 
 test("concurrent addMessage calls on one session don't drop appends", async () => {

@@ -203,12 +203,22 @@ function sessionPath(id) {
   return path.join(SESSIONS_DIR, `${id}.json`);
 }
 
-async function replaceJson(filePath, data) {
+async function replaceJson(filePath, data, { durable = true } = {}) {
   // Random temp name (not pid+Date.now(), which collides when two writes land in the same
-  // millisecond in this process → a torn/half-written file). Write then atomic rename.
+  // millisecond in this process → a torn/half-written file). Write, fsync, then atomic rename.
   const tempPath = `${filePath}.${crypto.randomUUID()}.tmp`;
   try {
-    await fs.writeFile(tempPath, JSON.stringify(data, null, 2), "utf8");
+    // fsync the temp file's bytes to disk BEFORE the rename. temp+rename alone survives a process
+    // crash, but a power cut between the write and the OS's lazy flush can still leave a zero-length or
+    // torn file even though the rename "succeeded" — so a recovery that trusts an accepted-commit or
+    // blocked_secret record could read garbage. Mirrors runtime-lock.js's handle.sync() precedent.
+    const handle = await fs.open(tempPath, "w");
+    try {
+      await handle.writeFile(JSON.stringify(data, null, 2), "utf8");
+      if (durable) await handle.sync();
+    } finally {
+      await handle.close().catch(() => {}); // don't let a close error mask a write/sync error (matches runtime-lock.js)
+    }
     // Windows can transiently deny a replace while antivirus/indexing has the destination
     // open. Retrying the same atomic rename preserves the old-or-new guarantee; deleting the
     // destination first would introduce a window where the session does not exist.
@@ -222,11 +232,30 @@ async function replaceJson(filePath, data) {
         await new Promise((resolve) => setTimeout(resolve, 10 * (2 ** attempt)));
       }
     }
+    // Also fsync the parent directory so the rename (a directory-entry change) is itself durable across a
+    // power cut. Best-effort: opening a directory for fsync isn't supported on Windows / some
+    // filesystems, where the temp fsync + atomic rename already give crash consistency.
+    if (durable) await fsyncDir(path.dirname(filePath));
   } finally {
     // On success the rename already consumed tempPath (rm is a no-op / ENOENT); on a
-    // writeFile/rename failure this removes the leftover so temp files don't accumulate.
+    // write/rename failure this removes the leftover so temp files don't accumulate.
     // The original error still propagates.
     await fs.rm(tempPath, { force: true }).catch(() => {});
+  }
+}
+
+// fsync a directory so a rename inside it is durable. Best-effort — unsupported on Windows and some
+// filesystems (opening a directory for sync throws), where the temp-file fsync + atomic rename still
+// give crash consistency; skip rather than fail the write.
+async function fsyncDir(dirPath) {
+  let handle;
+  try {
+    handle = await fs.open(dirPath, "r");
+    await handle.sync();
+  } catch {
+    /* directory fsync unsupported here — best-effort only */
+  } finally {
+    await handle?.close().catch(() => {});
   }
 }
 
@@ -343,7 +372,7 @@ async function doWrite(filePath, data) {
   await replaceJson(filePath, data);
   // The transcript is the transaction. The compact sidebar summary is only a
   // cache: a cache write failure must never make callers retry a durable action.
-  await replaceJson(summaryPath(filePath), sessionSummary(data)).catch(() => {});
+  await replaceJson(summaryPath(filePath), sessionSummary(data), { durable: false }).catch(() => {}); // cache: regenerated from the transcript on demand, so it skips the extra fsync
 }
 
 // Serialize operations per session file inside the host process. Callers that need an atomic
@@ -380,7 +409,7 @@ export async function listSessions() {
         const sessionId = file.replace(/\.json$/i, "");
         const session = await runExclusive(mainPath, () => readSessionFile(mainPath, sessionId));
         summary = sessionSummary(session);
-        await replaceJson(summaryPath(mainPath), summary).catch(() => {});
+        await replaceJson(summaryPath(mainPath), summary, { durable: false }).catch(() => {}); // cache: self-healing regen, so it skips the extra fsync
       }
       await clearRecoveryRecord(file).catch(() => {});
       sessions.push(summary);
