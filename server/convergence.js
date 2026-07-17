@@ -1,5 +1,20 @@
-const CONTROL_BLOCK = /<agent-control>([\s\S]*?)<\/agent-control>/gi;
+const OPEN_TAG = "<agent-control>";
+const CLOSE_TAG = "</agent-control>";
 const CONTROL_VERSION = 2;
+
+// Locate the last complete <agent-control>…</agent-control> block with linear, case-insensitive
+// scans instead of a backtracking regex. Agent turns can reach several MB (see output-limits),
+// and a lazy `<agent-control>[\s\S]*?</agent-control>` over many unclosed tags is O(n²) — a
+// synchronous scan that would freeze the single Node event loop for the whole server. indexOf/
+// lastIndexOf are linear and cannot backtrack, so cost stays O(n) on any input.
+function lastControlBlock(source) {
+  const lower = source.toLowerCase();
+  const closeAt = lower.lastIndexOf(CLOSE_TAG);
+  if (closeAt === -1) return null;
+  const openAt = lower.lastIndexOf(OPEN_TAG, closeAt);
+  if (openAt === -1) return null;
+  return { raw: source.slice(openAt, closeAt + CLOSE_TAG.length), inner: source.slice(openAt + OPEN_TAG.length, closeAt) };
+}
 const CONVERGENCE = new Set(["converged", "open", "not_evaluated"]);
 const GOAL_STATUS = new Set(["satisfied", "incomplete", "blocked", "needs_user"]);
 const ITEM_KINDS = new Set(["disagreement", "user_decision", "external_validation", "remaining_work", "out_of_scope"]);
@@ -138,16 +153,40 @@ function validatedControl(candidate) {
 }
 
 export function parseAgentControl(text) {
-  const source = String(text || "");
-  const matches = [...source.matchAll(CONTROL_BLOCK)];
-  const match = matches.at(-1);
-  if (!match || source.slice((match.index || 0) + match[0].length).trim()) return invalidControl();
-  try { return validatedControl(JSON.parse(match[1])) || invalidControl(); }
+  // Take the LAST control block and ignore any prose around it. The block is the machine
+  // signal; reader-facing text before or after it (a sign-off line, a stray ``` fence) must
+  // not invalidate an otherwise well-formed block — that brittleness was the main cause of
+  // false `invalid_control` stops when agents had genuinely agreed. JSON shape and the
+  // version-2 schema stay strict below, so a malformed or off-contract block still fails closed.
+  const block = lastControlBlock(String(text || ""));
+  if (!block) return invalidControl();
+  try { return validatedControl(JSON.parse(block.inner)) || invalidControl(); }
   catch { return invalidControl(); }
 }
 
 export function stripAgentControl(text) {
-  return String(text || "").replace(CONTROL_BLOCK, "").trimEnd();
+  // Remove every complete block left-to-right with linear indexOf scans (no regex backtracking;
+  // see lastControlBlock). A stray unclosed tag is left as ordinary text rather than scanned for.
+  const source = String(text || "");
+  const lower = source.toLowerCase();
+  let result = "";
+  let cursor = 0;
+  for (;;) {
+    const openAt = lower.indexOf(OPEN_TAG, cursor);
+    if (openAt === -1) break;
+    const closeAt = lower.indexOf(CLOSE_TAG, openAt + OPEN_TAG.length);
+    if (closeAt === -1) break;
+    result += source.slice(cursor, openAt);
+    cursor = closeAt + CLOSE_TAG.length;
+  }
+  return (result + source.slice(cursor)).trimEnd();
+}
+
+// The last raw <agent-control> block as written (or "" if none). Used only for diagnostics —
+// when a control fails to validate, storing what the agent actually emitted turns an opaque
+// invalid_control into something the user can see and act on.
+export function rawAgentControl(text) {
+  return lastControlBlock(String(text || ""))?.raw || "";
 }
 
 function validRegistryItem(registryItem) {
@@ -366,7 +405,7 @@ function validateRound(controls, targetVersion, itemRegistry) {
   const candidatePendingItems = application.registry.filter((registryItem) => registryItem.status === "open");
   const consistencyErrors = roundConsistencyErrors({ controls: present, pendingItems: candidatePendingItems, applicationErrors: application.errors, enabled: versionAligned && registryValid });
   const roundValid = controlsValid && registryValid && versionAligned && consistencyErrors.length === 0;
-  return { present, allPresent, versionAligned, currentRegistry: currentRegistry || [], application, consistencyErrors, roundValid };
+  return { present, allPresent, versionAligned, currentRegistry: currentRegistry || [], application, consistencyErrors, roundValid, controlsValid };
 }
 
 function agreementStateFor({ roundValid, controls, pendingItems, conflicts, unclassifiedPoints }) {
@@ -382,16 +421,39 @@ function discussionState(validation) {
   const pendingItems = approvedRegistry.filter((registryItem) => registryItem.status === "open");
   const unclassifiedPoints = [...new Set(present.flatMap((control) => control.openPoints || []).filter(Boolean))];
   const disagreements = pendingItems.filter((pendingItem) => pendingItem.kind === "disagreement").map((pendingItem) => pendingItem.text);
+  // Disagreements the agents RAISED in their controls this round, read straight from the
+  // proposals — available even when the round can't be certified. This is report-only context
+  // (never official state): it lets an invalid-but-parseable round still show what was on the
+  // table instead of an opaque "invalid control" message.
+  const proposedDisagreements = [...new Set(present
+    .flatMap((control) => control.itemProposals || [])
+    .filter((proposal) => proposal.action === "create" && proposal.kind === "disagreement")
+    .map((proposal) => proposal.text)
+    .filter(Boolean))];
   const agreementState = agreementStateFor({ roundValid, controls: present, pendingItems, conflicts: application.conflicts, unclassifiedPoints });
   const completionState = roundValid ? aggregateCompletion(present) : "incomplete";
   const proposalChanged = roundValid && present.some((control) => control.substantiveDelta);
-  const canStop = roundValid && !proposalChanged && agreementState === "converged" && completionState !== "incomplete";
+  // Early stop is driven by AGREEMENT, not by the task being fully done: once both agents
+  // converge and a full round passes with no substantive change, further rounds only repeat.
+  // We never stop while an open item still requires another agent round (an unresolved
+  // disagreement, or an explicit remaining_work item) — that is the machine-checked safeguard
+  // against cutting off pending agent work. A bare goalStatus=incomplete with no such item means
+  // the agents flagged nothing more to do: it is reported as "settled, not fully done", not
+  // treated as a reason to keep looping (the prompt asks them to file remaining_work when
+  // another round would genuinely help). Completion state stays in the reported outcome, no
+  // longer a gate, so an agreed answer that still needs the user or an outside check stops here.
+  const agentWorkPending = pendingItems.some((pendingItem) => pendingItem.requiredStep.action === "resume_agent_round");
+  const canStop = roundValid && !proposalChanged && agreementState === "converged" && !agentWorkPending;
+  // Reason still follows the aggregate completion state — needs_user and blocked already imply
+  // their matching official item through the round consistency rules, so this stays faithful to
+  // what the agents reported. The new case this enables, an agreed-but-incomplete stop, reports
+  // as a plain completed agreement (the report layer distinguishes "settled" from "satisfied").
   const stopReason = !roundValid
     ? "invalid_control"
-    : canStop
-      ? { satisfied: "complete", needs_user: "user_decision", blocked: "external_block" }[completionState]
-      : null;
-  return { canStop, agreementState, completionState, stopReason, approvedRegistry, pendingItems, unclassifiedPoints, disagreements, proposalChanged };
+    : !canStop
+      ? null
+      : { satisfied: "complete", needs_user: "user_decision", blocked: "external_block", incomplete: "complete" }[completionState];
+  return { canStop, agreementState, completionState, stopReason, approvedRegistry, pendingItems, unclassifiedPoints, disagreements, proposedDisagreements, proposalChanged };
 }
 
 function assessmentPayload(validation, state) {
@@ -405,6 +467,7 @@ function assessmentPayload(validation, state) {
     pendingKinds: [...new Set(state.pendingItems.map((pendingItem) => pendingItem.kind))],
     nextSteps: derivedNextSteps(state.pendingItems),
     disagreements: state.disagreements,
+    proposedDisagreements: state.proposedDisagreements,
     unclassifiedPoints: state.unclassifiedPoints,
     conflicts: validation.application.conflicts,
     consistencyErrors: validation.consistencyErrors,
@@ -412,6 +475,7 @@ function assessmentPayload(validation, state) {
     versionAligned: validation.versionAligned,
     allPresent: validation.allPresent,
     allValid: validation.roundValid,
+    controlsParseable: validation.controlsValid,
   };
 }
 

@@ -15,6 +15,11 @@ import {
 import { createSession, getSession, mutateSession, rootPath } from "../../server/store.js";
 import { provider } from "../../server/providers/registry.js";
 import { claimSessionActivity } from "../../server/session-activity.js";
+import { assessRound, parseAgentControl } from "../../server/convergence.js";
+
+function rawControl(overrides) {
+  return parseAgentControl(`<agent-control>${JSON.stringify({ controlVersion: 2, convergence: "converged", goalStatus: "satisfied", substantiveDelta: false, itemProposals: [], targetVersion: 1, ...overrides })}</agent-control>`);
+}
 
 function controlBlock(goalStatus, itemProposals) {
   return `<agent-control>${JSON.stringify({
@@ -131,6 +136,75 @@ test("outcome reporting separates agreement from a pending user decision", () =>
   assert.doesNotMatch(discussionOutcomeReport(outcome), /مش متفقين|اختلاف جوهري/);
 });
 
+test("outcome reporting spells out disagreement points when rounds end unresolved", () => {
+  const assessment = {
+    canStop: false,
+    agreementState: "open",
+    completionState: "incomplete",
+    stopReason: null,
+    itemRegistry: [],
+    pendingItems: [],
+    pendingKinds: ["disagreement"],
+    nextSteps: [],
+    disagreements: ["هل fail-closed هو القرار الصح؟", "ترتيب القياس قبل الـeval"],
+    unclassifiedPoints: [],
+    conflicts: [],
+    allValid: true,
+  };
+  const outcome = buildDiscussionOutcome(assessment, 3, 3);
+  assert.equal(outcome.phase, "needs_more_rounds");
+  assert.equal(outcome.stopReason, "round_limit");
+  const report = discussionOutcomeReport(outcome);
+  assert.match(report, /الاتفاق ماتمّش/);
+  assert.match(report, /نقط الاختلاف/);
+  assert.match(report, /fail-closed هو القرار الصح/);
+});
+
+test("an inconsistent-but-parseable round reports the raised disagreement, not opaque control data", () => {
+  // End-to-end through the real pipeline: a needs_user control that raised a disagreement but no
+  // user_decision item is a consistency error (round not certified), yet the controls parsed —
+  // assessRound → buildDiscussionOutcome → report must carry the raised point all the way through.
+  const raised = { action: "create", kind: "disagreement", text: "الدافع الفوري مقابل جودة رحلة التعلم", requiredStep: { actor: "agent", action: "resume_agent_round" } };
+  const assessment = assessRound([
+    rawControl({ convergence: "open", goalStatus: "needs_user", itemProposals: [raised] }),
+    rawControl({ convergence: "open", goalStatus: "satisfied" }),
+  ], 1);
+  assert.equal(assessment.allValid, false);
+  assert.equal(assessment.controlsParseable, true);
+  assert.deepEqual(assessment.consistencyErrors, [{ code: "missing_user_decision" }]);
+  const outcome = buildDiscussionOutcome(assessment, 2, 2);
+  assert.equal(outcome.stopReason, "invalid_control");
+  assert.equal(outcome.controlsParseable, true);
+  assert.deepEqual(outcome.proposedDisagreements, ["الدافع الفوري مقابل جودة رحلة التعلم"]);
+  const report = discussionOutcomeReport(outcome);
+  assert.match(report, /نقط الاختلاف اللي طرحوها/);
+  assert.match(report, /الدافع الفوري مقابل جودة رحلة التعلم/);
+  assert.doesNotMatch(report, /من غير ما الوكلاء يوصلوا لاتفاق مؤكَّد/);
+});
+
+test("an agreed-but-incomplete stop reports as settled without claiming completion", () => {
+  const assessment = {
+    canStop: true,
+    agreementState: "converged",
+    completionState: "incomplete",
+    stopReason: "complete",
+    itemRegistry: [],
+    pendingItems: [],
+    pendingKinds: [],
+    nextSteps: [],
+    disagreements: [],
+    unclassifiedPoints: [],
+    conflicts: [],
+    allValid: true,
+  };
+  const outcome = buildDiscussionOutcome(assessment, 5, 2);
+  assert.equal(outcome.phase, "converged");
+  assert.equal(outcome.stoppedEarly, true);
+  const report = discussionOutcomeReport(outcome);
+  assert.match(report, /استقرّوا على إجابة واحدة/);
+  assert.doesNotMatch(report, /المهمة اكتملت/);
+});
+
 test("a five-round collaboration stops after round two and finalizes once", async (t) => {
   const session = await createSession("convergence-regression");
   let claudeCalls = 0;
@@ -192,6 +266,79 @@ test("a five-round collaboration stops after round two and finalizes once", asyn
     assert.doesNotMatch(outcomeMessage.content, /مش متفقين/);
     assert.match(synthesis[0].content, /غير متفقين/);
     assert.equal(outcomeMessage.meta.outcome.agreementState, "converged");
+  } finally {
+    await cleanupSession(session.id);
+  }
+});
+
+test("a dropped control block is repaired so genuine agreement is not lost", async (t) => {
+  const session = await createSession("control-repair");
+  let claudeCalls = 0;
+  let codexCalls = 0;
+  const result = (text) => ({ text, model: "test", durationMs: 1, exitCode: 0, sessionId: null });
+
+  t.mock.method(provider("claude"), "run", async () => {
+    claudeCalls += 1;
+    if (claudeCalls === 1) return result("Claude opening proposal");
+    if (claudeCalls === 2) return result("Claude agrees — but this reply drops its control block entirely.");
+    return result(controlBlock("satisfied", [])); // the one-shot repair call
+  });
+  t.mock.method(provider("codex"), "run", async () => {
+    codexCalls += 1;
+    if (codexCalls === 1) return result("Codex opening proposal");
+    return result(`Codex agrees.\n${controlBlock("satisfied", [])}`);
+  });
+
+  try {
+    await runOrchestration(session.id, {
+      mode: "collaboration",
+      rounds: 2,
+      content: "Plan the change",
+      finalizer: "none",
+      agents: { claude: { enabled: true, role: "Collaborator" }, codex: { enabled: true, role: "Collaborator" } },
+    }, () => {});
+
+    const saved = await getSession(session.id);
+    const outcomeMessage = saved.messages.find((message) => message.meta?.outcome);
+    assert.equal(claudeCalls, 3); // opening + round 2 (no block) + one repair
+    assert.equal(outcomeMessage.phase, "converged");
+    assert.equal(outcomeMessage.meta.outcome.agreementState, "converged");
+    assert.equal(outcomeMessage.meta.outcome.controlValid, true);
+    const claudeRound2 = saved.messages.find((m) => m.agent === "claude" && m.round === 2 && m.phase === "collaboration");
+    assert.equal(claudeRound2.control.valid, true);
+    assert.equal(claudeRound2.meta.controlRepaired, true);
+    assert.match(claudeRound2.content, /Claude agrees/); // reader-facing answer preserved
+  } finally {
+    await cleanupSession(session.id);
+  }
+});
+
+test("an unrepairable control block is surfaced verbatim for diagnosis", async (t) => {
+  const session = await createSession("control-diagnostic");
+  let claudeCalls = 0;
+  const result = (text) => ({ text, model: "test", durationMs: 1, exitCode: 0, sessionId: null });
+  t.mock.method(provider("claude"), "run", async () => {
+    claudeCalls += 1;
+    if (claudeCalls === 1) return result("Claude opening proposal");
+    return result("Claude agrees but never emits a control block, even on repair.");
+  });
+  t.mock.method(provider("codex"), "run", async () => result(`Codex.\n${controlBlock("satisfied", [])}`));
+
+  try {
+    await runOrchestration(session.id, {
+      mode: "collaboration",
+      rounds: 2,
+      content: "Plan the change",
+      finalizer: "none",
+      agents: { claude: { enabled: true, role: "Collaborator" }, codex: { enabled: true, role: "Collaborator" } },
+    }, () => {});
+
+    const saved = await getSession(session.id);
+    assert.equal(claudeCalls, 3); // opening + round 2 + one repair attempt (which also emitted no block)
+    const claudeRound2 = saved.messages.find((m) => m.agent === "claude" && m.round === 2 && m.phase === "collaboration");
+    assert.equal(claudeRound2.control.valid, false);
+    assert.equal(claudeRound2.meta.controlInvalidRaw, "(no control block emitted)");
+    assert.equal(claudeRound2.meta.controlRepaired, undefined);
   } finally {
     await cleanupSession(session.id);
   }

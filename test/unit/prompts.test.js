@@ -60,6 +60,36 @@ test("debate rebuttal uses the same versioned control contract", () => {
   assertControlContract(prompt, 4);
 });
 
+test("a debate opened on a prior answer debates that answer, not the switch message", () => {
+  const prompt = debatePrompt({
+    ...base,
+    opponentLabel: "Codex",
+    round: 1,
+    independent: true,
+    userTask: "let's debate this",
+    proposition: "We should ship the mini-eval before adding any provider.",
+  });
+  assert.match(prompt, /What to debate/);
+  assert.match(prompt, /We should ship the mini-eval before adding any provider\./);
+  assert.match(prompt, /treat it as the trigger/i);
+  assert.match(prompt, /let's debate this/); // the switch message survives, but as the trigger
+  assert.doesNotMatch(prompt, /The question on the table/);
+});
+
+test("a debate with no prior answer falls back to the user's message as the question", () => {
+  const prompt = debatePrompt({ ...base, opponentLabel: "Codex", round: 1, independent: true, userTask: "Postgres or Mongo?" });
+  assert.match(prompt, /The question on the table/);
+  assert.match(prompt, /Postgres or Mongo\?/);
+  assert.doesNotMatch(prompt, /What to debate/);
+});
+
+test("a rebuttal carries both the anchored proposition and the versioned control contract", () => {
+  const prompt = debatePrompt({ ...base, opponentLabel: "Codex", round: 2, independent: false, targetVersion: 3, proposition: "Ship the mini-eval before adding a provider." });
+  assert.match(prompt, /What to debate/);
+  assert.match(prompt, /Ship the mini-eval before adding a provider\./);
+  assertControlContract(prompt, 3);
+});
+
 test("synthesis receives an immutable official outcome to explain", () => {
   const prompt = synthesisPrompt({
     ...base,

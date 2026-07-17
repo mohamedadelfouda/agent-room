@@ -1,8 +1,8 @@
 import { getSession, listSessions, mutateSession, scratchWorkspacePath, SKIP_SESSION_WRITE } from "./store.js";
 import { terminateProcess } from "./process.js";
 import { provider, providerIds } from "./providers/registry.js";
-import { collaborationPrompt, debatePrompt, synthesisPrompt, chatPrompt } from "./prompts.js";
-import { parseAgentControl, stripAgentControl, assessRound } from "./convergence.js";
+import { collaborationPrompt, debatePrompt, synthesisPrompt, chatPrompt, controlRepairPrompt } from "./prompts.js";
+import { parseAgentControl, stripAgentControl, rawAgentControl, assessRound } from "./convergence.js";
 import { assertTrustedProject, projectSnapshot } from "./project.js";
 import fs from "node:fs/promises";
 import { CappedText } from "./output-limits.js";
@@ -25,6 +25,7 @@ import {
 const activeRuns = new Map();
 const DISCUSSION_MODES = new Set(["chat", "collaboration", "debate"]);
 const MAX_ROLE_CODEPOINTS = 180;
+const REPAIR_TIMEOUT_MS = 120000; // one control block only — never a full turn's budget
 
 function invalidRequest(code, message) {
   throw expectedApiError(code, message, 400);
@@ -122,13 +123,32 @@ function makeMessage({ author, agent, role, content, round, phase, mode }) {
   };
 }
 
+// The most recent substantive agent answer already in the session. When the user flips an
+// existing discussion into debate with a message like "let's debate this", THAT answer is the
+// real subject — not the switch message. Returned verbatim (control blocks were already
+// stripped at store time) and bounded so it survives even if the transcript is later trimmed.
+function lastSubstantiveAnswer(session, limit = 4000) {
+  const messages = session.messages || [];
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const message = messages[i];
+    if (message.author !== "agent") continue;
+    const content = String(message.content || "").trim();
+    if (content) return content.length > limit ? `${content.slice(0, limit)}\n…[truncated]` : content;
+  }
+  return "";
+}
+
 function discussionOutcomePhase(assessment) {
   if (!assessment.canStop) return "needs_more_rounds";
+  // Keyed off the stop reason, not raw completion: an agreed answer that still needs the user
+  // or an outside check stops on agreement (the deterministic core cleared it — no agent work
+  // is pending), so it maps to a terminal phase. When canStop is true, stopReason is always one
+  // of these three; the fallback is a conservative guard for an impossible unmapped value.
   return {
-    satisfied: "converged",
-    needs_user: "needs_user",
-    blocked: "blocked_external",
-  }[assessment.completionState] || "needs_more_rounds";
+    complete: "converged",
+    user_decision: "needs_user",
+    external_block: "blocked_external",
+  }[assessment.stopReason] || "needs_more_rounds";
 }
 
 export function buildDiscussionOutcome(assessment, requestedRounds, completedRounds) {
@@ -149,9 +169,11 @@ export function buildDiscussionOutcome(assessment, requestedRounds, completedRou
     pendingKinds: [...assessment.pendingKinds],
     nextSteps: structuredClone(assessment.nextSteps),
     disagreements: [...assessment.disagreements],
+    proposedDisagreements: [...(assessment.proposedDisagreements || [])],
     unclassifiedPoints: [...assessment.unclassifiedPoints],
     conflicts: structuredClone(assessment.conflicts),
     controlValid: assessment.allValid,
+    controlsParseable: assessment.controlsParseable,
   };
 }
 
@@ -164,9 +186,14 @@ function pendingItemList(outcome) {
 function terminalOutcomeReport(outcome) {
   const round = outcome.completedRounds;
   if (outcome.phase === "converged") {
-    return outcome.stoppedEarly
-      ? `الوكلاء اتفقوا والمهمة اكتملت في الجولة ${round} — تم إيقاف الجولات المتبقية.`
-      : `الوكلاء اتفقوا والمهمة اكتملت في الجولة الأخيرة (${round}).`;
+    // `converged` now covers "agreed and settled" even when the task itself isn't fully
+    // `satisfied` (the agents ran out of substantive work and no agent step is pending), so
+    // don't claim the task is complete unless it actually is.
+    const settledOnly = outcome.completionState !== "satisfied";
+    const head = settledOnly ? "الوكلاء اتفقوا واستقرّوا على إجابة واحدة" : "الوكلاء اتفقوا والمهمة اكتملت";
+    const tail = outcome.stoppedEarly ? `في الجولة ${round} — تم إيقاف الجولات المتبقية.` : `في الجولة الأخيرة (${round}).`;
+    const deeper = settledOnly ? " لو عايز تعميق أكتر، ارفع عدد الجولات." : "";
+    return `${head} ${tail}${deeper}`;
   }
   if (outcome.phase === "needs_user") {
     return `الوكلاء متفقون، والنقاش توقف في الجولة ${round} لأن النتيجة تحتاج قرارك.${pendingItemList(outcome)}`;
@@ -177,17 +204,30 @@ function terminalOutcomeReport(outcome) {
   return null;
 }
 
+function openDisagreementPoints(outcome) {
+  // Prefer explicit disagreement items; fall back to any open point that still needs another
+  // agent round, so the user always sees WHAT is unresolved, not just that something is.
+  const points = outcome.disagreements.length
+    ? outcome.disagreements
+    : outcome.pendingItems.filter((item) => item.requiredStep.action === "resume_agent_round").map((item) => item.text);
+  return points.length ? `\nنقط الاختلاف اللي لسه مفتوحة:\n${points.map((point) => `• ${point}`).join("\n")}` : "";
+}
+
 function unfinishedOutcomeReport(outcome) {
+  const round = outcome.completedRounds;
   if (outcome.stopReason === "invalid_control") {
-    return `انتهت ${outcome.completedRounds} جولات، لكن تعذّر اعتماد حالة الاتفاق لأن بيانات التحكم كانت ناقصة أو غير صالحة.`;
-  }
-  if (outcome.disagreements.length) {
-    return `انتهت ${outcome.completedRounds} جولات وما زال هناك اختلاف جوهري بين الوكلاء:\n${outcome.disagreements.map((disagreement) => `• ${disagreement}`).join("\n")}`;
+    // If the controls themselves parsed but the round couldn't be certified (a consistency or
+    // version conflict), don't lose what the agents put on the table — surface the disagreement
+    // points they raised instead of an opaque "invalid control data" message.
+    if (outcome.controlsParseable && outcome.proposedDisagreements.length) {
+      return `انتهت ${round} جولات. الوكلاء طرحوا نقط اختلاف لكن الجولة ماتعتمدتش بسبب تعارض في بيانات التحكم — ارفع عدد الجولات أو وضّح المطلوب.\nنقط الاختلاف اللي طرحوها:\n${outcome.proposedDisagreements.map((point) => `• ${point}`).join("\n")}`;
+    }
+    return `انتهت ${round} جولات من غير ما الوكلاء يوصلوا لاتفاق مؤكَّد. جرّب ترفع عدد الجولات أو توضّح المطلوب أكتر.`;
   }
   if (outcome.agreementState === "converged" && outcome.completionState === "incomplete") {
-    return `انتهت ${outcome.completedRounds} جولات. الوكلاء متفقون على الوضع الحالي، لكن المهمة ما زالت تحتاج شغلًا إضافيًا.${pendingItemList(outcome)}`;
+    return `انتهت ${round} جولات. الوكلاء متفقون على الإجابة الحالية، بس لسه فيه شغل وكلاء إضافي ممكن يحسّنها — ارفع عدد الجولات لو عايز يكمّلوا.${pendingItemList(outcome)}`;
   }
-  return `انتهت ${outcome.completedRounds} جولات من غير اتفاق نهائي قابل للاعتماد.`;
+  return `الاتفاق ماتمّش بعد ${round} جولات، ومحتاجين جولات إضافية.${openDisagreementPoints(outcome)}`;
 }
 
 export function discussionOutcomeReport(outcome) {
@@ -423,6 +463,7 @@ async function runOrchestrationClaimed({ sessionId, request, validatedRequest, e
 
     const connectorSessionId = Object.values(session.connectors || {}).some((item) => item.enabled) ? session.id : "";
 
+    const previousMode = session.mode; // captured before the overwrite below — used to detect a genuine switch INTO debate
     session.status = "running";
     session.mode = mode;
     session.settings = request;
@@ -436,7 +477,34 @@ async function runOrchestrationClaimed({ sessionId, request, validatedRequest, e
     if (!(await persistRunProgress(session, state, emit))) throw runInactiveError(state);
     emit({ type: "run_started", sessionId, runId: state.runId, mode, rounds });
 
-    const callAgent = async (agent, prompt, round, phase) => {
+    // One extra provider call to recover a dropped or malformed control block from a single
+    // agent, tracked in state.pending and using the same registerChild so a stop cancels it
+    // cleanly like any other provider call.
+    const attemptControlRepair = async (definition, cfg, cwd, priorAnswer, controlContext) => {
+      if (!runAcceptsOutput(sessionId, state)) return null;
+      const repairPrompt = controlRepairPrompt({
+        agentLabel: definition.label,
+        priorAnswer,
+        targetVersion: controlContext.targetVersion,
+        itemRegistry: controlContext.itemRegistry,
+      });
+      // The repair emits only one JSON block, so cap its timeout well below a normal turn's
+      // (default 10min, up to 60): a hung repair must not double this round's tail latency.
+      const repairCfg = { ...cfg, timeoutMs: Math.min(Number(cfg.timeoutMs) || REPAIR_TIMEOUT_MS, REPAIR_TIMEOUT_MS) };
+      let repairPromise;
+      try {
+        repairPromise = Promise.resolve().then(() => definition.run({ prompt: repairPrompt, config: repairCfg, cwd, registerChild, onEvent() {} }));
+        state.pending.add(repairPromise);
+        const repairResult = await repairPromise;
+        return parseAgentControl(redact(repairResult.text));
+      } catch {
+        return null;
+      } finally {
+        if (repairPromise) state.pending.delete(repairPromise);
+      }
+    };
+
+    const callAgent = async (agent, prompt, round, phase, controlContext = null) => {
       assertRunAcceptsOutput(sessionId, state);
       // Planning turns run inside the attached project (read-only) so they can read its
       // files; chat stays in the scratch workspace; unattached planning is text-only.
@@ -504,8 +572,24 @@ async function runOrchestrationClaimed({ sessionId, request, validatedRequest, e
       // (otherwise a chat answer that legitimately contains that line would be corrupted).
       const usesControl = round >= 2 && (phase === "collaboration" || phase === "rebuttal");
       const safeText = redact(result.text);
-      const control = usesControl ? parseAgentControl(safeText) : null;
-      const message = makeMessage({ author: "agent", agent, role, content: usesControl ? stripAgentControl(safeText) : safeText, round, phase, mode });
+      const content = usesControl ? stripAgentControl(safeText) : safeText;
+      let control = usesControl ? parseAgentControl(safeText) : null;
+      let controlRepaired = false;
+      // A missing or malformed control block is the main cause of a false invalid_control stop
+      // even when the agent has agreed in prose (a dropped block, bad JSON — things the lenient
+      // parser cannot recover). When we have the control context, ask this one agent once for
+      // just the corrected block, based on its own answer, and use it if valid. The extra call
+      // happens only on failure; the reader-facing answer is never touched.
+      if (usesControl && controlContext && !control.valid) {
+        const repaired = await attemptControlRepair(definition, cfg, cwd, content, controlContext);
+        if (repaired?.valid) { control = repaired; controlRepaired = true; }
+        assertRunAcceptsOutput(sessionId, state); // the repair awaited a provider call — a stop may have landed
+      }
+      const rawBlock = usesControl && !control.valid ? rawAgentControl(safeText) : "";
+      const rawInvalidControl = usesControl && !control.valid
+        ? (rawBlock ? redact(rawBlock).slice(0, 2000) : "(no control block emitted)")
+        : null;
+      const message = makeMessage({ author: "agent", agent, role, content, round, phase, mode });
       message.control = control;
       message.convergence = control;
       message.meta = {
@@ -514,6 +598,8 @@ async function runOrchestrationClaimed({ sessionId, request, validatedRequest, e
         exitCode: result.exitCode ?? null, status: "completed",
         contextChars, contextMessages, retryCount: 0,
         outputTruncated: Boolean(result.outputTruncated),
+        ...(controlRepaired ? { controlRepaired: true } : {}),
+        ...(rawInvalidControl ? { controlInvalidRaw: rawInvalidControl } : {}),
       };
       session.messages.push(message);
       if (!(await persistRunProgress(session, state, emit))) throw runInactiveError(state);
@@ -578,7 +664,7 @@ async function runOrchestrationClaimed({ sessionId, request, validatedRequest, e
             targetVersion,
             itemRegistry,
           });
-          return callAgent(agent, prompt, round, "collaboration");
+          return callAgent(agent, prompt, round, "collaboration", { targetVersion, itemRegistry });
         }), state);
         const assessment = assessRound(roundMessages.map((message) => message.control), targetVersion, itemRegistry);
         lastAssessment = assessment;
@@ -588,6 +674,11 @@ async function runOrchestrationClaimed({ sessionId, request, validatedRequest, e
         else if (assessment.canStop) break;
       }
     } else {
+      // Anchor the debate to the answer already on the table so a "switch to debate" message
+      // debates that answer, not itself — but ONLY on a genuine switch INTO debate. If the
+      // session was already in debate, a new message is a fresh question, not a re-debate of the
+      // last rebuttal, so fall back to the user's message as the proposition.
+      const proposition = previousMode === "debate" ? "" : lastSubstantiveAnswer(session);
       const openingSession = structuredClone(session);
       await runParallel(selected.map((agent) => () => {
         const opponent = selected.find((key) => key !== agent);
@@ -601,6 +692,7 @@ async function runOrchestrationClaimed({ sessionId, request, validatedRequest, e
           userTask,
           independent: true,
           projectSnapshot: projSnapshot,
+          proposition,
         });
         return callAgent(agent, prompt, 1, "opening");
       }), state);
@@ -623,8 +715,9 @@ async function runOrchestrationClaimed({ sessionId, request, validatedRequest, e
             projectSnapshot: projSnapshot,
             targetVersion,
             itemRegistry,
+            proposition,
           });
-          return callAgent(agent, prompt, round, "rebuttal");
+          return callAgent(agent, prompt, round, "rebuttal", { targetVersion, itemRegistry });
         }), state);
         const assessment = assessRound(roundMsgs.map((message) => message.control), targetVersion, itemRegistry);
         lastAssessment = assessment;
