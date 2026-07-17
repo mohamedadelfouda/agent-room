@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { parseAgentControl, stripAgentControl, assessRound } from "../../server/convergence.js";
+import { parseAgentControl, stripAgentControl, rawAgentControl, assessRound } from "../../server/convergence.js";
 
 function legacyBlock(overrides = {}) {
   return `<agent-control>${JSON.stringify({
@@ -57,11 +57,10 @@ test("legacy controls remain readable without treating open points as categorize
   assert.deepEqual(parsed.itemProposals, []);
 });
 
-test("missing, malformed, embedded, and schema-invalid controls fail closed", () => {
+test("missing, malformed, and schema-invalid controls fail closed", () => {
   const invalidTexts = [
     "reader-facing answer only",
     "<agent-control>{not json}</agent-control>",
-    `${block()}\nextra text`,
     block({ confidence: 0.9 }),
     block({ openPoints: [] }),
     block({ targetVersion: 0 }),
@@ -74,6 +73,34 @@ test("missing, malformed, embedded, and schema-invalid controls fail closed", ()
     assert.equal(parsed.valid, false);
     assert.equal(parsed.goalStatus, "incomplete");
   }
+});
+
+test("a well-formed control survives reader-facing prose around it", () => {
+  // Prose before or after the block (a sign-off line, a stray fence) must not invalidate an
+  // otherwise valid block — that brittleness caused false invalid_control stops after real
+  // agreement. The JSON shape and schema stay strict; only the position rule is relaxed.
+  assert.equal(parseAgentControl(`${block()}\nHope this helps!`).valid, true);
+  assert.equal(parseAgentControl(`intro\n${block()}\n\`\`\``).valid, true);
+  // A schema-invalid block still fails closed even with surrounding prose.
+  assert.equal(parseAgentControl(`${block({ confidence: 0.9 })}\ntrailing`).valid, false);
+});
+
+test("parse, strip, and raw agree on block boundaries (unclosed/extra tags)", () => {
+  const valid = block();
+  // Clean block with prose around it: valid, stripped out, raw = the block. All three agree.
+  const clean = `intro ${valid} outro`;
+  assert.equal(parseAgentControl(clean).valid, true);
+  assert.equal(rawAgentControl(clean), valid);
+  assert.doesNotMatch(stripAgentControl(clean), /agent-control/);
+  assert.match(stripAgentControl(clean), /intro/);
+  assert.match(stripAgentControl(clean), /outro/);
+  // A stray unclosed open tag before the real block: first-open pairs with the first close, so
+  // the whole span is ONE (malformed) block — parse fails on the noisy inner, and strip/raw
+  // treat exactly that same span. No disagreement between the three functions.
+  const noisy = `<agent-control>stray ${valid}`;
+  assert.equal(parseAgentControl(noisy).valid, false);
+  assert.equal(rawAgentControl(noisy), noisy);
+  assert.equal(stripAgentControl(noisy), "");
 });
 
 test("the final control block is authoritative and all blocks are stripped", () => {
@@ -131,10 +158,23 @@ test("an external follow-up does not imply blocked unless a control reports bloc
   assert.deepEqual(result.pendingKinds, ["external_validation"]);
 });
 
-test("incomplete work, genuine disagreement, and substantive changes continue", () => {
-  const incomplete = assessRound([control({ goalStatus: "incomplete" }), control({ goalStatus: "incomplete" })], 2);
-  assert.equal(incomplete.agreementState, "converged");
-  assert.equal(incomplete.canStop, false);
+test("agreement stops the rounds; pending agent work, disagreement, and change continue", () => {
+  // Plain converged + incomplete now STOPS on agreement: once neither agent is adding anything
+  // and nothing needs another agent round, more rounds only repeat. Completion stays reported.
+  const settled = assessRound([control({ goalStatus: "incomplete" }), control({ goalStatus: "incomplete" })], 2);
+  assert.equal(settled.agreementState, "converged");
+  assert.equal(settled.canStop, true);
+  assert.equal(settled.stopReason, "complete");
+
+  // The safeguard against cutting off work: an explicit remaining_work item keeps the rounds
+  // going even when the agents agree, because it requires another agent round.
+  const remainingWork = create("remaining_work", "Wire the retry path end to end", "agent", "resume_agent_round");
+  const moreWork = assessRound([
+    control({ goalStatus: "incomplete", itemProposals: [remainingWork] }),
+    control({ goalStatus: "incomplete" }),
+  ], 2);
+  assert.equal(moreWork.agreementState, "converged");
+  assert.equal(moreWork.canStop, false);
 
   const disagreementProposal = create("disagreement", "The permission boundary is unresolved", "agent", "resume_agent_round");
   const disagreement = assessRound([
@@ -148,6 +188,20 @@ test("incomplete work, genuine disagreement, and substantive changes continue", 
   const changed = assessRound([control({ substantiveDelta: true }), control()], 2);
   assert.equal(changed.proposalChanged, true);
   assert.equal(changed.canStop, false);
+});
+
+test("a parseable but inconsistent round still surfaces the raised disagreement", () => {
+  // needs_user without a user_decision item is a consistency error, so the round can't certify —
+  // but the individual controls parsed, so the disagreement the agents raised must stay visible.
+  const raised = create("disagreement", "Motivation vs learning-journey quality", "agent", "resume_agent_round");
+  const result = assessRound([
+    control({ convergence: "open", goalStatus: "needs_user", itemProposals: [raised] }),
+    control({ convergence: "open", goalStatus: "satisfied" }),
+  ], 2);
+  assert.equal(result.allValid, false);
+  assert.equal(result.controlsParseable, true);
+  assert.deepEqual(result.consistencyErrors, [{ code: "missing_user_decision" }]);
+  assert.deepEqual(result.proposedDisagreements, ["Motivation vs learning-journey quality"]);
 });
 
 test("missing, invalid, stale, and round-inconsistent controls fail closed", () => {

@@ -2,6 +2,15 @@ function clean(text) {
   return String(text ?? "").trim();
 }
 
+// Head+tail excerpt for text that may be huge (agent turns can reach several MB). Keeps the
+// start and end — enough to identify the answer — without ever blowing the prompt window.
+function boundedExcerpt(text, max) {
+  const value = clean(text);
+  if (value.length <= max) return value;
+  const head = Math.ceil(max * 0.75);
+  return `${value.slice(0, head)}\n…[truncated]…\n${value.slice(value.length - (max - head))}`;
+}
+
 export function transcriptFor(session, maxChars = 24000) {
   const msgs = session.messages ?? [];
   const SEP = "\n\n---\n\n";
@@ -110,9 +119,20 @@ function controlInstruction(targetVersion, itemRegistry = []) {
 <agent-control>${shape}</agent-control>
 Use convergence=converged only if you agree with the latest proposal. goalStatus describes whether the user's actual task is complete, not whether the agents agree. Set substantiveDelta=true only when your answer materially changes the proposal; that creates a newer version and prevents an early stop this round.
 itemProposals are proposals, not official state. For a new item use action=create without itemId or targetItemId. For an existing open item reuse its itemId and use keep_open, resolve, or merge_into; merge_into also requires targetItemId. A user_decision requires user/provide_decision. external_validation requires user, human_operator, or orchestrator with run_external_check. disagreement and remaining_work require agent/resume_agent_round. out_of_scope requires user/provide_decision. Do not include confidence or openPoints in version 2.
+When you and the other agent have genuinely landed in the same place and you're no longer materially changing the proposal, set convergence=converged and substantiveDelta=false so the session can stop early instead of repeating a round with nothing new. If the only thing left is the user's own decision or an outside check, say so through goalStatus (needs_user or blocked) and create the matching item — don't fall back on goalStatus=incomplete just because the task isn't fully finished. Reserve remaining_work for real work another agent round would still add; that is the one signal that legitimately keeps the rounds going.
 Current approved itemRegistry (reuse these IDs; omission never closes an item):
 ${JSON.stringify(itemRegistry)}
 Do not put the block in a code fence or write anything after it.`;
+}
+
+// One-shot repair asked of a single agent whose turn parsed without a valid control block. It
+// does NOT reopen the debate — the reader-facing answer already stands — it only recovers the
+// machine signal so a genuine agreement isn't lost to a dropped or malformed block.
+export function controlRepairPrompt({ agentLabel, priorAnswer, targetVersion = 1, itemRegistry = [] }) {
+  return `You're ${agentLabel}. Your previous reply stands, but its machine-readable control block was missing or invalid, so the session could not read your position. Do NOT rewrite or change your answer — output ONLY the corrected control block for that same answer, and nothing else.
+${controlInstruction(targetVersion, itemRegistry)}
+Your previous answer, for reference (do not repeat it):
+${boundedExcerpt(priorAnswer, 4000)}`;
 }
 
 export function collaborationPrompt({ session, agentLabel, role, round, totalRounds, userTask, projectSnapshot = "", targetVersion = 1, itemRegistry = [] }) {
@@ -165,7 +185,7 @@ Shared session transcript (for context only):
 ${transcriptFor(session)}`;
 }
 
-export function debatePrompt({ session, agentLabel, role, opponentLabel, round, totalRounds, userTask, independent, projectSnapshot = "", targetVersion = 1, itemRegistry = [] }) {
+export function debatePrompt({ session, agentLabel, role, opponentLabel, round, totalRounds, userTask, independent, projectSnapshot = "", targetVersion = 1, itemRegistry = [], proposition = "" }) {
   const tools = projectSnapshot
     ? `You can READ the attached project (Read/Grep/Glob) to ground your argument in the real code — read only, never edit or run anything. When you cite the code, name the file (and the line when you can), and keep what you verified separate from what you're inferring.`
     : `Argue from what's in front of you — don't reach for tools, edit files, or run commands.`;
@@ -173,6 +193,21 @@ export function debatePrompt({ session, agentLabel, role, opponentLabel, round, 
     ? `This is your opening. Form your own position from the task and the earlier context — don't shadow how your opponent framed theirs. Make the real case: where you stand and why, your strongest arguments, what you'll honestly concede, where the other side falls short, what evidence or test would actually change your mind, the call you'd make, and how confident you are (0–100). Argue it like you mean it, in your own voice — not as a checklist.`
     : `This is a rebuttal, so go straight at the strongest opposing point on the table — don't re-argue your whole case. In a few sharp, honest lines: what you now concede from their last turn, your best specific challenge to it, anything genuinely new you're bringing this round, what's still unsettled between you, and your updated confidence (0–100).`;
   const control = !independent ? `\n${controlInstruction(targetVersion, itemRegistry)}\n` : "";
+  // When the debate was opened on an existing discussion, the subject is the answer already on
+  // the table — the user's message ("let's debate this") is only the trigger. Anchor to it
+  // explicitly so the context isn't lost and the agents don't debate the switch itself. If the
+  // user's message states its own proposition, they follow that instead.
+  const propositionText = clean(proposition);
+  const subject = propositionText
+    ? `What to debate: the most recent answer this session produced, quoted below. The user's latest message is what asked you to open the debate — treat it as the trigger (and any extra steer), NOT as the thing to debate, unless it clearly states a different proposition of its own.
+
+The answer under debate [from the transcript]:
+${propositionText}
+
+The user's latest message [user-provided]:
+${clean(userTask)}`
+    : `The question on the table [user-provided]:
+${clean(userTask)}`;
   return `You're ${agentLabel}, debating in a shared session that the user runs and ultimately decides on.
 Your position: ${role || "Critical debater"}.
 Across the table: ${opponentLabel}.
@@ -182,8 +217,7 @@ ${guidance}
 ${control}
 Reply in the same language the user last used. ${tools}
 ${projectSnapshot ? `\n${projectSnapshot}\n` : ""}
-The question on the table [user-provided]:
-${clean(userTask)}
+${subject}
 
 The debate so far:
 ${transcriptFor(session)}`;

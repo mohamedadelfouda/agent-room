@@ -49,7 +49,7 @@ Agreement and completion are orthogonal.
 | `satisfied` | The requested thinking task is complete. | Yes |
 | `needs_user` | The proposal is settled but requires an explicit user choice. | Yes |
 | `blocked` | The proposal is settled but requires external validation or another outside step. | Yes |
-| `incomplete` | More agent work may still materially improve the answer. | No |
+| `incomplete` | More agent work may still materially improve the answer. | By agreement only, when no agent step is pending (§13) |
 
 Completion is aggregated conservatively in this order:
 
@@ -149,7 +149,7 @@ Additional consistency rules include:
 - classification, required-step, or item-action conflicts prevent a trusted terminal outcome; and
 - any substantive delta prevents early stopping in that round.
 
-Early stop occurs only when the round is valid, delta-free, agreement is `converged`, and completion is `satisfied`, `needs_user`, or `blocked`. Incomplete work and genuine disagreement continue until a later terminal round or the configured round limit.
+Early stop is driven by agreement, not by the task being fully done (see §13). It occurs when the round is valid, delta-free, agreement is `converged`, and no open item still requires another agent round (an unresolved `disagreement` or an explicit `remaining_work`). The completion state is reported but no longer gates the stop, so an agreed answer that still needs the user or an outside check stops here and surfaces those pending points instead of repeating rounds. Genuine disagreement and pending agent work continue until a later terminal round or the configured round limit; an agreed-but-`incomplete` result is reported as a settled agreement rather than a completed task.
 
 ## 7. Orchestration and finalization
 
@@ -204,7 +204,7 @@ The card does not scan earlier runs when a session contains multiple user reques
 Focused tests cover:
 
 - strict version 2 parsing and legacy reads;
-- malformed, embedded, stale, and contradictory controls;
+- malformed, stale, and contradictory controls fail closed, while reader-facing prose around an otherwise valid block does not (see §13);
 - agreement, completion, and stop-reason combinations;
 - user decisions, external validation, remaining work, and genuine disagreement;
 - official registry creation, unanimous resolution, and unanimous merge;
@@ -236,8 +236,8 @@ This stabilization is ready when:
 
 - agreement and completion are stored and displayed separately;
 - agreed `needs_user` and externally blocked outcomes stop unnecessary rounds;
-- incomplete work and genuine disagreement do not stop early;
-- invalid and stale controls fail closed;
+- invalid and stale controls fail closed, while prose around a valid block is tolerated (see §13);
+- genuine disagreement and pending agent work (an open `disagreement` or `remaining_work` item) do not stop early, while an agreed answer with no such pending work does;
 - agents cannot silently close official items;
 - user decisions and external checks are not described as agent disagreement;
 - the captured five-round case is covered by a regression test;
@@ -249,3 +249,13 @@ This stabilization is ready when:
 ## 12. Relationship to multi-agent modes
 
 The stabilized outcome model can be reused by three peers without changing its authority rules: every active participant must contribute a valid control, and no majority can close official items. Judge and critic protocols can consume categorized pending items without turning the registry into a general workflow engine. Cursor feasibility and containment remain separate gates.
+
+## 13. Refinement: agreement-driven stop, lenient parsing, debate anchoring
+
+A real session exposed three gaps between "the protocol is correct" and "the decision experience is trustworthy": agents agreed in prose across five rounds but the run ended `invalid_control`; the rounds never stopped despite the agents repeating "nothing to add"; and switching that session into debate produced a debate about the switch itself. This refinement addresses all three without changing the authority model — deterministic assessment is still the only writer of official state, and agreement is still never inferred from prose.
+
+- **Lenient control parsing.** `parseAgentControl` now takes the last `<agent-control>` block and ignores reader-facing prose before or after it (a sign-off line, a stray code fence). The JSON shape and the version-2 schema stay strict, so a malformed or off-contract block still fails closed. The earlier "nothing after the block" rule was the main cause of false `invalid_control` stops when the agents had genuinely agreed. The prompt still asks agents to end with the block and add nothing after it.
+- **Agreement-driven early stop with a work safeguard.** Early stop no longer requires the completion state to be terminal. It fires when the round is valid, delta-free, and `converged`, provided no open item still requires another agent round. That guard — an open `disagreement` or `remaining_work` item — is the machine-checkable safeguard that agreement never cuts off real work: while any agent is still changing the proposal (`substantiveDelta`) or has raised remaining work, the rounds continue. Completion becomes reported context rather than a gate, so an agreed answer that still needs the user or an outside check stops and surfaces those pending points, and an agreed-but-`incomplete` result is reported as a settled agreement rather than a completed task. The stop reason still follows the aggregate completion state. Prompts now instruct agents to signal genuine convergence (`converged` + `substantiveDelta: false`), to use `needs_user`/`blocked` with the matching item when only the user or an outside check remains, and to reserve `remaining_work` for work another round would truly add.
+- **Debate anchoring.** When a session is switched *into* debate from another mode, the subject is the most recent substantive agent answer already in the session, passed to the debate prompt verbatim and bounded so it survives transcript trimming. The user's latest message ("let's debate this") is treated as the trigger, not the proposition, unless it states a proposition of its own. This applies only to a genuine switch: a session that was already in debate treats a new message as a fresh proposition, not a re-debate of the last rebuttal. A debate with no prior answer still uses the user's message as the question.
+
+Unresolved rounds now report in plain language — the agreement was not reached, more rounds are needed, and the open disagreement points the agents raised — rather than only an opaque control-data message. A round that fails purely on a control inconsistency (rather than an unreadable block) still names that cause but now lists the raised points alongside it.
