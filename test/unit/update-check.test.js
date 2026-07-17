@@ -66,3 +66,18 @@ test("checkProviderUpdate treats an unparseable latest (200 with no version) as 
     assert.equal(result.updateAvailable, false);
   }
 });
+
+test("checkProviderUpdate treats an unparseable INSTALLED version as a failed check, not 'up to date'", async () => {
+  // Installed, but `--version` yields no semver → `current` is empty. Comparing would silently render
+  // "✓ Updated"; it must report a failed check instead. getReadiness is injected so this is deterministic.
+  const result = await checkProviderUpdate("codex", {
+    getReadiness: async () => ({ installed: true, version: "codex (dev build, no semver)" }),
+    fetchLatest: async () => "1.2.3",
+    now: 1000 + 60 * 60 * 1000,
+  });
+  assert.equal(result.supported, true);
+  assert.equal(result.installed, true);
+  assert.equal(result.current, "");
+  assert.equal(result.checkFailed, true);
+  assert.equal(result.updateAvailable, false);
+});

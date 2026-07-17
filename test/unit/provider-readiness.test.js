@@ -49,12 +49,16 @@ test("a provider missed by PATH search is auto-detected and trusted via its disc
   const store = join(dir, "trusted-cli.json");
   configureTrustedCliStore(store);
   invalidateProviderReadiness("codex");
+  // Force the primary `codex` lookup to miss regardless of the host — a developer who actually has Codex
+  // on PATH would otherwise pass the primary check, so the injected discover would never run and
+  // autoTrusted would be false. An empty PATH makes bare "codex" unresolvable; the discovered binary is
+  // verified by its absolute path, so it still runs. Restored in finally.
+  const savedPath = process.env.PATH;
+  process.env.PATH = "";
 
   try {
-    // Assumes the host has no natively-resolvable `codex` directly on PATH (the target scenario is
-    // an npm shim, which the resolver rejects) — otherwise the primary check would pass and the
-    // injected discover would never run. Bare "codex" not resolving forces readiness to discover the
-    // native binary, verify it runs, auto-trust it, and report installed — no manual Trust & check.
+    // Bare "codex" can't resolve (empty PATH), so readiness must discover the native binary, verify it
+    // runs, auto-trust it, and report installed — no manual Trust & check.
     const status = await providerReadiness("codex", { refresh: true, discover: async () => [bin] });
     assert.equal(status.installed, true);
     assert.equal(status.autoTrusted, true);
@@ -71,7 +75,10 @@ test("a provider missed by PATH search is auto-detected and trusted via its disc
     });
     assert.equal(again.installed, true);
   } finally {
+    process.env.PATH = savedPath;
     invalidateProviderReadiness("codex");
+    // Clears the in-memory `codex` approval too (configureTrustedCliStore resets the map), so this
+    // test's auto-trust can't leak forward and make a later test think codex is already trusted.
     configureTrustedCliStore("");
     await rm(dir, { recursive: true, force: true });
   }

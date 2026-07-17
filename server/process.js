@@ -83,6 +83,11 @@ let persistApprovedChain = Promise.resolve();
 
 export function configureTrustedCliStore(filePath) {
   trustedCliStorePath = String(filePath || "");
+  // Disabling the store (empty path) drops any in-memory approvals — with no backing store they can't
+  // be trusted, and a test uses this to reset trusted state so an approval can't leak into a later case.
+  // Pointing at a real path keeps existing approvals (a failed re-approve must still roll back to them);
+  // callers re-hydrate the new store separately.
+  if (!trustedCliStorePath) approvedProviderCommands.clear();
 }
 
 export function approvedProviderCommand(providerId) {

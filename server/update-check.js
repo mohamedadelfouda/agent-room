@@ -63,12 +63,17 @@ function isUpdatable(definition) {
   return Boolean(definition && Array.isArray(definition.updateArgs) && definition.updateArgs.length > 0 && definition.updatePackage);
 }
 
-export async function checkProviderUpdate(providerId, { fetchLatest = fetchLatestFromNpm, now = Date.now() } = {}) {
+export async function checkProviderUpdate(providerId, { fetchLatest = fetchLatestFromNpm, now = Date.now(), getReadiness = providerReadiness } = {}) {
   const definition = provider(providerId);
   if (!isUpdatable(definition)) return { supported: false };
-  const readiness = await providerReadiness(providerId);
+  const readiness = await getReadiness(providerId);
   if (!readiness.installed) return { supported: true, installed: false };
   const current = parseSemver(readiness.version);
+  if (!current) {
+    // Installed, but its --version output carries no parseable semver — we can't compare, so report a
+    // failed check (the UI falls back to a plain Update) rather than a wrong "✓ Updated".
+    return { supported: true, installed: true, current: "", latest: "", updateAvailable: false, checkFailed: true };
+  }
   const cached = latestCache.get(definition.updatePackage);
   let latest = cached && cached.expiresAt > now ? cached.value : "";
   if (!latest) {
