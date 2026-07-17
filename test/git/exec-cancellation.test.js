@@ -286,6 +286,12 @@ test("an execution validation failure surfaces a localizable code, not a hardcod
     assert.ok(error, "an exec_error event was emitted");
     // The client maps this code → localized text (errorProjectPathRequired) instead of a server-authored string.
     assert.equal(error.code, "project_path_required");
+    // The same code is persisted on the transcript message, so a reload after a missed SSE terminal event
+    // can localize the specific failure instead of falling back to the generic "execution failed" line.
+    const stored = await getSession(session.id);
+    const failMessage = stored.messages.filter((message) => message.phase === "exec_error").pop();
+    assert.ok(failMessage, "an exec_error message was persisted");
+    assert.equal(failMessage.meta?.code, "project_path_required");
     assert.equal(events.some((event) => event.type === "exec_ready"), false);
     assert.equal(isExecuting(session.id), false);
   } finally {

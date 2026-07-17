@@ -450,7 +450,9 @@ async function runExecuteAndReviewClaimed(sessionId, req, emit, releaseActivity)
           emit({ type: "exec_error", error: terminalError, code: terminalErrorCode });
           try {
             await mutateSession(sessionId, (current) => {
-              current.messages.push({ id: crypto.randomUUID(), createdAt: new Date().toISOString(), author: "system", content: `Execution failed: ${terminalError}`, phase: "exec_error", mode: current.mode });
+              // Persist the error code with the transcript so a reload after a missed SSE terminal event can
+              // localize the specific failure (validation / stop / generic) instead of a generic fallback line.
+              current.messages.push({ id: crypto.randomUUID(), createdAt: new Date().toISOString(), author: "system", content: `Execution failed: ${terminalError}`, phase: "exec_error", mode: current.mode, meta: { code: terminalErrorCode } });
             });
           } catch {}
         }

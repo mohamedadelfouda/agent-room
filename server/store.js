@@ -464,7 +464,7 @@ export async function createSession(title = "New session") {
   const session = {
     id: crypto.randomUUID(),
     sessionSchemaVersion: CURRENT_SESSION_SCHEMA_VERSION,
-    title: truncateTitle(String(title || "New session").trim()),
+    title: truncateTitle(String(title ?? "").trim() || "New session"),
     status: "idle",
     mode: "collaboration",
     createdAt: now,

@@ -411,7 +411,15 @@ const server = http.createServer(async (req, res) => {
       const body = await readJson(req);
       const projectPath = String(body.path || "").trim();
       if (!projectPath) return json(res, 400, apiErrorPayload("project_path_required", "Project path is required"));
-      let stat; try { stat = await fs.stat(projectPath); } catch { return json(res, 400, apiErrorPayload("project_path_not_found", "Project path not found")); }
+      let stat;
+      try { stat = await fs.stat(projectPath); }
+      catch (error) {
+        // A missing path (ENOENT) or a path whose parent component is a file (ENOTDIR) is a 400 "not found" —
+        // matching projectIdentity's handling; permission, descriptor-exhaustion, and other I/O errors are real
+        // faults, so let them reach the global handler (500) instead of being masked as "not found" here.
+        if (["ENOENT", "ENOTDIR"].includes(error?.code)) return json(res, 400, apiErrorPayload("project_path_not_found", "Project path not found"));
+        throw error;
+      }
       if (!stat.isDirectory()) return json(res, 400, apiErrorPayload("project_path_not_directory", "Project path is not a directory"));
       const git = await isGitRepo(projectPath);
       const identity = await projectIdentity(projectPath);

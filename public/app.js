@@ -77,6 +77,16 @@ function localizedFailure(failure) {
   return t(key) || t("errorUnexpected");
 }
 
+// A persisted app-error message (an exec_error, or a run failure) resolves its localized text from the
+// stored error `code` when present, so reloading the transcript shows the same specific explanation the
+// live SSE announcement did — not a generic line. Legacy messages (no code) and run failures fall back to
+// their existing generic keys.
+function appErrorMessageKey(message) {
+  if (message.phase !== "exec_error") return "runFailed";
+  const code = message.meta?.code;
+  return code ? errorMessageKey({ code }) : "executionFailed";
+}
+
 function failureFromPayload(payload) {
   return Object.assign(new Error(failureDetail(payload)), payload);
 }
@@ -1053,7 +1063,7 @@ function renderMessages() {
       const report = meta.outcome ? discussionOutcomeReport(meta.outcome, lang) : null;
       let systemBody;
       if (appError) {
-        systemBody = esc(msg.phase === "exec_error" ? t("executionFailed") : t("runFailed"));
+        systemBody = esc(t(appErrorMessageKey(msg)));
       } else if (report?.text) {
         const items = report.items.map((item) => `<div class="outcome-item" dir="auto">• ${bdi(item)}</div>`).join("");
         systemBody = `${esc(report.text)}${items}`;
@@ -1082,7 +1092,7 @@ function renderMessages() {
     const latestAppError = latest.meta?.status === "error" || latest.phase === "exec_error";
     let body;
     if (latestAppError) {
-      body = t(latest.phase === "exec_error" ? "executionFailed" : "runFailed");
+      body = t(appErrorMessageKey(latest));
     } else {
       const outcome = latest.meta?.outcome ? discussionOutcomeReport(latest.meta.outcome, lang) : null;
       body = outcome?.text ? [outcome.text, ...outcome.items].join(" ") : String(latest.content || "");

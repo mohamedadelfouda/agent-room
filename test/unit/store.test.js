@@ -254,6 +254,22 @@ test('renameSession rejects an empty or whitespace-only title', async () => {
   }
 });
 
+test('createSession applies the "New session" fallback after trimming a blank title', async () => {
+  // A whitespace-only title used to trim down to "" and ship as an empty title; the fallback is now applied
+  // after the trim (mirrors renameSession's guard). A real title with surrounding whitespace is still trimmed
+  // rather than replaced.
+  const blank = await createSession('   ');
+  const empty = await createSession('');
+  const real = await createSession('  My session  ');
+  try {
+    assert.equal(blank.title, 'New session');
+    assert.equal(empty.title, 'New session');
+    assert.equal(real.title, 'My session');
+  } finally {
+    await Promise.all([cleanup(blank.id), cleanup(empty.id), cleanup(real.id)]);
+  }
+});
+
 test('renameSession truncates a title past the 160-code-point limit without splitting a surrogate pair', async () => {
   const session = await createSession('rename-long');
   try {
