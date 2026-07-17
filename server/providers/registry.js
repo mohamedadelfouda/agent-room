@@ -20,6 +20,7 @@ const providers = new Map([
       url: "https://code.claude.com/docs/en/install",
     },
     updateArgs: ["update"],
+    updatePackage: "@anthropic-ai/claude-code",
     defaultModel: "sonnet",
     models: ["default", "best", "fable", "sonnet", "opus", "haiku"],
     efforts: ["low", "medium", "high", "xhigh", "max"],
@@ -38,6 +39,8 @@ const providers = new Map([
       }),
       url: "https://github.com/openai/codex",
     },
+    updateArgs: ["update"],
+    updatePackage: "@openai/codex",
     defaultModel: "",
     models: [],
     efforts: ["minimal", "low", "medium", "high", "xhigh"],
@@ -56,10 +59,10 @@ export function providerIds() {
 }
 
 export function providerCatalog() {
-  return [...providers.values()].map(({ run, discoverModels, commandEnv, updateArgs, ...definition }) => ({
+  return [...providers.values()].map(({ run, discoverModels, commandEnv, updateArgs, updatePackage, ...definition }) => ({
     ...definition,
     dynamicModels: Boolean(discoverModels),
-    canUpdate: Array.isArray(updateArgs) && updateArgs.length > 0,
+    canUpdate: Array.isArray(updateArgs) && updateArgs.length > 0 && Boolean(updatePackage),
   }));
 }
 
