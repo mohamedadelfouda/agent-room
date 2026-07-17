@@ -7,6 +7,8 @@ import {
   requestExecCancellation,
   trackExecChild,
   claimExecTerminal,
+  enterExecFinalizing,
+  execIsFinalizing,
 } from "../../server/exec-state.js";
 
 // A child stand-in that only needs `.once("close", …)` — the same surface trackExecChild uses.
@@ -71,6 +73,41 @@ test("a child spawned after a terminal stop is likewise refused", () => {
   claimExecTerminal(attempt, "stopped");
   assert.equal(execWasCancelled(attempt), true);
   assert.equal(trackExecChild(attempt, fakeChild()), false);
+});
+
+test("a child spawned after the run finished is refused — no orphan process past the run's end", () => {
+  const attempt = createExecAttempt();
+  claimExecTerminal(attempt, "finished");
+  // `finished` is terminal but not a *cancellation*; the guard is `status !== "running"`, so a late
+  // child (after which no stopExec/finally is left to kill it) is still refused. execWasCancelled
+  // alone would have let it through.
+  assert.equal(execWasCancelled(attempt), false);
+  assert.equal(trackExecChild(attempt, fakeChild()), false);
+});
+
+test("finalizing is a committed, non-cancellable state entered only from running", () => {
+  const attempt = createExecAttempt();
+  assert.equal(enterExecFinalizing(attempt), true);
+  assert.equal(attempt.status, "finalizing");
+  assert.equal(execIsFinalizing(attempt), true);
+  // A Stop landing during the final save is refused, so it can't force-finalize the session mid-write.
+  assert.equal(requestExecCancellation(attempt), false);
+  // Finalizing is committed-to-finish, not cancelled — so the run body proceeds with its save.
+  assert.equal(execWasCancelled(attempt), false);
+  // A child must not spawn during finalizing (nothing left to track/kill it).
+  assert.equal(trackExecChild(attempt, fakeChild()), false);
+  // Only reachable from running: a second attempt is refused.
+  assert.equal(enterExecFinalizing(attempt), false);
+  // It settles to finished via the normal terminal claim.
+  assert.equal(claimExecTerminal(attempt, "finished"), true);
+  assert.equal(attempt.status, "finished");
+});
+
+test("a Stop that already won blocks entering finalizing, so the caller aborts the save", () => {
+  const attempt = createExecAttempt();
+  requestExecCancellation(attempt); // Stop landed first
+  assert.equal(enterExecFinalizing(attempt), false);
+  assert.equal(attempt.status, "cancelling");
 });
 
 test("the terminal transition is claimed exactly once", () => {

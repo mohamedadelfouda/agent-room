@@ -12,7 +12,7 @@ import path from "node:path";
 import { assertTrustedProject, projectIdentity } from "./project.js";
 import { githubRepository } from "./github-remote.js";
 import { claimSessionActivity } from "./session-activity.js";
-import { createExecAttempt, requestExecCancellation, execWasCancelled, trackExecChild, claimExecTerminal, EXEC_STOPPED_MESSAGE } from "./exec-state.js";
+import { createExecAttempt, requestExecCancellation, execWasCancelled, trackExecChild, claimExecTerminal, enterExecFinalizing, execIsFinalizing, EXEC_STOPPED_MESSAGE } from "./exec-state.js";
 
 const activeExec = new Map();
 const decisionLocks = new Map();
@@ -51,11 +51,18 @@ function settleExec(state, timeoutMs) {
 // trusted — until reconcileExecutionWorktrees reclaims it on the next startup. Idempotent via the
 // single terminal claim, so this and the body's finally never double-release or double-emit.
 function finalizeStalledExecStop(id, state) {
-  if (!claimExecTerminal(state, "stopped")) return;
+  // A cancelling run that stalled past the settle window genuinely stopped → claim "stopped" and
+  // surface exec_error. A *finalizing* run has already committed its result (its exec_ready is imminent
+  // or emitted); if only its slow, recoverable clone-cleanup stalled we still release the session so it
+  // can't wedge as busy, but claim "finished" and stay silent — a forced exec_error would contradict
+  // that exec_ready. `finalizing` is read before the idempotent claim flips status; a run that finished
+  // normally in the meantime makes the claim (and this whole call) a no-op.
+  const finalizing = execIsFinalizing(state);
+  if (!claimExecTerminal(state, finalizing ? "finished" : "stopped")) return;
   if (activeExec.get(id) === state) activeExec.delete(id);
   state.releaseProjectScope?.();
   state.releaseActivity?.();
-  state.emit?.({ type: "exec_error", error: EXEC_STOPPED_MESSAGE });
+  if (!finalizing) state.emit?.({ type: "exec_error", error: EXEC_STOPPED_MESSAGE });
 }
 
 // Stop an in-flight execution. Distinguishes: already_finished (nothing running), process_terminated
@@ -65,16 +72,23 @@ export async function stopExec(id, { settleTimeoutMs = 5000 } = {}) {
   const s = activeExec.get(id);
   if (!s) return { stopped: false, status: "already_finished" };
   if (!requestExecCancellation(s)) {
-    // A Stop is already in flight; don't re-run terminate. Still ensure the session is finalized so
-    // a second Stop click can't return before the first one's stall path releases it.
+    // The run is no longer `running`: either a Stop is already in flight, or it entered its
+    // non-cancellable finalizing save. Wait bounded for it to unwind; if it stalls, force-finalize so
+    // the session can't wedge as busy (e.g. a slow clone delete inside the blocked_secret finalize).
+    // finalizeStalledExecStop distinguishes a stalled *cancel* (surfaces exec_error) from a stalled
+    // *finalize* (releases silently — its result stands, exec_ready imminent), so neither leaves the
+    // session stuck. `finalizing` (captured before the await) only picks this Stop's reported status.
+    const finalizing = execIsFinalizing(s);
     if (!(await settleExec(s, settleTimeoutMs))) finalizeStalledExecStop(id, s);
-    return { stopped: true, status: "stop_requested" };
+    return finalizing ? { stopped: false, status: "already_finished" } : { stopped: true, status: "stop_requested" };
   }
   const results = await Promise.all([...s.children].map((child) => terminateProcess(child)));
   if (!(await settleExec(s, settleTimeoutMs))) finalizeStalledExecStop(id, s);
   return {
     stopped: results.every(Boolean),
-    status: results.length ? "process_terminated" : "stop_requested",
+    // `process_terminated` only when at least one child was actually killed — not merely when children
+    // existed (an all-failed terminate must not masquerade as a successful process termination).
+    status: results.some(Boolean) ? "process_terminated" : "stop_requested",
   };
 }
 
@@ -303,6 +317,10 @@ async function runExecuteAndReviewClaimed(sessionId, req, emit, releaseActivity)
 
     const blockSecretExecution = async ({ diff, secretFindings }) => {
       pendingWorktreeNeedsSecretPurge = true;
+      // Commit to finalizing before persisting the blocked record. A Stop that already landed makes
+      // this throw (the catch discards the clone with its secrets purged); a Stop that lands during the
+      // saves below is then refused, so it can't force-finalize the session mid-write.
+      if (!enterExecFinalizing(state)) throw new Error(EXEC_STOPPED_MESSAGE);
       emit({ type: "exec_phase", phase: "blocked_secret", agent: executor });
       await mutateSession(sessionId, (current) => {
         current.executions ||= [];
@@ -360,10 +378,16 @@ async function runExecuteAndReviewClaimed(sessionId, req, emit, releaseActivity)
       state.releaseProjectScope = releaseScope;
       let r;
       try {
+        // registerProjectScope (fs.realpath) above and scratchWorkspacePath() here both await, so a
+        // Stop can be accepted between the guard on the `if` above and the spawn below. Re-check after
+        // the last await and before running, so an accepted Stop never starts the reviewer process —
+        // the registerChild guard only kills *after* spawn. The finally still releases the scope.
+        const cwd = mcpProject ? await scratchWorkspacePath() : execResult.worktree.path;
+        if (execWasCancelled(state)) throw new Error(EXEC_STOPPED_MESSAGE);
         r = await reviewerProvider.run({
           prompt: reviewPrompt(task, reviewedResult),
           config: { ...(req.agents?.[reviewer] || {}), permission: mcpProject ? "project" : "planread", mcpSessionId: mcpProject ? session.id : "" },
-          cwd: mcpProject ? await scratchWorkspacePath() : execResult.worktree.path,
+          cwd,
           onEvent: (event) => emit({ type: "exec_activity", agent: reviewer, event: event?.text ? { ...event, text: redact(event.text) } : event }),
           registerChild,
         });
@@ -392,6 +416,10 @@ async function runExecuteAndReviewClaimed(sessionId, req, emit, releaseActivity)
       secretFindings: reviewSnapshot.secretFindings,
       review, status: "awaiting_user", createdAt: new Date().toISOString(),
     };
+    // Commit to finalizing before persisting the awaiting_user record. A Stop that already landed makes
+    // this throw (the catch discards the clone); a Stop that lands during the save/emit below is then
+    // refused, so it can't force-finalize the session mid-write and race a spurious exec_error.
+    if (!enterExecFinalizing(state)) throw new Error(EXEC_STOPPED_MESSAGE);
     await mutateSession(sessionId, (current) => {
       current.executions ||= [];
       current.executions.push(record);

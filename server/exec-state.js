@@ -13,6 +13,7 @@ export const EXEC_STOPPED_MESSAGE = "Execution stopped by user";
 export function createExecAttempt() {
   return {
     // running → cancelling (a Stop was accepted) → stopped | finished (terminal, claimed once).
+    // running → finalizing (committed to persist the result, non-cancellable) → finished.
     status: "running",
     children: new Set(),
   };
@@ -24,8 +25,8 @@ export function execWasCancelled(attempt) {
   return attempt.status === "cancelling" || attempt.status === "stopped";
 }
 
-// Record a Stop request. Returns false when the run cannot accept one (already cancelling, or
-// already terminal) so stopExec can report "already stopping" instead of re-running terminate +
+// Record a Stop request. Returns false when the run cannot accept one (already cancelling, already
+// terminal, or finalizing) so stopExec can report "already stopping" instead of re-running terminate +
 // settle a second time.
 export function requestExecCancellation(attempt) {
   if (attempt.status !== "running") return false;
@@ -33,14 +34,34 @@ export function requestExecCancellation(attempt) {
   return true;
 }
 
-// Track a freshly spawned child. Returns true when tracked (run still live). Returns false when a
-// Stop already landed — the child must never run, so the caller kills it immediately. runProcess
+// Enter the non-cancellable finalizing state before the run persists its terminal result (the
+// awaiting_user record, or a blocked_secret record). Once here, requestExecCancellation refuses a Stop
+// (status is no longer `running`), so a Stop cannot force-finalize the session out from under the
+// in-flight save and then race a contradictory exec_error against the imminent exec_ready. Returns
+// false when the run already left `running` (a Stop won the race first) so the caller aborts the save.
+export function enterExecFinalizing(attempt) {
+  if (attempt.status !== "running") return false;
+  attempt.status = "finalizing";
+  return true;
+}
+
+// True while the run is committed to persisting its result (past the last cancellation gate). stopExec
+// uses this to wait for the run's own finally to emit the terminal event instead of force-finalizing.
+export function execIsFinalizing(attempt) {
+  return attempt.status === "finalizing";
+}
+
+// Track a freshly spawned child. Returns true when tracked (run still live). Returns false once the
+// run has left `running` — the child must never run, so the caller kills it immediately. runProcess
 // calls this synchronously right after spawn (no await between spawn and this call) and stopExec
-// runs on the same single thread, so the cancel check here is atomic with the spawn: a Stop that
-// lands first makes this return false (the caller kills the child now); a spawn that wins puts the
-// child in `children` for stopExec's terminate loop to kill. No child can slip past an accepted Stop.
+// runs on the same single thread, so the check here is atomic with the spawn: a Stop that lands first
+// makes this return false (the caller kills the child now); a spawn that wins puts the child in
+// `children` for stopExec's terminate loop to kill. No child can slip past an accepted Stop.
+// The guard is `status !== "running"`, not `execWasCancelled`: the terminal `finished` and the
+// non-cancellable `finalizing` states must reject a late child too — after either, no stopExec or
+// finally is left to track or kill it, so it would leak as an orphan process past the run's end.
 export function trackExecChild(attempt, child, onClose) {
-  if (execWasCancelled(attempt)) return false;
+  if (attempt.status !== "running") return false;
   attempt.children.add(child);
   child.once("close", () => {
     attempt.children.delete(child);

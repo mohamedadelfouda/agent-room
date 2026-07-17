@@ -195,6 +195,78 @@ test("a stop force-finalizes an execution whose provider never settles", async (
   }
 });
 
+test("a run that finalizes to awaiting_user emits exec_ready with no exec_error, and a later stop is a clean no-op", async (t) => {
+  const dir = repository();
+  const session = await trustedSession("exec-finalize-awaiting", dir);
+  const events = [];
+
+  // Both agents succeed: the executor writes a real change, the reviewer approves — so the run reaches
+  // the finalizing save and persists an awaiting_user record.
+  t.mock.method(provider("codex"), "run", async ({ cwd }) => {
+    writeFileSync(join(cwd, "feature.txt"), "new feature\n");
+    return { text: "executor output", model: "test", durationMs: 1, exitCode: 0 };
+  });
+  t.mock.method(provider("claude"), "run", async () => ({ text: "APPROVE — looks correct", model: "test", durationMs: 1, exitCode: 0 }));
+
+  try {
+    await runExecuteAndReview(session.id, execRequest(), (event) => events.push(event));
+
+    // The committed result stands: exec_ready fired, and — the guarantee this PR restores — no
+    // exec_error was raced against it. The awaiting_user record is persisted for the user's decision.
+    assert.equal(events.some((e) => e.type === "exec_ready"), true);
+    assert.equal(events.some((e) => e.type === "exec_error"), false);
+    const saved = await getSession(session.id);
+    assert.equal((saved.executions || []).some((e) => e.status === "awaiting_user"), true);
+    assert.equal(isExecuting(session.id), false);
+
+    // The run already finished; a Stop now reports already_finished and must not surface a spurious
+    // exec_error after the fact.
+    assert.deepEqual(await stopExec(session.id), { stopped: false, status: "already_finished" });
+    assert.equal(events.filter((e) => e.type === "exec_error").length, 0);
+  } finally {
+    await cleanupSession(session.id);
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a stop racing the finalize never emits both exec_error and exec_ready, and always frees the session", async (t) => {
+  const dir = repository();
+  const session = await trustedSession("exec-finalize-race", dir);
+  const events = [];
+  const reviewerDone = deferred();
+
+  t.mock.method(provider("codex"), "run", async ({ cwd }) => {
+    writeFileSync(join(cwd, "feature.txt"), "new feature\n");
+    return { text: "executor output", model: "test", durationMs: 1, exitCode: 0 };
+  });
+  // Signal the moment review completes: the run then crosses into its finalizing save, so a stop
+  // issued now genuinely races the finalize latch (rather than landing early, during the executor).
+  t.mock.method(provider("claude"), "run", async () => {
+    reviewerDone.resolve();
+    return { text: "APPROVE", model: "test", durationMs: 1, exitCode: 0 };
+  });
+
+  try {
+    const runPromise = runExecuteAndReview(session.id, execRequest(), (event) => events.push(event));
+    await reviewerDone.promise;
+    // The stop either lands just before enterExecFinalizing (honored → exec_error, no record) or is
+    // refused by it (→ exec_ready, awaiting_user). The invariant this PR guarantees holds either way:
+    // never BOTH, exactly one terminal outcome, and the session is always freed (never wedged busy).
+    await stopExec(session.id);
+    await runPromise;
+
+    const errors = events.filter((e) => e.type === "exec_error").length;
+    const readies = events.filter((e) => e.type === "exec_ready").length;
+    assert.ok(!(errors > 0 && readies > 0), `must not emit both exec_error and exec_ready (got ${errors} error, ${readies} ready)`);
+    assert.equal(errors + readies, 1, "exactly one terminal outcome");
+    assert.equal(isExecuting(session.id), false);
+    assert.doesNotThrow(() => claimSessionActivity(session.id, "post-race-check")());
+  } finally {
+    await cleanupSession(session.id);
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("stopping a session that is not executing reports already_finished", async () => {
   const result = await stopExec("no-such-session");
   assert.deepEqual(result, { stopped: false, status: "already_finished" });
