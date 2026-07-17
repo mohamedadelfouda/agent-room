@@ -36,6 +36,7 @@ import { resolveMcpBridgeGrant, setMcpBridgeUrl } from "./mcp-config.js";
 export { configureConnectorSecretStore, hydrateConnectorSecrets } from "./connector-config.js";
 import { connectorConfigurationCatalog, saveConnectorConfiguration } from "./connector-config.js";
 import { apiErrorPayload, expectedApiError } from "./api-errors.js";
+import { getSetupStatus } from "./setup-status.js";
 import { acquireRuntimeLock } from "./runtime-lock.js";
 import {
   assertProvidersReady,
@@ -470,6 +471,10 @@ const server = http.createServer(async (req, res) => {
     }
     if (req.method === "GET" && url.pathname === "/api/agents/status") {
       return json(res, 200, await detectAgents());
+    }
+    // Local, no-network readiness for the Setup Doctor: dimensional provider state + Git + capabilities.
+    if (req.method === "GET" && url.pathname === "/api/setup/status") {
+      return json(res, 200, await getSetupStatus());
     }
     // Reads the npm registry (network) to report which agent CLIs have a newer version, so the UI can
     // show UPDATE vs UPDATED. Separate from status so status stays fast/offline; fails soft.
