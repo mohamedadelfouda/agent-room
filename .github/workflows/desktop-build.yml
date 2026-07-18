@@ -29,6 +29,15 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "22"
+      # A tagged release must be internally consistent before anything is built: the tag, package.json's
+      # version, and a matching CHANGELOG section have to agree, so a release can never be mislabeled or
+      # undocumented. Fails the build (and therefore the dependent release job) on any mismatch.
+      - name: Verify release tag matches package.json and CHANGELOG
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash # pin bash so "$TAG_NAME" resolves the same on the Windows runner (default pwsh) as on Linux/macOS
+        env:
+          TAG_NAME: ${{ github.ref_name }} # via env, not inline ${{ }}, to avoid shell-injection from a crafted tag
+        run: node scripts/check-release-version.mjs "$TAG_NAME"
       - uses: pnpm/action-setup@a7487c7e89a18df4991f7f222e4898a00d66ddda # v4.1.0
         with:
           version: 10.12.1
@@ -128,7 +137,12 @@ jobs:
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
-          if [ -n "$WINDOWS_CERTIFICATE_BASE64" ] && [ -n "$WINDOWS_CERTIFICATE_PASSWORD" ] \
+          # A prerelease tag (vX.Y.Z-rc.1, -beta, …) must publish as a pre-release regardless of signing —
+          # otherwise a fully-signed RC would be promoted to a normal/"Latest" GitHub release.
+          if [[ "$GITHUB_REF_NAME" == *-* ]]; then
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::$GITHUB_REF_NAME is a prerelease tag — publishing as a pre-release."
+          elif [ -n "$WINDOWS_CERTIFICATE_BASE64" ] && [ -n "$WINDOWS_CERTIFICATE_PASSWORD" ] \
              && [ -n "$MAC_CERTIFICATE_BASE64" ] && [ -n "$MAC_CERTIFICATE_PASSWORD" ] \
              && [ -n "$APPLE_ID" ] && [ -n "$APPLE_APP_SPECIFIC_PASSWORD" ] && [ -n "$APPLE_TEAM_ID" ]; then
             echo "prerelease=false" >> "$GITHUB_OUTPUT"
