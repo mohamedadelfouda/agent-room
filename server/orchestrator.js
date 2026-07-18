@@ -605,6 +605,7 @@ async function runOrchestrationClaimed({ sessionId, request, validatedRequest, e
         exitCode: result.exitCode ?? null, status: "completed",
         contextChars, contextMessages, retryCount: 0,
         outputTruncated: Boolean(result.outputTruncated),
+        usage: result.usage ?? null,
         ...(controlRepaired ? { controlRepaired: true } : {}),
         ...(rawInvalidControl ? { controlInvalidRaw: rawInvalidControl } : {}),
       };

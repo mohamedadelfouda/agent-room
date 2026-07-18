@@ -59,6 +59,20 @@ test("malformed Claude stream events never become final or partial output", () =
   assert.deepEqual(events, [{ kind: "activity", text: "Claude emitted an unreadable event" }]);
 });
 
+test("the Claude collector captures token usage and cost from the result event", () => {
+  const collector = createClaudeStreamCollector(() => {});
+  collector.onStdoutLine(JSON.stringify({
+    type: "result", result: "done", session_id: "s",
+    usage: { input_tokens: 120, output_tokens: 40, cache_read_input_tokens: 30 },
+    total_cost_usd: 0.0021,
+  }));
+  const snap = collector.snapshot();
+  assert.equal(snap.usage.raw.input_tokens, 120);
+  assert.equal(snap.usage.raw.output_tokens, 40);
+  assert.equal(snap.usage.costUsd, 0.0021);
+  assert.equal(createClaudeStreamCollector(() => {}).snapshot().usage, null); // no usage event → null
+});
+
 function flagValue(args, flag) {
   const index = args.indexOf(flag);
   return index === -1 ? undefined : args[index + 1];

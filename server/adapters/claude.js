@@ -2,6 +2,7 @@ import { approvedProviderCommand, runProcess, validateOption, resolveAllowedComm
 import { redact } from "../logger.js";
 import { CappedText, agentTimeoutMs } from "../output-limits.js";
 import { claudeMcpLaunch } from "../mcp-config.js";
+import { buildUsage } from "../usage.js";
 
 function contentText(content) {
   if (typeof content === "string") return content;
@@ -21,6 +22,7 @@ function parseClaudeLine(line) {
 export function createClaudeStreamCollector(onEvent) {
   let sessionId = null;
   let resultError = null;
+  let usage = null;
   const finalText = new CappedText();
   const streamedText = new CappedText();
   return {
@@ -32,6 +34,7 @@ export function createClaudeStreamCollector(onEvent) {
       }
       sessionId ||= event.session_id || event.sessionId || event.message?.session_id || null;
       if (event.type === "result") {
+        if (event.usage || Number.isFinite(event.total_cost_usd)) usage = { raw: event.usage || {}, costUsd: event.total_cost_usd };
         if (event.is_error) resultError = typeof event.result === "string" ? event.result : "Claude reported an error";
         else if (typeof event.result === "string") finalText.replace(event.result);
         return;
@@ -52,6 +55,7 @@ export function createClaudeStreamCollector(onEvent) {
       return {
         sessionId,
         resultError,
+        usage,
         finalText: finalText.toString(),
         streamedText: streamedText.toString(),
         outputTruncated: finalText.truncated || streamedText.truncated,
@@ -138,7 +142,16 @@ export async function runClaude({ prompt, config, cwd, onEvent, registerChild })
   const durationMs = Date.now() - startedAt;
   const output = collector.snapshot();
   const firstLine = (text) => String(text || "").split(/\r?\n/).find((l) => l.trim()) || "";
-  const meta = { model, effort, exitCode: result.code, durationMs };
+  const usage = output.usage
+    ? buildUsage("claude", {
+        inputTokens: output.usage.raw.input_tokens,
+        cachedInputTokens: output.usage.raw.cache_read_input_tokens,
+        cacheWriteTokens: output.usage.raw.cache_creation_input_tokens,
+        outputTokens: output.usage.raw.output_tokens,
+        costUsd: output.usage.costUsd,
+      })
+    : null;
+  const meta = { model, effort, exitCode: result.code, durationMs, usage };
 
   if (result.code !== 0 || output.resultError) {
     const message = output.resultError || firstLine(result.stderr) || `Claude exited with code ${result.code}`;

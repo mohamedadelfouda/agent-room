@@ -403,7 +403,7 @@ async function runExecuteAndReviewClaimed(sessionId, req, emit, releaseActivity)
         releaseScope?.();
         state.releaseProjectScope = null;
       }
-      review = { agent: reviewer, text: redact(r.text), meta: { model: r.model ?? null, durationMs: r.durationMs ?? null, outputTruncated: Boolean(r.outputTruncated) } };
+      review = { agent: reviewer, text: redact(r.text), meta: { model: r.model ?? null, durationMs: r.durationMs ?? null, outputTruncated: Boolean(r.outputTruncated), usage: r.usage ?? null } };
     }
 
     if (execWasCancelled(state)) throw new Error(EXEC_STOPPED_MESSAGE);
