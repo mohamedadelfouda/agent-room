@@ -45,9 +45,11 @@ test("execute→review loop: Codex writes a fix in an isolated clone and Claude 
     // runtimeDir, so a readiness auto-trust can't write into (or leave changes in) the developer's real
     // data/ store. Missing source (fresh checkout) → no copy → readiness reports not-installed → skip.
     const isolatedTrustedStore = join(runtimeDir, "trusted-cli.json");
-    await copyFile(join(repoRoot, "data", "trusted-cli.json"), isolatedTrustedStore).catch(() => {});
+    await copyFile(join(repoRoot, "data", "trusted-cli.json"), isolatedTrustedStore).catch((error) => {
+      if (error.code !== "ENOENT") throw error; // only "no real store yet" (fresh checkout) is an expected skip; a real copy failure must fail loudly, not masquerade as one
+    });
     configureTrustedCliStore(isolatedTrustedStore);
-    await hydrateTrustedProviderCommands().catch(() => {});
+    await hydrateTrustedProviderCommands(); // ENOENT (missing store) is handled inside; a real read error should fail the test rather than silently skip
     const [codexReady, claudeReady] = await Promise.all([
       providerReadiness("codex", { refresh: true }),
       providerReadiness("claude", { refresh: true }),
