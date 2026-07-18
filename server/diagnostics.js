@@ -2,6 +2,7 @@ import { diagnosticLogTails, loggerHealth, redact } from "./logger.js";
 import { providerIds } from "./providers/registry.js";
 import { providerReadiness } from "./provider-readiness.js";
 import { githubConnectorReadiness } from "./connectors/registry.js";
+import { APP_VERSION } from "./app-update.js";
 
 function sharedHealth({ runtimeLock, startupReconciled, shuttingDown }) {
   return {
@@ -16,6 +17,7 @@ export function healthSnapshot(state) {
   const health = sharedHealth(state);
   return {
     ok: health.logging.healthy && (!health.runtimeLock || health.runtimeLock.healthy),
+    appVersion: APP_VERSION,
     node: process.version,
     platform: process.platform,
     uptimeSeconds: Math.round(process.uptime()),
