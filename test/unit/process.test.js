@@ -5,7 +5,9 @@ import { realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync, spawn } from "node:child_process";
-import { allowedCommand, approveProviderCommand, approvedProviderCommand, configureTrustedCliStore, hydrateTrustedProviderCommands, parsePosixProcessGroupLiveness, resolveAllowedCommand, runProcess, sanitizedAgentEnv, sanitizedGithubEnv, sanitizedPublicationEnv, terminateProcess } from "../../server/process.js";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { allowedCommand, approveProviderCommand, approvedProviderCommand, configureTrustedCliStore, hydrateTrustedProviderCommands, parsePosixProcessGroupLiveness, resolveAllowedCommand, runProcess, sanitizedAgentEnv, sanitizedGithubEnv, sanitizedPublicationEnv, terminateProcess, WINDOWS_CONFINEMENT_FAILURE_MARKER, WINDOWS_CONFINEMENT_FAILURE_EXIT } from "../../server/process.js";
 
 // Run node against a temp .js file so large scripts stay readable and cross-platform.
 function withScript(body, fn) {
@@ -392,4 +394,22 @@ test("runProcess returns small output intact and streams every line", async () =
     assert.match(r.stdout, /a\r?\nb/);
     assert.deepEqual(lines, ["a", "b"]);
   });
+});
+
+// Fail-open guard: AppContainer confinement is delivered only through the Windows Job Object wrapper, so
+// asking for it without that wrapper must be refused, never silently run unconfined. Cross-platform.
+test("runProcess rejects windowsConfinement without the Windows containTree wrapper", async () => {
+  await assert.rejects(
+    () => runProcess({ command: "node", args: ["-e", "0"], windowsConfinement: { containerName: "x", grants: [] } }),
+    /windowsConfinement requires containTree/,
+  );
+});
+
+// The confinement-failure contract (marker + reserved exit code) is duplicated between process.js and
+// windows-job-runner.ps1. Assert the PowerShell source still carries both literals so the two can't drift
+// apart unnoticed — this runs on every OS, not just when the Windows integration suite happens to run.
+test("windows-job-runner.ps1 keeps the confinement-failure marker and exit code in sync", () => {
+  const wrapper = readFileSync(fileURLToPath(new URL("../../server/windows-job-runner.ps1", import.meta.url)), "utf8");
+  assert.ok(wrapper.includes(WINDOWS_CONFINEMENT_FAILURE_MARKER), "wrapper must emit the confinement-failure marker process.js looks for");
+  assert.ok(wrapper.includes(`exit ${WINDOWS_CONFINEMENT_FAILURE_EXIT}`), "wrapper must exit with the reserved confinement-failure code process.js checks");
 });

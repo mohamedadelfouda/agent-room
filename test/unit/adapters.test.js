@@ -4,7 +4,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { claudePermissionArgs, createClaudeStreamCollector, runClaude } from "../../server/adapters/claude.js";
-import { codexSandboxMode, codexSecurityOverrides, prepareIsolatedCodexHome, runCodex } from "../../server/adapters/codex.js";
+import { codexSandboxMode, codexSecurityOverrides, prepareIsolatedCodexHome, runCodex, windowsExecOptIn } from "../../server/adapters/codex.js";
 
 // The allowlist must be enforced on the REAL execution path (runClaude/runCodex spawn the
 // agent), not only on the diagnostic endpoints. A client-supplied command that isn't the
@@ -126,19 +126,37 @@ test("Codex sandbox mode: read-only unless run; platforms without a sandbox fail
   }
 });
 
-test("runCodex refuses Windows execute unless AGENT_ROOM_ALLOW_UNSANDBOXED_WINDOWS_EXEC is set", async (t) => {
+test("windowsExecOptIn maps the two Windows execute opt-ins", () => {
+  // Neither set.
+  assert.deepEqual(windowsExecOptIn({}), { appcontainer: false, unsandboxed: false });
+  // AppContainer opt-in (preferred — runCodex confines when this is set on Windows).
+  assert.deepEqual(windowsExecOptIn({ AGENT_ROOM_WINDOWS_EXEC_APPCONTAINER: "1" }), { appcontainer: true, unsandboxed: false });
+  // Unsandboxed escape hatch.
+  assert.deepEqual(windowsExecOptIn({ AGENT_ROOM_ALLOW_UNSANDBOXED_WINDOWS_EXEC: "true" }), { appcontainer: false, unsandboxed: true });
+  // Both set — both flags true; runCodex prefers confinement.
+  assert.deepEqual(windowsExecOptIn({ AGENT_ROOM_WINDOWS_EXEC_APPCONTAINER: "yes", AGENT_ROOM_ALLOW_UNSANDBOXED_WINDOWS_EXEC: "on" }), { appcontainer: true, unsandboxed: true });
+  // Non-truthy values do not enable it.
+  assert.deepEqual(windowsExecOptIn({ AGENT_ROOM_WINDOWS_EXEC_APPCONTAINER: "0", AGENT_ROOM_ALLOW_UNSANDBOXED_WINDOWS_EXEC: "off" }), { appcontainer: false, unsandboxed: false });
+});
+
+test("runCodex refuses Windows execute unless an opt-in is set", async (t) => {
   if (process.platform !== "win32") { t.skip("the Windows-only fail-closed refusal path"); return; }
-  const prev = process.env.AGENT_ROOM_ALLOW_UNSANDBOXED_WINDOWS_EXEC;
+  // Clear BOTH opt-ins so the environment can't accidentally satisfy the gate.
+  const prevAc = process.env.AGENT_ROOM_WINDOWS_EXEC_APPCONTAINER;
+  const prevUn = process.env.AGENT_ROOM_ALLOW_UNSANDBOXED_WINDOWS_EXEC;
+  delete process.env.AGENT_ROOM_WINDOWS_EXEC_APPCONTAINER;
   delete process.env.AGENT_ROOM_ALLOW_UNSANDBOXED_WINDOWS_EXEC;
   try {
-    // Refused BEFORE any process spawn — the message names the opt-in env var.
+    // Refused BEFORE any process spawn — the message names both opt-in env vars.
     await assert.rejects(
       () => runCodex({ prompt: "hi", config: { command: "codex", permission: "run" }, cwd: process.cwd() }),
-      /unavailable on Windows|AGENT_ROOM_ALLOW_UNSANDBOXED_WINDOWS_EXEC/,
+      /unavailable on this platform|AGENT_ROOM_WINDOWS_EXEC_APPCONTAINER|AGENT_ROOM_ALLOW_UNSANDBOXED_WINDOWS_EXEC/,
     );
   } finally {
-    if (prev === undefined) delete process.env.AGENT_ROOM_ALLOW_UNSANDBOXED_WINDOWS_EXEC;
-    else process.env.AGENT_ROOM_ALLOW_UNSANDBOXED_WINDOWS_EXEC = prev;
+    if (prevAc === undefined) delete process.env.AGENT_ROOM_WINDOWS_EXEC_APPCONTAINER;
+    else process.env.AGENT_ROOM_WINDOWS_EXEC_APPCONTAINER = prevAc;
+    if (prevUn === undefined) delete process.env.AGENT_ROOM_ALLOW_UNSANDBOXED_WINDOWS_EXEC;
+    else process.env.AGENT_ROOM_ALLOW_UNSANDBOXED_WINDOWS_EXEC = prevUn;
   }
 });
 
