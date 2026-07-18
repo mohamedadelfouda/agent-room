@@ -19,6 +19,14 @@ Optional connector tools use the same rule. Read actions require per-session opt
 
 Node.js 22 or newer is required. Agent Room is meant to run as a **loopback HTTP server** and open in your browser.
 
+The quickest way — no clone, no build (once Agent Room is published to npm):
+
+```bash
+npx agent-room
+```
+
+`npx agent-room` starts the same loopback server and opens the browser; it stores sessions in `~/.agent-room` (override with `AGENT_ROOM_RUNTIME_DIR`). Or run from a source checkout:
+
 ```bash
 corepack enable
 pnpm install --prod --frozen-lockfile --ignore-scripts
