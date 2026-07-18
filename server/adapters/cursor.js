@@ -1,3 +1,6 @@
+import { mkdtemp, rm } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import { runProcess, validateOption } from "../process.js";
 import { redact } from "../logger.js";
 import { agentTimeoutMs } from "../output-limits.js";
@@ -84,6 +87,15 @@ async function resolveDescriptor() {
   return built.descriptor;
 }
 
+// Run `fn(configDir)` against a fresh, empty CURSOR_CONFIG_DIR so Cursor reads NO user MCPs/settings/project
+// trust for this run — the configIsolated review layer. Login persists (stored OS-side; verified an empty
+// config dir still authenticates). The temp dir is always cleaned up.
+async function withIsolatedConfig(fn) {
+  const configDir = await mkdtemp(path.join(os.tmpdir(), "agent-room-cursor-"));
+  try { return await fn(configDir); }
+  finally { await rm(configDir, { recursive: true, force: true }); }
+}
+
 export async function runCursor({ prompt, config, cwd, onEvent, registerChild }) {
   // Reviewer-only: an executor permission must never reach Cursor (it has no qualified write mode).
   const permission = config.permission || "read";
@@ -94,17 +106,18 @@ export async function runCursor({ prompt, config, cwd, onEvent, registerChild })
   const args = buildCursorReviewArgs({ descriptor, model });
   const stderr = [];
   const startedAt = Date.now();
-  const processResult = await runProcess({
+  const processResult = await withIsolatedConfig((configDir) => runProcess({
     command: descriptor.executable,
     args,
     input: prompt,               // prompt via stdin — no CLI length limit
     cwd,
+    env: { CURSOR_CONFIG_DIR: configDir }, // isolated per run — no user MCPs/settings/project trust leak in
     envPolicy: "agent",          // sanitized env: excludes NODE_OPTIONS/NODE_* (the envIsolated layer)
     timeoutMs: agentTimeoutMs(config.timeoutMs),
     containTree: true,           // Stop kills cursor-agent and its whole child tree
     registerChild,
     onStderrLine(line) { if (line.trim()) { stderr.push(line); onEvent?.({ kind: "stderr", text: line.slice(0, 500) }); } },
-  });
+  }));
   const durationMs = Date.now() - startedAt;
   const parsed = parseCursorResult(processResult.stdout);
   const meta = { model: model || "(default)", effort: config.effort || "", exitCode: processResult.code, durationMs };
@@ -127,13 +140,14 @@ export async function runCursor({ prompt, config, cwd, onEvent, registerChild })
 
 export async function discoverCursorModels() {
   const descriptor = await resolveDescriptor();
-  const result = await runProcess({
+  const result = await withIsolatedConfig((configDir) => runProcess({
     command: descriptor.executable,
     args: [...descriptor.fixedPrefixArgs, "--list-models"],
+    env: { CURSOR_CONFIG_DIR: configDir },
     envPolicy: "agent",
     timeoutMs: 15000,
     containTree: true,
-  });
+  }));
   if (result.code !== 0) throw new Error(redact((result.stderr || "Unable to read Cursor model catalog").split(/\r?\n/)[0]));
   return parseCursorModels(result.stdout);
 }
