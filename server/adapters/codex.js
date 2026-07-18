@@ -107,7 +107,10 @@ export function codexSecurityOverrides(permission = "read") {
 // review (read) through "run".
 export function codexSandboxMode(permission, platform = process.platform, allowUnsandboxedWindowsExec = false) {
   if (permission !== "run") return "read-only";
-  if (platform !== "win32") return "workspace-write";
+  // Allowlist the ONLY platforms with a proven, enforceable sandbox — macOS (seatbelt) + Linux (landlock).
+  // Every other platform (Windows, and anything without such a primitive) has no OS confinement, so writing
+  // there means unsandboxed "danger-full-access", allowed only behind the explicit opt-in.
+  if (platform === "darwin" || platform === "linux") return "workspace-write";
   return allowUnsandboxedWindowsExec ? "danger-full-access" : null;
 }
 
@@ -200,7 +203,7 @@ export async function runCodex({ prompt, config, cwd, onEvent, registerChild }) 
   const sandbox = codexSandboxMode(permission, process.platform, allowUnsandboxedWindowsExec);
   if (sandbox === null) {
     throw new Error(
-      "Codex execute is unavailable on Windows: it has no OS sandbox, so writing would require full, " +
+      "Codex execute is unavailable on this platform: it has no OS sandbox, so writing would require full, " +
       "unsandboxed access to this machine (model-run commands could read local secrets or write outside " +
       "the project). Set AGENT_ROOM_ALLOW_UNSANDBOXED_WINDOWS_EXEC=1 to opt in on a machine and projects you fully trust.",
     );

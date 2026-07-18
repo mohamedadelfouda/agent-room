@@ -106,7 +106,7 @@ test("Codex permissions disable inherited external tool surfaces", () => {
   }
 });
 
-test("Codex sandbox mode: read-only unless run; Windows run fails closed unless opted in", () => {
+test("Codex sandbox mode: read-only unless run; platforms without a sandbox fail closed unless opted in", () => {
   // Review/plan/chat never write — read-only on every platform, whether or not the opt-in is set.
   for (const permission of ["read", "planread", "chat", "bogus"]) {
     for (const platform of ["win32", "darwin", "linux"]) {
@@ -117,9 +117,13 @@ test("Codex sandbox mode: read-only unless run; Windows run fails closed unless 
   // Executor "run" on macOS/Linux uses the enforceable workspace-write sandbox (opt-in irrelevant).
   assert.equal(codexSandboxMode("run", "darwin", false), "workspace-write");
   assert.equal(codexSandboxMode("run", "linux", true), "workspace-write");
-  // Windows "run" has no OS sandbox: fails closed (null) by default; danger-full-access ONLY when opted in.
-  assert.equal(codexSandboxMode("run", "win32", false), null);
-  assert.equal(codexSandboxMode("run", "win32", true), "danger-full-access");
+  // Windows — and ANY platform outside the macOS/Linux allowlist — has no proven OS sandbox: fails closed
+  // (null) by default; danger-full-access ONLY when opted in. Guards against granting workspace-write to an
+  // unproven platform on the mere assumption it sandboxes.
+  for (const platform of ["win32", "freebsd"]) {
+    assert.equal(codexSandboxMode("run", platform, false), null);
+    assert.equal(codexSandboxMode("run", platform, true), "danger-full-access");
+  }
 });
 
 test("runCodex refuses Windows execute unless AGENT_ROOM_ALLOW_UNSANDBOXED_WINDOWS_EXEC is set", async (t) => {

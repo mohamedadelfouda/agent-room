@@ -13,7 +13,7 @@
 // run never writes into the developer's real data/ store; everything is torn down in `finally`.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, writeFile, rm } from "node:fs/promises";
+import { copyFile, mkdtemp, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
@@ -40,9 +40,13 @@ test("execute→review loop: Codex writes a fix in an isolated clone and Claude 
     const { configureTrustedCliStore, hydrateTrustedProviderCommands, approvedProviderCommand } = await import("../../server/process.js");
     const { providerReadiness } = await import("../../server/provider-readiness.js");
 
-    // Provider commands come from the REAL trusted-CLI store (an explicit path, unaffected by the
-    // runtime redirect above) — the test needs the actually-authenticated Codex/Claude to be found.
-    configureTrustedCliStore(join(repoRoot, "data", "trusted-cli.json"));
+    // Seed an isolated store from the REAL trusted-CLI store (read-only source) so the actually-
+    // authenticated Codex/Claude are found — but point configureTrustedCliStore at a disposable copy in
+    // runtimeDir, so a readiness auto-trust can't write into (or leave changes in) the developer's real
+    // data/ store. Missing source (fresh checkout) → no copy → readiness reports not-installed → skip.
+    const isolatedTrustedStore = join(runtimeDir, "trusted-cli.json");
+    await copyFile(join(repoRoot, "data", "trusted-cli.json"), isolatedTrustedStore).catch(() => {});
+    configureTrustedCliStore(isolatedTrustedStore);
     await hydrateTrustedProviderCommands().catch(() => {});
     const [codexReady, claudeReady] = await Promise.all([
       providerReadiness("codex", { refresh: true }),
@@ -70,15 +74,27 @@ test("execute→review loop: Codex writes a fix in an isolated clone and Claude 
       };
     });
 
-    await runExecuteAndReview(
-      session.id,
-      {
-        executor: "codex", reviewer: "claude", mode: "run",
-        task: "Fix the bug in add.js so that add(a, b) returns a + b.",
-        agents: { codex: { command: codexCmd }, claude: { command: claudeCmd } },
-      },
-      () => {},
-    );
+    try {
+      await runExecuteAndReview(
+        session.id,
+        {
+          executor: "codex", reviewer: "claude", mode: "run",
+          task: "Fix the bug in add.js so that add(a, b) returns a + b.",
+          agents: { codex: { command: codexCmd }, claude: { command: claudeCmd } },
+        },
+        () => {},
+      );
+    } catch (error) {
+      // The readiness probe above only proves the CLIs are installed, not authenticated (readiness leaves
+      // auth "unknown"). A machine with Codex/Claude installed but logged out reaches here — treat an
+      // auth-classified failure as a clean skip, not a test failure, so the live test behaves as its
+      // header documents rather than reporting a spurious regression.
+      if (/auth|unauthori|login|log in|sign[ -]?in|credential|not logged in|401|403/i.test(String(error?.message || error))) {
+        t.skip("live Codex + Claude must be authenticated (a provider reported an auth failure)");
+        return;
+      }
+      throw error;
+    }
 
     const reloaded = await getSession(session.id);
     const exec = reloaded.executions?.[reloaded.executions.length - 1];
