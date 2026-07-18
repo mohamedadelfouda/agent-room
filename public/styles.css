@@ -76,7 +76,7 @@ h1, h2, h3, p { margin: 0; }
 [hidden] { display: none !important; }
 .tiny { color: var(--faint); font-size: 11px; }
 .muted { color: var(--muted); font-size: 12px; }
-:where(button, a, input, select, textarea, summary):focus-visible { outline: 3px solid var(--text); outline-offset: 3px; }
+:where(button, a, input, select, textarea, summary, pre):focus-visible { outline: 3px solid var(--text); outline-offset: 3px; }
 :where(input, select, textarea):focus-visible { outline-color: var(--accent); }
 
 /* ============ Shell layout ============ */
