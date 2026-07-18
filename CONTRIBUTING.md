@@ -55,3 +55,7 @@ Protect `main` on GitHub (Settings → Branches → rule for `main`) so external
 - Restrict who can push/merge to maintainers, and do not allow bypassing the above.
 
 CI (`.github/workflows/ci.yml`) already runs on every `pull_request`; branch protection is what makes those checks blocking.
+
+## Maintainers: releasing
+
+Releases are cut by tagging `vX.Y.Z`. The full runbook — version and CHANGELOG discipline, the automated tag ⇄ `package.json` ⇄ CHANGELOG check, stable vs pre-release channels, and rollback — is in [`RELEASING.md`](RELEASING.md).
