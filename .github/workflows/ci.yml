@@ -33,6 +33,12 @@ jobs:
         run: pnpm check
       - name: Unit tests
         run: pnpm test
+      - name: Windows exec confinement integration
+        # Regression-guards the AppContainer confinement security boundary on a real Windows runner. The
+        # tests skip cleanly if an app container cannot be set up, and hard-fail only on an actual
+        # read/network leak; the auth-requiring integration tests skip without provider credentials.
+        if: runner.os == 'Windows'
+        run: pnpm test:integration
 
   source-smoke:
     name: source-only smoke (${{ matrix.os }})

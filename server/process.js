@@ -14,6 +14,15 @@ function windowsJobRunnerPath() {
   return sourceJobRunner.replace(`${path.sep}app.asar${path.sep}`, `${path.sep}app.asar.unpacked${path.sep}`);
 }
 
+// Contract with the Windows Job Object wrapper for a confined child: when it cannot set up the
+// AppContainer (profile/ACL failure, or the provider runtime is not reachable by the container) it
+// prints this marker to stderr and exits with this code BEFORE launching the child. runProcess requires
+// BOTH so a confined caller fails CLOSED (refuses) rather than launching the model-run child unconfined —
+// and so the confined child, which inherits stderr, cannot spoof the marker to force a (self-DoS)
+// refusal without also exiting with this reserved code. Keep both in sync with windows-job-runner.ps1.
+export const WINDOWS_CONFINEMENT_FAILURE_MARKER = "AGENTROOM_CONFINEMENT_SETUP_FAILED";
+export const WINDOWS_CONFINEMENT_FAILURE_EXIT = 8086;
+
 export function validateOption(value, label, { allowEmpty = true } = {}) {
   const text = String(value ?? "").trim();
   if (!text && allowEmpty) return "";
@@ -330,10 +339,18 @@ function attachRetainedStream(stream, retained) {
   return () => {};
 }
 
-export function runProcess({ command, args = [], input = "", cwd, env = {}, envPolicy = "agent", onStdoutLine, onStderrLine, timeoutMs = 0, registerChild, maxOutputBytes = MAX_PROCESS_OUTPUT_BYTES, binaryOutput = false, containTree = false }) {
+export function runProcess({ command, args = [], input = "", cwd, env = {}, envPolicy = "agent", onStdoutLine, onStderrLine, timeoutMs = 0, registerChild, maxOutputBytes = MAX_PROCESS_OUTPUT_BYTES, binaryOutput = false, containTree = false, windowsConfinement = null }) {
   return new Promise((resolve, reject) => {
     if (!Number.isSafeInteger(maxOutputBytes) || maxOutputBytes < 1 || maxOutputBytes > 64 * 1024 * 1024) {
       reject(new Error("maxOutputBytes must be between 1 byte and 64 MiB"));
+      return;
+    }
+    // AppContainer confinement is delivered ONLY through the Windows Job Object wrapper below. Requesting
+    // it without that wrapper (no containTree, or non-Windows) would spawn the child directly with no
+    // confinement while the caller believes it is confined — the exact fail-OPEN this feature prevents.
+    // Reject at the API boundary so the invariant never rests on caller discipline alone.
+    if (windowsConfinement && !(containTree && process.platform === "win32")) {
+      reject(new Error("windowsConfinement requires containTree on Windows"));
       return;
     }
     let child;
@@ -342,7 +359,13 @@ export function runProcess({ command, args = [], input = "", cwd, env = {}, envP
       let launchArgs = args;
       if (containTree && process.platform === "win32") {
         launchCommand = path.join(process.env.SystemRoot || "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
-        const payload = Buffer.from(JSON.stringify({ command, args }), "utf8").toString("base64");
+        // A confined child (Codex execute) carries an AppContainer descriptor; the wrapper grants the
+        // container SID only these dirs (which the server owns and deletes) and launches into the
+        // container. cwd is the disposable clone — the child's working directory must be granted too.
+        const payloadObj = windowsConfinement
+          ? { command, args, confinement: { ...windowsConfinement, cwd } }
+          : { command, args };
+        const payload = Buffer.from(JSON.stringify(payloadObj), "utf8").toString("base64");
         launchArgs = ["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", windowsJobRunnerPath(), payload];
       }
       child = spawn(launchCommand, launchArgs, {
@@ -397,14 +420,20 @@ export function runProcess({ command, args = [], input = "", cwd, env = {}, envP
         finish(reject, error);
         return;
       }
+      const stderrText = stderr.toString();
       finish(resolve, {
         code: code ?? -1,
         signal,
         stdout: binaryOutput ? "" : stdout.toString(),
         stdoutBuffer: binaryOutput ? stdout.toBuffer() : undefined,
-        stderr: stderr.toString(),
+        stderr: stderrText,
         stdoutTruncated: stdout.truncated,
         stderrTruncated: stderr.truncated,
+        // The confined wrapper prints this marker AND exits with this reserved code before launching the
+        // child when it cannot set up the AppContainer. Requiring both lets a confined caller fail closed
+        // instead of treating the refusal as the child's own error, while the reserved exit code stops the
+        // (inherited-stderr) child from spoofing the marker to force a refusal.
+        windowsConfinementFailed: Boolean(windowsConfinement) && (code ?? -1) === WINDOWS_CONFINEMENT_FAILURE_EXIT && stderrText.includes(WINDOWS_CONFINEMENT_FAILURE_MARKER),
         child,
       });
     });
