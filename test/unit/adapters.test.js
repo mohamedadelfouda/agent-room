@@ -4,7 +4,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { claudePermissionArgs, createClaudeStreamCollector, runClaude } from "../../server/adapters/claude.js";
-import { codexSecurityOverrides, prepareIsolatedCodexHome, runCodex } from "../../server/adapters/codex.js";
+import { codexSandboxMode, codexSecurityOverrides, prepareIsolatedCodexHome, runCodex } from "../../server/adapters/codex.js";
 
 // The allowlist must be enforced on the REAL execution path (runClaude/runCodex spawn the
 // agent), not only on the diagnostic endpoints. A client-supplied command that isn't the
@@ -103,6 +103,70 @@ test("Codex permissions disable inherited external tool surfaces", () => {
     for (const feature of ["apps", "hooks", "multi_agent", "memories"]) {
       assert.ok(overrides.includes(`features.${feature}=false`));
     }
+  }
+});
+
+test("Codex sandbox mode: read-only unless run; platforms without a sandbox fail closed unless opted in", () => {
+  // Review/plan/chat never write — read-only on every platform, whether or not the opt-in is set.
+  for (const permission of ["read", "planread", "chat", "bogus"]) {
+    for (const platform of ["win32", "darwin", "linux"]) {
+      assert.equal(codexSandboxMode(permission, platform, false), "read-only");
+      assert.equal(codexSandboxMode(permission, platform, true), "read-only");
+    }
+  }
+  // Executor "run" on macOS/Linux uses the enforceable workspace-write sandbox (opt-in irrelevant).
+  assert.equal(codexSandboxMode("run", "darwin", false), "workspace-write");
+  assert.equal(codexSandboxMode("run", "linux", true), "workspace-write");
+  // Windows — and ANY platform outside the macOS/Linux allowlist — has no proven OS sandbox: fails closed
+  // (null) by default; danger-full-access ONLY when opted in. Guards against granting workspace-write to an
+  // unproven platform on the mere assumption it sandboxes.
+  for (const platform of ["win32", "freebsd"]) {
+    assert.equal(codexSandboxMode("run", platform, false), null);
+    assert.equal(codexSandboxMode("run", platform, true), "danger-full-access");
+  }
+});
+
+test("runCodex refuses Windows execute unless AGENT_ROOM_ALLOW_UNSANDBOXED_WINDOWS_EXEC is set", async (t) => {
+  if (process.platform !== "win32") { t.skip("the Windows-only fail-closed refusal path"); return; }
+  const prev = process.env.AGENT_ROOM_ALLOW_UNSANDBOXED_WINDOWS_EXEC;
+  delete process.env.AGENT_ROOM_ALLOW_UNSANDBOXED_WINDOWS_EXEC;
+  try {
+    // Refused BEFORE any process spawn — the message names the opt-in env var.
+    await assert.rejects(
+      () => runCodex({ prompt: "hi", config: { command: "codex", permission: "run" }, cwd: process.cwd() }),
+      /unavailable on Windows|AGENT_ROOM_ALLOW_UNSANDBOXED_WINDOWS_EXEC/,
+    );
+  } finally {
+    if (prev === undefined) delete process.env.AGENT_ROOM_ALLOW_UNSANDBOXED_WINDOWS_EXEC;
+    else process.env.AGENT_ROOM_ALLOW_UNSANDBOXED_WINDOWS_EXEC = prev;
+  }
+});
+
+test("Codex isolated home trusts the workspace only for executor run — kill-switches stay on", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "agent-room-codex-run-trust-"));
+  try {
+    const sourceHome = path.join(root, "source-home");
+    const project = path.join(root, "project");
+    await fs.mkdir(sourceHome, { recursive: true });
+    await fs.mkdir(path.join(project, ".git"), { recursive: true });
+    await fs.writeFile(path.join(sourceHome, "auth.json"), '{"token":"test-only"}');
+
+    const runHome = await prepareIsolatedCodexHome({
+      tempDir: path.join(root, "run"),
+      cwd: project,
+      permission: "run",
+      sourceEnv: { CODEX_HOME: sourceHome },
+    });
+    const config = await fs.readFile(path.join(runHome, "config.toml"), "utf8");
+    // Execute must be able to write in the disposable clone the orchestrator hands us.
+    assert.match(config, /trust_level = "trusted"/);
+    assert.doesNotMatch(config, /trust_level = "untrusted"/);
+    // Trust re-enables writes ONLY — the external-tool kill-switches must remain in run mode.
+    assert.match(config, /mcp_servers = \{\}/);
+    assert.match(config, /web_search = "disabled"/);
+    assert.match(config, /apps = false/);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
   }
 });
 

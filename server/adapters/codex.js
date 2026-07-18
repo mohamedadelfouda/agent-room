@@ -93,10 +93,35 @@ export function codexSecurityOverrides(permission = "read") {
   return overrides.flatMap((override) => ["-c", override]);
 }
 
-function isolatedCodexConfig(cwd, projectRoot) {
+// Sandbox policy for `codex exec`. Only executor "run" writes; review/plan/chat stay read-only.
+//
+// macOS/Linux "run" uses Codex's enforceable "workspace-write" sandbox (writes confined to the
+// workspace, network denied). Windows has NO OS sandbox primitive (no seatbelt/landlock), so there
+// "workspace-write" silently degrades to read-only and "elevated" blocks on an interactive approval
+// headless `exec` can never answer — the only headless-writable Windows mode is "danger-full-access",
+// which is genuinely UNSANDBOXED: model-run shell commands get the desktop user's full filesystem +
+// network. A prompt injection in project content could then read secrets (SSH keys, the copied Codex
+// auth token) and exfiltrate them, or write outside the disposable clone. That fails OPEN, against this
+// project's fail-closed bar, so Windows "run" is REFUSED (returns null) unless the operator explicitly
+// opts in — runCodex turns null into a hard error naming the opt-in env var. Callers must never route
+// review (read) through "run".
+export function codexSandboxMode(permission, platform = process.platform, allowUnsandboxedWindowsExec = false) {
+  if (permission !== "run") return "read-only";
+  // Allowlist the ONLY platforms with a proven, enforceable sandbox — macOS (seatbelt) + Linux (landlock).
+  // Every other platform (Windows, and anything without such a primitive) has no OS confinement, so writing
+  // there means unsandboxed "danger-full-access", allowed only behind the explicit opt-in.
+  if (platform === "darwin" || platform === "linux") return "workspace-write";
+  return allowUnsandboxedWindowsExec ? "danger-full-access" : null;
+}
+
+function isolatedCodexConfig(cwd, projectRoot, permission) {
+  // Execute (run) must be able to WRITE in the disposable clone, so the workspace is trusted ONLY then;
+  // review stays untrusted (read-only). The MCP/web/features kill-switches below apply in BOTH modes, so
+  // trusting here re-enables write access + the clone's own AGENTS.md — never external tools/network.
+  const trustLevel = permission === "run" ? "trusted" : "untrusted";
   const roots = new Set([path.resolve(cwd), projectRoot]);
   const trustEntries = [...roots]
-    .map((root) => `[projects.${JSON.stringify(root)}]\ntrust_level = "untrusted"`)
+    .map((root) => `[projects.${JSON.stringify(root)}]\ntrust_level = "${trustLevel}"`)
     .join("\n\n");
   const features = DISABLED_CODEX_FEATURES.map((feature) => `${feature} = false`).join("\n");
   return [
@@ -145,11 +170,11 @@ async function copyCodexAuth(isolatedHome, sourceEnv) {
   } finally { await handle?.close().catch(() => {}); }
 }
 
-export async function prepareIsolatedCodexHome({ tempDir, cwd, sourceEnv = process.env }) {
+export async function prepareIsolatedCodexHome({ tempDir, cwd, permission = "read", sourceEnv = process.env }) {
   const isolatedHome = path.join(tempDir, "codex-home");
   await fs.mkdir(isolatedHome, { recursive: true, mode: 0o700 });
   const projectRoot = await findProjectRoot(cwd);
-  const config = isolatedCodexConfig(cwd, projectRoot);
+  const config = isolatedCodexConfig(cwd, projectRoot, permission);
   await fs.writeFile(path.join(isolatedHome, "config.toml"), config, { mode: 0o600 });
   await copyCodexAuth(isolatedHome, sourceEnv);
   return isolatedHome;
@@ -171,9 +196,18 @@ export async function runCodex({ prompt, config, cwd, onEvent, registerChild }) 
     throw new Error(`Unsupported Codex effort: ${effort}`);
   }
 
-  // Default "read" is read-only (planning/review). "chat" is also read-only
-  // with web search enabled. Executor run mode gets workspace-write.
-  const sandbox = permission === "run" ? "workspace-write" : "read-only";
+  // Read/plan/chat are read-only; only executor "run" writes. Windows "run" has no OS sandbox, so it
+  // fails CLOSED (refused) unless the operator explicitly opts into unsandboxed execution — never a
+  // silent unsandboxed fallback. See codexSandboxMode for the full rationale.
+  const allowUnsandboxedWindowsExec = /^(1|true|yes|on)$/i.test(process.env.AGENT_ROOM_ALLOW_UNSANDBOXED_WINDOWS_EXEC || "");
+  const sandbox = codexSandboxMode(permission, process.platform, allowUnsandboxedWindowsExec);
+  if (sandbox === null) {
+    throw new Error(
+      "Codex execute is unavailable on this platform: it has no OS sandbox, so writing would require full, " +
+      "unsandboxed access to this machine (model-run commands could read local secrets or write outside " +
+      "the project). Set AGENT_ROOM_ALLOW_UNSANDBOXED_WINDOWS_EXEC=1 to opt in on a machine and projects you fully trust.",
+    );
+  }
   const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "agent-room-codex-"));
   const outputPath = path.join(tempDir, "final.txt");
 
@@ -185,7 +219,7 @@ export async function runCodex({ prompt, config, cwd, onEvent, registerChild }) 
   let outputTruncated = false;
   const startedAt = Date.now();
   try {
-    const codexHome = await prepareIsolatedCodexHome({ tempDir, cwd });
+    const codexHome = await prepareIsolatedCodexHome({ tempDir, cwd, permission });
     const args = [
       "exec",
       "--json",
