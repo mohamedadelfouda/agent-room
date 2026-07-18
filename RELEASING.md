@@ -37,12 +37,14 @@ Windows/macOS/Linux installers, and publishes a GitHub Release. The same tag ser
 
 ## Stable vs pre-release
 
-The channel is decided by the presence of **code-signing secrets**, not a manual flag:
+The channel is decided by the **tag suffix** and the presence of **code-signing secrets**, not a manual flag:
 
-- **All** signing secrets present (Windows cert + Apple ID / cert / team) → a normal **Latest** release
-  with signed, notarized installers.
-- **Any** signing secret missing → the installers are unsigned and the release is published as a
-  **pre-release** (clearly labelled, not "Latest"), so an unsigned build can never silently become the
+- A **prerelease tag** (`v0.3.0-rc.1`, `-beta`, …) → always a **pre-release**, regardless of signing, so a
+  signed release candidate is never promoted to "Latest".
+- Otherwise, **all** signing secrets present (Windows cert + Apple ID / cert / team) → a normal **Latest**
+  release with signed, notarized installers.
+- Otherwise (**any** signing secret missing) → the installers are unsigned and the release is published as
+  a **pre-release** (clearly labelled, not "Latest"), so an unsigned build can never silently become the
   official download. Add the secrets and re-tag to promote — no workflow change needed.
 
 ## Source-run users

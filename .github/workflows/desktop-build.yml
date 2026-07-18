@@ -137,7 +137,12 @@ jobs:
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
-          if [ -n "$WINDOWS_CERTIFICATE_BASE64" ] && [ -n "$WINDOWS_CERTIFICATE_PASSWORD" ] \
+          # A prerelease tag (vX.Y.Z-rc.1, -beta, …) must publish as a pre-release regardless of signing —
+          # otherwise a fully-signed RC would be promoted to a normal/"Latest" GitHub release.
+          if [[ "$GITHUB_REF_NAME" == *-* ]]; then
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::$GITHUB_REF_NAME is a prerelease tag — publishing as a pre-release."
+          elif [ -n "$WINDOWS_CERTIFICATE_BASE64" ] && [ -n "$WINDOWS_CERTIFICATE_PASSWORD" ] \
              && [ -n "$MAC_CERTIFICATE_BASE64" ] && [ -n "$MAC_CERTIFICATE_PASSWORD" ] \
              && [ -n "$APPLE_ID" ] && [ -n "$APPLE_APP_SPECIFIC_PASSWORD" ] && [ -n "$APPLE_TEAM_ID" ]; then
             echo "prerelease=false" >> "$GITHUB_OUTPUT"
