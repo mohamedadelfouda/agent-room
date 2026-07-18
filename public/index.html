@@ -210,8 +210,10 @@
           <button type="button" class="lang-btn" data-lang="ar" aria-label="Arabic" data-i18n-aria-label="arabicLanguage" aria-pressed="false">ع</button>
         </div>
       </div>
-      <div id="onboardList" class="onboard-list" role="status" aria-live="polite"></div>
+      <p id="onboardLockHint" class="doctor-lock-hint" role="status" aria-live="polite" hidden></p>
+      <div id="onboardList" class="onboard-list"></div>
       <div class="modal-actions">
+        <span id="onboardLastChecked" class="doctor-last-checked" aria-live="polite"></span>
         <button id="onboardRefresh" class="btn-ghost" data-i18n="recheck">إعادة الفحص</button>
         <button id="onboardDone" class="btn-primary" data-i18n="start">ابدأ</button>
       </div>

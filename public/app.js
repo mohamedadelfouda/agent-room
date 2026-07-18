@@ -45,6 +45,7 @@ function isCurrentSessionView(sessionId, viewEpoch) {
   return currentSessionId === sessionId && sessionViewEpoch === viewEpoch;
 }
 let providers = [];
+let lastProvidersReady = true; // last-known setup completeness, so applyLang can restore the ⚙ badge label
 let renderedMessageSessionId = null;
 let renderedMessageIds = new Set();
 let pendingAttachments = [];
@@ -151,6 +152,8 @@ function applyLang(next) {
     const value = STRINGS[lang][el.getAttribute("data-i18n-aria-label")];
     if (typeof value === "string") el.setAttribute("aria-label", value);
   });
+  reflectSetupBadge(lastProvidersReady); // re-apply after the static ⚙ aria-label above was reset
+
   document.querySelectorAll("[data-provider-toggle]").forEach((input) => input.setAttribute("aria-label", t("providerEnabled")(providerInfo(input.dataset.providerToggle).label)));
   document.querySelectorAll(".check-cli").forEach((button) => button.setAttribute("aria-label", t("checkProvider")(providerInfo(button.dataset.agent).label)));
   document.querySelectorAll(".setup-cli").forEach((button) => button.setAttribute("aria-label", t("setupProviderCli")(providerInfo(button.dataset.agent).label)));
@@ -1637,38 +1640,150 @@ async function loadOnboard() {
   try {
     const s = await api("/api/agents/status");
     list.innerHTML = "";
-    const rows = [
-      ...providers.map((item) => ({ name: item.label, ok: s.providers?.[item.id]?.installed, detail: s.providers?.[item.id]?.version || s.providers?.[item.id]?.detail, autoTrusted: s.providers?.[item.id]?.autoTrusted, agent: item.id })),
-      { name: "GitHub (gh)", ok: s.github.authed, detail: s.github.detail, agent: null },
-    ];
-    for (const r of rows) {
-      const row = document.createElement("div"); row.className = "onboard-row";
-      const state = r.ok ? t("installed") : t("notInstalled");
-      if (!r.ok && r.detail) console.error(`[Agent Room: provider_check_failed] ${r.detail}`);
-      // Surface auto-trust: this provider's bundled executable was discovered and trusted for the
-      // user (no manual Trust & check), so they can see it happened rather than it being silent.
-      const detail = [state, r.ok ? r.detail : "", r.autoTrusted ? t("autoDetected") : ""].filter(Boolean).join(" · ");
-      row.innerHTML = `<span class="onboard-dot ${r.ok ? "ok" : "bad"}" aria-hidden="true"></span><span class="ob-name">${esc(r.name)}</span><span class="ob-detail">${esc(detail)}</span>`;
-      const actions = document.createElement("span"); actions.className = "ob-actions";
-      if (r.agent && !r.ok) {
-        const setupBtn = document.createElement("button"); setupBtn.className = "btn-mini"; setupBtn.textContent = t("setupCli");
-        setupBtn.setAttribute("aria-label", t("setupProviderCli")(providerInfo(r.agent).label));
-        setupBtn.onclick = () => openCliSetupFromOnboard(r.agent);
-        actions.appendChild(setupBtn);
-      }
-      if (r.agent && r.ok && providerInfo(r.agent).canUpdate) {
-        // Rendered as "Checking…" first; refreshUpdateStates() then flips it to UPDATE (an update is
-        // available) or ✓ Updated (already latest), once the registry check returns.
-        const btn = document.createElement("button");
-        btn.className = "btn-mini update-btn"; btn.dataset.update = r.agent;
-        btn.textContent = t("checkingUpdate"); btn.disabled = true;
-        actions.appendChild(btn);
-      }
-      if (actions.childElementCount > 0) row.appendChild(actions);
-      list.appendChild(row);
-    }
+    const provRows = providers.map((item) => ({
+      name: item.label, agent: item.id,
+      ok: s.providers?.[item.id]?.installed,
+      detail: s.providers?.[item.id]?.version || s.providers?.[item.id]?.detail,
+      autoTrusted: s.providers?.[item.id]?.autoTrusted,
+    }));
+    const rows = [...provRows, { name: "GitHub (gh)", ok: s.github.authed, detail: s.github.detail, agent: null }];
+    for (const r of rows) list.appendChild(renderDoctorRow(r));
+    // Locked-mode framing: Debate & cross-review need BOTH agents ready (GitHub is optional for them).
+    const providersReady = provRows.length > 0 && provRows.every((r) => r.ok);
+    const hint = $("onboardLockHint");
+    hint.hidden = false;
+    hint.textContent = providersReady ? t("doctorReadyHint") : t("doctorLockedHint");
+    hint.classList.toggle("is-locked", !providersReady);
+    markDoctorChecked(providersReady);
     refreshUpdateStates();
+    // An inline control (Re-check / Verify & trust) that triggered this reload was just destroyed by the
+    // re-render; keep focus inside the dialog so keyboard users aren't dropped to <body>.
+    const modalEl = $("onboardModal");
+    if (!modalEl.classList.contains("hidden") && !modalEl.contains(document.activeElement)) {
+      modalEl.querySelector(".modal")?.focus();
+    }
   } catch (e) { list.textContent = localizedFailure(e); }
+}
+
+// One Doctor row: the status line, plus — for a not-installed provider — an inline setup panel so the
+// user never has to drill into the Setup drawer to see how to fix it.
+function renderDoctorRow(r) {
+  const item = document.createElement("div"); item.className = "onboard-item";
+  const row = document.createElement("div"); row.className = "onboard-row";
+  const state = r.ok ? t("installed") : t("notInstalled");
+  if (!r.ok && r.detail) console.error(`[Agent Room: provider_check_failed] ${r.detail}`);
+  // Surface auto-trust: this provider's bundled executable was discovered and trusted for the user
+  // (no manual Trust & check), so they can see it happened rather than it being silent.
+  const detail = [state, r.ok ? r.detail : "", r.autoTrusted ? t("autoDetected") : ""].filter(Boolean).join(" · ");
+  row.innerHTML = `<span class="onboard-dot ${r.ok ? "ok" : "bad"}" aria-hidden="true"></span><span class="ob-name">${esc(r.name)}</span><span class="ob-detail">${esc(detail)}</span>`;
+  if (r.agent && r.ok && providerInfo(r.agent).canUpdate) {
+    // Rendered as "Checking…" first; refreshUpdateStates() flips it to UPDATE or ✓ Updated.
+    const actions = document.createElement("span"); actions.className = "ob-actions";
+    const btn = document.createElement("button");
+    btn.className = "btn-mini update-btn"; btn.dataset.update = r.agent;
+    btn.textContent = t("checkingUpdate"); btn.disabled = true;
+    actions.appendChild(btn); row.appendChild(actions);
+  }
+  item.appendChild(row);
+  if (r.agent && !r.ok) item.appendChild(renderMissingPanel(r.agent));
+  return item;
+}
+
+// Inline setup for a not-installed provider: install command (copy) + docs link + [Find installed copy]
+// (discovery → found path + [Verify & trust]) + [Re-check].
+function renderMissingPanel(agent) {
+  const info = providerInfo(agent);
+  const box = document.createElement("div"); box.className = "onboard-detail";
+  const intro = document.createElement("p"); intro.className = "ob-install-intro"; intro.textContent = t("installIntro");
+  box.appendChild(intro);
+  if (info.install?.command) {
+    const cmdRow = document.createElement("div"); cmdRow.className = "ob-cmd-row";
+    const code = document.createElement("code"); code.className = "cli-setup-cmd"; code.innerHTML = bdi(info.install.command, "ltr");
+    const copy = document.createElement("button"); copy.className = "btn-mini"; copy.textContent = t("copyCommand");
+    const feedback = document.createElement("span"); feedback.className = "ob-copy-feedback"; feedback.setAttribute("aria-live", "polite");
+    copy.onclick = async () => {
+      try { await navigator.clipboard.writeText(info.install.command); feedback.textContent = t("copied"); }
+      catch { feedback.textContent = t("copyFailed"); }
+    };
+    cmdRow.append(code, copy, feedback);
+    box.appendChild(cmdRow);
+  }
+  const linkRow = document.createElement("div"); linkRow.className = "ob-link-row";
+  if (info.install?.url && /^https:\/\//.test(info.install.url)) {
+    const docs = document.createElement("a"); docs.className = "ob-docs";
+    docs.href = info.install.url; docs.target = "_blank"; docs.rel = "noreferrer noopener";
+    docs.textContent = t("installDocs");
+    const sr = document.createElement("span"); sr.className = "sr-only"; sr.textContent = ` (${t("opensInNewTab")})`;
+    docs.appendChild(sr); linkRow.appendChild(docs);
+  }
+  const find = document.createElement("button"); find.className = "btn-mini";
+  find.textContent = t("findInstalled");
+  find.setAttribute("aria-label", `${t("findInstalled")}: ${info.label}`);
+  find.onclick = () => discoverForDoctor(agent, box, find);
+  linkRow.appendChild(find);
+  const recheck = document.createElement("button"); recheck.className = "btn-mini btn-ghost";
+  recheck.textContent = t("recheck");
+  recheck.onclick = () => loadOnboard();
+  linkRow.appendChild(recheck);
+  box.appendChild(linkRow);
+  return box;
+}
+
+// Discover a native executable and, when found, show each path with [Verify & trust] inline (no drawer).
+async function discoverForDoctor(agent, box, btn) {
+  btn.disabled = true; const prev = btn.textContent; btn.textContent = t("setupSearching");
+  box.querySelector(".ob-found")?.remove();
+  try {
+    const result = await api("/api/cli/discover", { method: "POST", body: JSON.stringify({ provider: agent }) });
+    if (result.resolved) { await loadOnboard(); return; }
+    const candidates = result.candidates || [];
+    btn.textContent = prev; btn.disabled = false;
+    const found = document.createElement("div"); found.className = "ob-found";
+    if (!candidates.length) {
+      const none = document.createElement("p"); none.className = "ob-install-intro"; none.textContent = t("setupNoneFound");
+      found.appendChild(none);
+    } else {
+      const foundIntro = document.createElement("p"); foundIntro.className = "ob-install-intro"; foundIntro.textContent = t("setupFoundIntro");
+      found.appendChild(foundIntro);
+      for (const candidate of candidates) {
+        const fr = document.createElement("div"); fr.className = "ob-found-row";
+        const label = document.createElement("span"); label.className = "ob-found-path";
+        label.innerHTML = `${esc(t("foundAt"))} <code>${bdi(candidate, "ltr")}</code>`;
+        const trust = document.createElement("button"); trust.className = "btn-mini"; trust.textContent = t("verifyAndTrust");
+        trust.setAttribute("aria-label", `${t("verifyAndTrust")}: ${candidate}`);
+        trust.onclick = async () => { trust.disabled = true; const ok = await applyDiscoveredCommand(agent, candidate); if (ok) await loadOnboard(); else trust.disabled = false; };
+        fr.append(label, trust); found.appendChild(fr);
+      }
+    }
+    box.appendChild(found);
+  } catch (e) {
+    btn.textContent = prev; btn.disabled = false;
+    // Wrap in .ob-found so a retry's top-of-function cleanup replaces this error instead of stacking it.
+    const errBox = document.createElement("div"); errBox.className = "ob-found";
+    const err = document.createElement("p"); err.className = "ob-install-intro"; err.textContent = localizedFailure(e);
+    errBox.appendChild(err); box.appendChild(errBox);
+  }
+}
+
+// Persist + render the last-checked time, and reflect setup completeness on the Setup (⚙) button badge.
+function markDoctorChecked(providersReady) {
+  const now = new Date();
+  try { localStorage.setItem("agent-room-doctor-checked", now.toISOString()); } catch {}
+  const stamp = $("onboardLastChecked");
+  if (stamp) stamp.textContent = `${t("lastChecked")}: ${new Intl.DateTimeFormat(localeId(lang), { hour: "2-digit", minute: "2-digit" }).format(now)}`;
+  reflectSetupBadge(providersReady);
+}
+
+// Show an attention dot on the Setup (⚙) button whenever the agents aren't both ready, so setup stays
+// discoverable after the Doctor is closed. Also flip the button's accessible name so screen-reader and
+// voice-control users get the same "setup incomplete" signal the dot gives sighted users. applyLang()
+// re-applies this from lastProvidersReady after it resets the static aria-label on a language switch.
+function reflectSetupBadge(providersReady) {
+  lastProvidersReady = providersReady;
+  const btn = $("openOnboard");
+  if (!btn) return;
+  btn.classList.toggle("needs-setup", !providersReady);
+  btn.setAttribute("aria-label", providersReady ? t("setup") : t("setupNeedsAttention"));
 }
 
 // Turn each "Checking…" update button into its real state using a registry version check.
@@ -1709,48 +1824,6 @@ async function refreshUpdateStates() {
       btn.textContent = t("updated"); btn.title = c.current || ""; btn.onclick = null;
     }
   }
-}
-function openCliSetupFromOnboard(agent) {
-  // Keep the onboarding dialog open: closing it felt like Setup "broke" the
-  // screen. Discover + trust in place when there is exactly one candidate
-  // (same rule as runCliSetup); multiple matches open the drawer chooser.
-  void (async () => {
-    const list = $("onboardList");
-    const prior = list.innerHTML;
-    list.textContent = t("setupSearching");
-    try {
-      const result = await api("/api/cli/discover", { method: "POST", body: JSON.stringify({ provider: agent }) });
-      if (result.resolved) {
-        await loadOnboard();
-        return;
-      }
-      if (result.candidates?.length === 1) {
-        const ok = await applyDiscoveredCommand(agent, result.candidates[0]);
-        await loadOnboard();
-        if (!ok) openCliSetupDrawer(agent);
-        return;
-      }
-      // Zero or multiple candidates: drawer shows install hints or an explicit pick.
-      openCliSetupDrawer(agent);
-    } catch (error) {
-      list.innerHTML = prior;
-      const note = document.createElement("p");
-      note.className = "ob-detail";
-      note.textContent = localizedFailure(error);
-      list.prepend(note);
-    }
-  })();
-}
-
-function openCliSetupDrawer(agent) {
-  closeManagedModal($("onboardModal"), { restoreFocus: false });
-  localStorage.setItem("agent-room-onboarded", "1");
-  if ($("setupDrawer").hidden) toggleSetup();
-  const panel = $(`${agent}CliSetup`);
-  if (panel.hidden) toggleCliSetup(agent);
-  else runCliSetup(agent);
-  document.querySelector(`.agent-card[data-agent="${agent}"]`)?.scrollIntoView({ block: "nearest" });
-  requestAnimationFrame(() => document.querySelector(`.setup-cli[data-agent="${agent}"]`)?.focus());
 }
 async function updateAgentCli(agent, btn) {
   btn.disabled = true; btn.onclick = null; btn.title = "";
@@ -2554,6 +2627,13 @@ async function initialize() {
   refreshSessions();
   pollHealth();
   setInterval(pollHealth, 10000);
-  if (!localStorage.getItem("agent-room-onboarded")) openOnboard();
+  // Reflect setup completeness on the ⚙ badge, and auto-open the Doctor on first run ONLY when something
+  // is actually missing — a fully-ready setup shouldn't nag. A ready setup just clears the badge silently.
+  try {
+    const s = await api("/api/agents/status");
+    const providersReady = providers.length > 0 && providers.every((item) => s.providers?.[item.id]?.installed);
+    if (!providersReady && !localStorage.getItem("agent-room-onboarded")) openOnboard();
+    else reflectSetupBadge(providersReady);
+  } catch { /* offline / boot race: leave the badge at its default */ }
 }
 initialize();
