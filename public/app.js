@@ -1681,6 +1681,10 @@ function renderDoctorRow(r) {
     const actions = document.createElement("span"); actions.className = "ob-actions";
     const btn = document.createElement("button");
     btn.className = "btn-mini update-btn"; btn.dataset.update = r.agent;
+    // #63 moved the onboarding row's aria-live to the lock hint, but updateAgentCli() still relies on the
+    // "Updating…/Updated" status being announced. Give the update control its own polite live region —
+    // aria-live (not role="status") so it stays a real button. (CodeRabbit)
+    btn.setAttribute("aria-live", "polite");
     btn.textContent = t("checkingUpdate"); btn.disabled = true;
     actions.appendChild(btn); row.appendChild(actions);
   }
