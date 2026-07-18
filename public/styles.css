@@ -463,6 +463,27 @@ details.tech pre { margin-top: 8px; background: var(--bg); border: 1px solid var
 .onboard-row .ob-name { font-weight: 600; }
 .onboard-row .ob-detail { color: var(--faint); font-size: 12px; margin-inline-start: auto; text-align: end; max-width: 55%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .onboard-row .ob-actions { margin-inline-start: auto; display: flex; gap: 6px; }
+/* Setup Doctor (SD-2): inline per-provider setup + locked-mode framing */
+.onboard-item { display: flex; flex-direction: column; }
+.onboard-detail { border: 1px solid var(--line-soft); border-top: none; border-radius: 0 0 11px 11px; margin-top: -3px; padding: 11px 14px; display: flex; flex-direction: column; gap: 8px; background: color-mix(in srgb, var(--bg) 90%, var(--faint)); }
+.ob-install-intro { color: var(--faint); font-size: 12px; margin: 0; }
+.ob-cmd-row, .ob-link-row, .ob-found-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.ob-cmd-row .cli-setup-cmd { flex: 1 1 12rem; min-width: 0; overflow-x: auto; }
+.ob-copy-feedback { color: var(--ok); font-size: 12px; }
+.ob-docs { font-size: 12px; }
+.ob-found { display: flex; flex-direction: column; gap: 6px; }
+.ob-found-path { font-size: 12px; flex: 1 1 12rem; min-width: 0; }
+.ob-found-path code { overflow-wrap: anywhere; }
+.doctor-lock-hint { font-size: 12.5px; margin: 0 0 4px; padding: 8px 11px; border-radius: 9px; background: color-mix(in srgb, var(--ok) 13%, transparent); }
+.doctor-lock-hint.is-locked { background: color-mix(in srgb, var(--warn) 15%, transparent); }
+.doctor-last-checked { color: var(--faint); font-size: 11.5px; margin-inline-end: auto; align-self: center; }
+.icon-btn.needs-setup { position: relative; }
+.icon-btn.needs-setup::after { content: ""; position: absolute; top: 3px; inset-inline-end: 3px; width: 7px; height: 7px; border-radius: 50%; background: var(--warn); box-shadow: 0 0 0 2px var(--chrome, var(--bg)); }
+/* Light-theme contrast (WCAG AA): the dark palette's --faint/--ok/--warn tones fail on light backgrounds,
+   so keep the detail panel near-white (faint instructions stay ≥4.5:1) and darken the success/attention accents. */
+html[data-theme="light"] .onboard-detail { background: var(--surface-2); }
+html[data-theme="light"] .ob-copy-feedback { color: #166534; }
+html[data-theme="light"] .icon-btn.needs-setup::after { background: #c2410c; }
 /* "Update available" reads as an actionable outlined button; the state is carried by the border,
    background and weight (not colour alone), and the label text stays high-contrast (--text). */
 .update-btn.update-available { border-color: var(--accent-line); background: var(--accent-soft); color: var(--text); font-weight: 600; }
