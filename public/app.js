@@ -1013,6 +1013,13 @@ function esc(text) {
 function fmtDuration(ms) {
   return ms == null ? "" : formatLocaleDuration(lang, ms);
 }
+// Compact token/cost chip from a normalized usage record; "" when there's nothing to show. Cost only
+// appears when known (provider-reported or priced) — never a fabricated $0.
+function fmtUsage(usage) {
+  if (!usage || !usage.totalTokens) return "";
+  const tokens = `${formatLocaleNumber(lang, usage.totalTokens)} ${t("tokensShort")}`;
+  return Number.isFinite(usage.costUsd) ? `${tokens} · $${usage.costUsd.toFixed(usage.costUsd < 0.01 ? 4 : 2)}` : tokens;
+}
 function technicalDetailsHtml(detail) {
   return detail ? `<details class="tech"><summary>${esc(t("techDetails"))}</summary><pre>${esc(String(detail).slice(0, 8000))}</pre></details>` : "";
 }
@@ -1045,7 +1052,7 @@ function renderMessages() {
       const badges = [msg.role, phaseLabel(msg.phase), msg.round ? `${t("roundWord")} ${formatLocaleNumber(lang, msg.round)}` : "", isPartial ? t("partialTag") : ""]
         .filter(Boolean)
         .map((b) => `<span class="badge${isPartial && b === t("partialTag") ? " badge-partial" : ""}">${esc(b)}</span>`).join("");
-      const metaParts = [meta.requestedModel ? bdi(meta.requestedModel, "ltr") : "", meta.requestedEffort ? bdi(meta.requestedEffort, "ltr") : "", fmtDuration(meta.durationMs) ? esc(fmtDuration(meta.durationMs)) : "", meta.outputTruncated ? esc(t("truncatedTag")) : ""].filter(Boolean);
+      const metaParts = [meta.requestedModel ? bdi(meta.requestedModel, "ltr") : "", meta.requestedEffort ? bdi(meta.requestedEffort, "ltr") : "", fmtDuration(meta.durationMs) ? esc(fmtDuration(meta.durationMs)) : "", fmtUsage(meta.usage) ? bdi(fmtUsage(meta.usage), "ltr") : "", meta.outputTruncated ? esc(t("truncatedTag")) : ""].filter(Boolean);
       const ctx = meta.contextChars ? ` · ${esc(t("contextWord"))} ${bdi(formatLocaleNumber(lang, meta.contextChars))}` : "";
       const footer = metaParts.length ? `<div class="msg-meta">${metaParts.join(" · ")}${ctx}</div>` : "";
       el.innerHTML =
@@ -2051,9 +2058,9 @@ function renderExecutions() {
   for (const ex of currentSession?.executions ?? []) {
     const el = document.createElement("article"); el.className = "msg exec-card";
     let body = `<div class="exec-body">`;
-    body += `<div class="exec-part"><div class="exec-label">${esc(t("executor"))} (${bdi(providerInfo(ex.executor).label, "ltr")})</div><div class="exec-text" dir="auto">${esc(ex.executorText || "")}</div></div>`;
+    body += `<div class="exec-part"><div class="exec-label">${esc(t("executor"))} (${bdi(providerInfo(ex.executor).label, "ltr")})${fmtUsage(ex.executorMeta?.usage) ? ` · ${bdi(fmtUsage(ex.executorMeta.usage), "ltr")}` : ""}</div><div class="exec-text" dir="auto">${esc(ex.executorText || "")}</div></div>`;
     if (ex.diff?.patch) body += `<div class="exec-part exec-diff"><div class="exec-label">${bdi(ex.diff.files || "", "ltr")}</div><pre>${highlightDiff(ex.diff.patch)}</pre></div>`;
-    if (ex.review?.text) body += `<div class="exec-part"><div class="exec-label">${esc(t("reviewer"))} (${bdi(providerInfo(ex.reviewer).label, "ltr")})</div><div class="exec-text" dir="auto">${esc(ex.review.text)}</div></div>`;
+    if (ex.review?.text) body += `<div class="exec-part"><div class="exec-label">${esc(t("reviewer"))} (${bdi(providerInfo(ex.reviewer).label, "ltr")})${fmtUsage(ex.review?.meta?.usage) ? ` · ${bdi(fmtUsage(ex.review.meta.usage), "ltr")}` : ""}</div><div class="exec-text" dir="auto">${esc(ex.review.text)}</div></div>`;
     if (ex.executorMeta?.outputTruncated || ex.review?.meta?.outputTruncated) body += `<div class="exec-part"><div class="exec-label">⚠ ${esc(t("truncatedTag"))}</div></div>`;
     if (ex.secretFindings?.length) body += `<div class="exec-part"><div class="exec-label">🔒 ${esc(t("secretScanBlocked"))}</div><div class="exec-text">${ex.secretFindings.map((f) => `${bdi(f.path, "ltr")}${f.line ? `:${bdi(formatLocaleNumber(lang, f.line))}` : ""} — ${bdi(f.rule, "ltr")} (${bdi(f.severity, "ltr")})`).join("<br>")}</div></div>`;
     if (ex.status === "awaiting_user") {
