@@ -561,6 +561,7 @@ async function runOrchestrationClaimed({ sessionId, request, validatedRequest, e
           partialMsg.meta = {
             requestedModel: cfg.model || "(default)", requestedEffort: cfg.effort || "",
             durationMs: error.durationMs ?? null, exitCode: error.exitCode ?? null,
+            usage: error.usage ?? null, // token/cost captured before the failure — adapters Object.assign the meta (incl. usage) onto the error
             status: "partial", contextChars, contextMessages, error: safeError,
             outputTruncated: Boolean(error.outputTruncated),
           };
