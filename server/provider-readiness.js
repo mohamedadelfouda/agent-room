@@ -103,7 +103,7 @@ async function computeCursorReadiness(definition) {
   try {
     const built = await buildCursorLaunchDescriptor({});
     status = built.ok && built.validation.valid
-      ? { ok: true, version: built.descriptor.version, detail: "Cursor detected (experimental)" }
+      ? { ok: true, version: built.descriptor.version, detail: "Cursor detected" }
       : { ok: false, version: "", detail: redact(built.reason || "Cursor launch descriptor invalid") }; // reason embeds the install path (OS username)
   } catch (error) {
     status = { ok: false, version: "", detail: redact(error?.message || "Cursor detection failed") };

@@ -55,8 +55,8 @@ const providers = new Map([
   // a descriptor-based readiness path (provider-readiness.js) instead of the `command` allowlist.
   ["cursor", {
     id: "cursor",
-    label: "Cursor (experimental)",
-    experimental: true,
+    label: "Cursor",
+    experimental: true, // internal metadata (Windows reviewer has an open-network residual); not shown as a badge
     command: "cursor-agent",
     install: {
       command: installHint({
