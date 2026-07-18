@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- `npx agent-room` / `agent-room` CLI launcher: run the local app with one command — no clone, no Electron installer. It starts the loopback server, opens the browser, and stores sessions in `~/.agent-room` (override with `AGENT_ROOM_RUNTIME_DIR`). npm publishing is opt-in via an `NPM_TOKEN` release secret; the package is zero-dependency and ships only the runtime code (`bin`/`server`/`public`/`desktop`).
 - Release discipline: a `RELEASING.md` runbook plus a tag ⇄ `package.json` ⇄ CHANGELOG consistency check (`scripts/check-release-version.mjs`) enforced in the tag-triggered build, so a tagged release cannot ship mislabeled or undocumented.
 - Collaboration round-summaries now render in the reader's language. The server persists the structured discussion outcome on the message and the browser renders the wording from it, so an English reader sees an English summary and an Arabic reader an Arabic one from the same run — instead of the previously hardcoded Arabic text.
 - The onboarding update control now reflects real state per agent CLI: **Update** (with the target version) when a newer release exists on the npm registry, a passive **✓ Updated** when already current, and a ticking elapsed timer while updating. Falls back to a plain Update affordance when offline.
