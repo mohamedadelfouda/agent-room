@@ -2,6 +2,8 @@ import { diagnosticLogTails, loggerHealth, redact } from "./logger.js";
 import { providerIds } from "./providers/registry.js";
 import { providerReadiness } from "./provider-readiness.js";
 import { githubConnectorReadiness } from "./connectors/registry.js";
+import { detectSyncedRuntimeFolder } from "./runtime-lock.js";
+import { rootPath } from "./store.js";
 import { APP_VERSION } from "./app-update.js";
 
 function sharedHealth({ runtimeLock, startupReconciled, shuttingDown }) {
@@ -21,6 +23,9 @@ export function healthSnapshot(state) {
     node: process.version,
     platform: process.platform,
     uptimeSeconds: Math.round(process.uptime()),
+    // Advisory-only signal: the data folder looks like it lives in a file-sync client's tree, which can
+    // corrupt the runtime lock. Never affects `ok` — it's a warning the UI can surface, not a failure.
+    syncedFolder: detectSyncedRuntimeFolder(rootPath()),
     ...health,
   };
 }

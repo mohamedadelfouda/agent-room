@@ -93,6 +93,7 @@ export function log(level, msg, extra) {
 }
 
 export const logError = (msg, extra) => log("ERROR", msg, extra);
+export const logWarn = (msg, extra) => log("WARN", msg, extra);
 
 export function loggerHealth() {
   return { ...loggerState, maxLogBytes: MAX_LOG_BYTES, retainedFiles: MAX_LOG_FILES + 1 };

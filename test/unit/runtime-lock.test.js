@@ -4,7 +4,7 @@ import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { acquireRuntimeLock } from "../../server/runtime-lock.js";
+import { acquireRuntimeLock, detectSyncedRuntimeFolder } from "../../server/runtime-lock.js";
 
 test("a live runtime lock cannot be stolen and only its owner can release it", async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "agent-room-runtime-lock-"));
@@ -105,4 +105,34 @@ test("losing runtime-lock ownership notifies the server before another writer ca
     await lock.release().catch(() => {});
     await fs.rm(root, { recursive: true, force: true });
   }
+});
+
+test("detectSyncedRuntimeFolder flags synced data folders by path marker (warn-only)", () => {
+  const noEnv = {};
+  // Windows-style backslash literals are safe cross-platform here: on a POSIX runner path.resolve keeps
+  // them as one opaque segment and the regexes match backslash or forward slash interchangeably.
+  assert.deepEqual(detectSyncedRuntimeFolder("C:\\Users\\x\\OneDrive\\agent-room", noEnv), { provider: "OneDrive" });
+  assert.deepEqual(detectSyncedRuntimeFolder("C:\\Users\\x\\OneDrive - Contoso\\data", noEnv), { provider: "OneDrive" });
+  assert.deepEqual(detectSyncedRuntimeFolder("/home/x/Dropbox/agent-room", noEnv), { provider: "Dropbox" });
+  assert.deepEqual(detectSyncedRuntimeFolder("/Users/x/Google Drive/data", noEnv), { provider: "Google Drive" });
+  assert.deepEqual(detectSyncedRuntimeFolder("/Users/x/Library/Mobile Documents/app", noEnv), { provider: "iCloud Drive" });
+  // Modern macOS "File Provider" mounts (hyphenated account suffix) via the CloudStorage parent.
+  assert.deepEqual(detectSyncedRuntimeFolder("/Users/x/Library/CloudStorage/OneDrive-Contoso/agent-room", noEnv), { provider: "OneDrive" });
+  assert.deepEqual(detectSyncedRuntimeFolder("/Users/x/Library/CloudStorage/GoogleDrive-me@x.com/My Drive/app", noEnv), { provider: "Google Drive" });
+  // Local paths are NOT flagged — including a folder that merely contains "drive" or starts with a
+  // provider name plus a hyphen ("onedrive-uploader" is a tool folder, not a sync root).
+  assert.equal(detectSyncedRuntimeFolder("/home/x/projects/agent-room", noEnv), null);
+  assert.equal(detectSyncedRuntimeFolder("C:\\dev\\agent-room", noEnv), null);
+  assert.equal(detectSyncedRuntimeFolder("/mnt/backup-drive/agent-room", noEnv), null);
+  assert.equal(detectSyncedRuntimeFolder("/home/x/projects/onedrive-uploader", noEnv), null);
+});
+
+test("detectSyncedRuntimeFolder honors an OneDrive env redirect root without the name in the path", () => {
+  // POSIX-style paths so path.relative containment resolves the same on any OS runner.
+  const env = { OneDrive: "/home/x/CloudSync" };
+  assert.deepEqual(detectSyncedRuntimeFolder("/home/x/CloudSync/agent-room/data", env), { provider: "OneDrive" });
+  // Outside the env root and with no path marker → not flagged.
+  assert.equal(detectSyncedRuntimeFolder("/home/x/dev/agent-room", env), null);
+  // An empty/absent env value must never false-positive.
+  assert.equal(detectSyncedRuntimeFolder("/home/x/dev/agent-room", { OneDrive: "" }), null);
 });

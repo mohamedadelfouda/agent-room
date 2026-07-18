@@ -23,7 +23,7 @@ import { discoverProviderCommands } from "./cli-discovery.js";
 import { runOrchestration, stopRun, isRunning, abortAllRuns, reconcileInterruptedRuns, validateOrchestrationRequest } from "./orchestrator.js";
 import { runExecuteAndReview, acceptExecution, rejectExecution, isExecuting, stopExec, abortAllExecutions, reconcileExecutionWorktrees } from "./exec-orchestrator.js";
 import { isGitRepo, hasGitHubOrigin } from "./worktree.js";
-import { logError, redact } from "./logger.js";
+import { logError, logWarn, redact } from "./logger.js";
 import { hostAllowed, checkApiAuth, issueCookieHeader, securityHeaders } from "./security.js";
 import { projectIdentity } from "./project.js";
 import { provider, providerCatalog, providerIds, discoverProviderModels } from "./providers/registry.js";
@@ -36,7 +36,7 @@ import { resolveMcpBridgeGrant, setMcpBridgeUrl } from "./mcp-config.js";
 export { configureConnectorSecretStore, hydrateConnectorSecrets } from "./connector-config.js";
 import { connectorConfigurationCatalog, saveConnectorConfiguration } from "./connector-config.js";
 import { apiErrorPayload, expectedApiError } from "./api-errors.js";
-import { acquireRuntimeLock } from "./runtime-lock.js";
+import { acquireRuntimeLock, detectSyncedRuntimeFolder } from "./runtime-lock.js";
 import {
   assertProvidersReady,
   configuredProviderCommand,
@@ -597,6 +597,12 @@ export const serverReady = new Promise((resolve, reject) => {
       onOwnershipLost(error) { void gracefulShutdown("runtime_lock_lost", error); },
     });
     if (await abortIfShuttingDown()) throw new Error("server_shutting_down");
+    // P1-2: the runtime lock is advisory; file-sync clients rewrite mtime/ino out of band and can
+    // corrupt it (and clobber session writes). Warn — never block — when the data folder looks synced.
+    const syncedFolder = detectSyncedRuntimeFolder(rootPath());
+    if (syncedFolder) {
+      logWarn(`Data folder is inside a synced folder (${syncedFolder.provider}). Move it to a LOCAL disk: file-sync clients can corrupt the advisory runtime lock and clobber session writes. Set AGENT_ROOM_RUNTIME_DIR to a local path.`);
+    }
     // Restore Trust & check approvals from the previous run before accepting
     // traffic, so detectAgents and absolute command paths keep working after a
     // restart without asking the user to set up again.
