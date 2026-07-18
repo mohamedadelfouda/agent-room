@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { approvedProviderCommand, runProcess, validateOption, resolveAllowedCommand } from "../process.js";
 import { redact } from "../logger.js";
+import { buildUsage } from "../usage.js";
 import { agentTimeoutMs, readTextFileCapped } from "../output-limits.js";
 
 function extractSessionId(value, depth = 0) {
@@ -40,6 +41,23 @@ function extractCodexError(parsed) {
     try { const inner = JSON.parse(raw); raw = inner?.error?.message || inner?.message || raw; } catch {}
   }
   return String(raw || "").trim() || null;
+}
+
+// Codex exec --json reports token usage on turn/completion events; field naming varies across versions, so
+// this looks in the likely spots and normalizes whatever is present (best-effort — returns null when absent).
+function extractCodexUsage(event) {
+  const raw = event?.usage || event?.info?.usage || event?.info?.total_token_usage || event?.token_count
+    || (String(event?.type || "").includes("token") ? event : null);
+  if (!raw || typeof raw !== "object") return null;
+  const input = raw.input_tokens ?? raw.prompt_tokens ?? raw.input;
+  const output = raw.output_tokens ?? raw.completion_tokens ?? raw.output;
+  if (!Number.isFinite(input) && !Number.isFinite(output)) return null;
+  return buildUsage("codex", {
+    inputTokens: input,
+    cachedInputTokens: raw.cached_input_tokens ?? raw.cache_read_input_tokens,
+    reasoningTokens: raw.reasoning_tokens ?? raw.reasoning_output_tokens,
+    outputTokens: output,
+  });
 }
 
 const MAX_CODEX_AUTH_BYTES = 2 * 1024 * 1024;
@@ -161,6 +179,7 @@ export async function runCodex({ prompt, config, cwd, onEvent, registerChild }) 
 
   let sessionId = null;
   let errorMessage = null;
+  let usage = null;
   let processResult;
   let finalText = "";
   let outputTruncated = false;
@@ -204,6 +223,8 @@ export async function runCodex({ prompt, config, cwd, onEvent, registerChild }) 
           sessionId ||= extractSessionId(parsed);
           const type = String(parsed.type || "");
           if (type === "error" || type === "turn.failed") errorMessage = extractCodexError(parsed) || errorMessage;
+          const parsedUsage = extractCodexUsage(parsed);
+          if (parsedUsage) usage = parsedUsage; // final usage event wins (running totals)
           const activity = extractActivity(parsed);
           if (activity) onEvent?.(activity);
         } catch {
@@ -227,7 +248,7 @@ export async function runCodex({ prompt, config, cwd, onEvent, registerChild }) 
 
   const durationMs = Date.now() - startedAt;
   const firstLine = (text) => String(text || "").split(/\r?\n/).find((l) => l.trim()) || "";
-  const meta = { model: model || "(default)", effort, exitCode: processResult.code, durationMs };
+  const meta = { model: model || "(default)", effort, exitCode: processResult.code, durationMs, usage };
 
   if (processResult.code !== 0 || errorMessage) {
     const message = errorMessage || firstLine(processResult.stderr) || `Codex exited with code ${processResult.code}`;

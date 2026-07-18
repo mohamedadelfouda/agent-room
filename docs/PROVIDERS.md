@@ -26,7 +26,7 @@ Bare commands are resolved from the host's native CLI search path. A native exec
 
 ## Adapter contract
 
-`run(options)` receives `prompt`, `config`, `cwd`, `onEvent`, and `registerChild`. It returns visible final text plus optional model, effort, duration, exit code, session ID, and truncation metadata. It must:
+`run(options)` receives `prompt`, `config`, `cwd`, `onEvent`, and `registerChild`. It returns visible final text plus optional model, effort, duration, exit code, session ID, truncation metadata, and a normalized `usage` record (token counts + optional cost, built with `server/usage.js`'s `buildUsage`, or `null`). It must:
 
 - resolve only its allowlisted native executable;
 - call `runProcess` with an argument array and `shell: false`;
