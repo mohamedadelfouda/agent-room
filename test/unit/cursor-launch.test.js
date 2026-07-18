@@ -75,6 +75,7 @@ test("reports absence instead of throwing when the install or entry point is mis
     const dir = path.join(root, "versions", "2026.07.16-899851b");
     await mkdir(dir, { recursive: true });
     await writeFile(path.join(dir, EXE), "binary"); // node present, index.js absent
+    if (process.platform !== "win32") await chmod(path.join(dir, EXE), 0o755); // executable, so the builder reaches the index.js check rather than failing on X_OK first
     const result = await buildCursorLaunchDescriptor({ installRoot: root });
     assert.equal(result.ok, false);
     assert.match(result.reason, /index\.js missing/);
