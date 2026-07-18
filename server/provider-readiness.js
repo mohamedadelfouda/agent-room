@@ -4,6 +4,7 @@ import { discoverProviderCommands } from "./cli-discovery.js";
 import { logError, redact } from "./logger.js";
 import { provider } from "./providers/registry.js";
 import { deriveProviderReadiness } from "./readiness-model.js";
+import { buildCursorLaunchDescriptor } from "./providers/cursor-launch.js";
 
 const READINESS_TTL_MS = 30000;
 const readinessCache = new Map();
@@ -58,6 +59,7 @@ export async function providerReadiness(providerId, { refresh = false, discover 
 }
 
 async function computeProviderReadiness(definition, discover) {
+  if (definition.id === "cursor") return computeCursorReadiness(definition);
   let status = await checkCommand(
     approvedProviderCommand(definition.id) || configuredProviderCommand(definition),
     {
@@ -87,6 +89,27 @@ async function computeProviderReadiness(definition, discover) {
     discoveryFound,
   });
   const value = { installed: status.ok, version: status.version, detail: status.detail, autoTrusted, dimensions };
+  readinessCache.set(definition.id, { value, expiresAt: Date.now() + READINESS_TTL_MS });
+  return value;
+}
+
+// Cursor launches through a fingerprint-pinned trusted descriptor, not a `command` on the allowlist, so its
+// readiness is "does the trusted launch chain build + validate on this machine?", not `<command> --version`.
+// The descriptor itself is the trust (fingerprinted node + index.js), so a valid build is trusted. Auth is
+// reactive (deriveProviderReadiness leaves it "unknown"): an unauthenticated review fails with an auth error
+// at run time rather than readiness probing the network every 30s.
+async function computeCursorReadiness(definition) {
+  let status;
+  try {
+    const built = await buildCursorLaunchDescriptor({});
+    status = built.ok && built.validation.valid
+      ? { ok: true, version: built.descriptor.version, detail: "Cursor detected (experimental)" }
+      : { ok: false, version: "", detail: redact(built.reason || "Cursor launch descriptor invalid") }; // reason embeds the install path (OS username)
+  } catch (error) {
+    status = { ok: false, version: "", detail: redact(error?.message || "Cursor detection failed") };
+  }
+  const dimensions = deriveProviderReadiness({ check: status, autoTrusted: status.ok, hasApprovedCommand: false, discoveryFound: false });
+  const value = { installed: status.ok, version: status.version, detail: status.detail, autoTrusted: status.ok, dimensions };
   readinessCache.set(definition.id, { value, expiresAt: Date.now() + READINESS_TTL_MS });
   return value;
 }

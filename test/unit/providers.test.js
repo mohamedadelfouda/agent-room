@@ -2,13 +2,15 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { provider, providerCatalog, providerIds } from "../../server/providers/registry.js";
 
-test("provider registry exposes runnable Claude and Codex definitions", () => {
-  assert.deepEqual(providerIds().sort(), ["claude", "codex"]);
+test("provider registry exposes runnable Claude, Codex, and Cursor definitions", () => {
+  assert.deepEqual(providerIds().sort(), ["claude", "codex", "cursor"]);
   for (const id of providerIds()) {
-    const definition = provider(id);
-    assert.equal(typeof definition.run, "function");
-    assert.ok(definition.efforts.length > 0);
+    assert.equal(typeof provider(id).run, "function");
   }
+  // Claude/Codex expose reasoning-effort choices; Cursor encodes effort in the model id, so it has none.
+  assert.ok(provider("claude").efforts.length > 0);
+  assert.ok(provider("codex").efforts.length > 0);
+  assert.deepEqual(provider("cursor").efforts, []);
 });
 
 test("public provider catalog omits server functions", () => {

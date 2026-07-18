@@ -1,5 +1,6 @@
 import { runClaude } from "../adapters/claude.js";
 import { discoverCodexModels, runCodex } from "../adapters/codex.js";
+import { discoverCursorModels, runCursor } from "../adapters/cursor.js";
 
 // Install guidance only — shown to the user for copy/paste, never executed by
 // Agent Room. Claude needs its native installer because the npm package ships
@@ -47,6 +48,29 @@ const providers = new Map([
     capabilities: { web: false, projectRead: true, projectTransport: "sandbox", connectors: false, executeModes: ["run"] },
     discoverModels: discoverCodexModels,
     run: runCodex,
+  }],
+  // Cursor is REVIEW-ONLY (executeModes []) and experimental on Windows: its OS sandbox — required to
+  // contain an executor — exists only on macOS/Linux (cursor-agent fails closed on --sandbox enabled on
+  // Windows). It launches through a fingerprint-pinned trusted descriptor, not a bare command, so it uses
+  // a descriptor-based readiness path (provider-readiness.js) instead of the `command` allowlist.
+  ["cursor", {
+    id: "cursor",
+    label: "Cursor (experimental)",
+    experimental: true,
+    command: "cursor-agent",
+    install: {
+      command: installHint({
+        win32: `powershell -ExecutionPolicy ByPass -c "irm https://cursor.com/install.ps1 | iex"`,
+        default: "curl https://cursor.com/install -fsS | bash",
+      }),
+      url: "https://docs.cursor.com/en/cli/overview",
+    },
+    defaultModel: "",
+    models: [],
+    efforts: [],
+    capabilities: { web: false, projectRead: true, projectTransport: "sandbox", connectors: false, executeModes: [] },
+    discoverModels: discoverCursorModels,
+    run: runCursor,
   }],
 ]);
 
