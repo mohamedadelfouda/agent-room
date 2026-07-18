@@ -30,6 +30,7 @@ const ERROR_MESSAGE_KEYS = Object.freeze({
   executor_unknown: "errorExecutorUnknown",
   reviewer_unknown: "errorReviewerUnknown",
   executor_reviewer_same: "errorExecutorReviewerSame",
+  executor_cannot_execute: "errorExecutorCannotExecute",
   execution_task_required: "errorExecutionTaskRequired",
   execution_failed: "executionFailed",
   execution_stopped: "errorExecutionStopped",

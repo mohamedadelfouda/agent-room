@@ -298,3 +298,26 @@ test("an execution validation failure surfaces a localizable code, not a hardcod
     await cleanupSession(session.id);
   }
 });
+
+test("a review-only provider chosen as executor is rejected early with executor_cannot_execute", async () => {
+  // claude has no executeModes, so it must be rejected as an executor at the capability gate — before any
+  // exec_started / clone — with the dedicated code, not late and generic from executor.js.
+  const dir = repository();
+  let session;
+  const events = [];
+  try {
+    session = await trustedSession("executor-capability-guard", dir);
+    await runExecuteAndReview(session.id, { executor: "claude", reviewer: "codex", mode: "run", task: "add a feature", agents: {} }, (event) => events.push(event));
+    const error = events.find((event) => event.type === "exec_error");
+    assert.ok(error, "an exec_error event was emitted");
+    assert.equal(error.code, "executor_cannot_execute");
+    assert.equal(events.some((event) => event.type === "exec_started"), false); // rejected before execution begins
+    assert.equal(events.some((event) => event.type === "exec_ready"), false);
+    assert.equal(isExecuting(session.id), false);
+  } finally {
+    // Session setup is inside try so a setup failure still runs cleanup; nested finally guarantees the
+    // temp repo is removed even if cleanupSession throws.
+    try { if (session) await cleanupSession(session.id); }
+    finally { rmSync(dir, { recursive: true, force: true }); }
+  }
+});
