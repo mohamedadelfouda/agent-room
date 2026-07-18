@@ -171,6 +171,10 @@ function applyLang(next) {
   applyShellChrome();
   refreshSessions();
   if (currentSession) { loadSessionMeta(); renderMessages(); loadConnectors(); }
+  // Onboarding status rows are built with baked-in t(...) labels (no data-i18n), so re-render them when the
+  // language changes while the dialog is open — otherwise the list stays in the previous language while the
+  // static parts around it flip (the picker now lives inside this dialog, so that switch is reachable).
+  if (!$("onboardModal")?.classList.contains("hidden")) loadOnboard();
   localStorage.setItem("agent-room-lang", lang);
 }
 
