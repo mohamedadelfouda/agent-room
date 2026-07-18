@@ -2,6 +2,18 @@ import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 
+// The runtime lock is ADVISORY, not a kernel lock. It upholds "one Agent Room writer per data
+// directory" under normal operation, but with a bounded, self-healing risk window rather than a hard
+// guarantee: the heartbeat proves event-loop liveness (not process liveness), so a server wedged in
+// more than CORRUPT_LOCK_STALE_MS of synchronous work can momentarily look dead and have its lock
+// taken over by a second server; and takeover keys off file identity (ino + mtime), which some
+// filesystems report unreliably (e.g. ino = 0 on certain Windows volumes). A true cross-process kernel
+// lock (flock) would need a native dependency, against the project's zero-runtime-deps rule. Two
+// operational consequences follow: run ONE server per data directory, and keep the data directory on a
+// LOCAL disk — file-sync clients (OneDrive, Dropbox, Google Drive, iCloud) rewrite mtime/ino out of
+// band and can both corrupt the lock and clobber session writes. detectSyncedRuntimeFolder surfaces
+// that second case as a startup + diagnostics warning; it never blocks startup.
+
 const LOCK_FILE_NAME = ".agent-room-runtime.lock";
 const HEARTBEAT_INTERVAL_MS = 5000;
 const CORRUPT_LOCK_STALE_MS = 30000;
@@ -216,4 +228,47 @@ export async function acquireRuntimeLock(runtimeRoot, options = {}) {
     }
   }
   throw runtimeLockError("runtime_locked", "Another Agent Room server acquired this data folder");
+}
+
+// Default folder names the major file-sync clients use, matched anywhere in the path (cross-platform;
+// backslash or forward slash). The trailing class requires a separator, space, or end-of-string AFTER
+// the name, so "OneDrive - Contoso" (business, space-separated) matches but "onedrive-uploader" does
+// not. Modern hyphenated mounts ("OneDrive-Contoso", "GoogleDrive-user@x") live under macOS
+// CloudStorage and are handled by CLOUD_STORAGE_MOUNT below — which sidesteps the "OneDrive-<word>"
+// false-positive ambiguity entirely rather than trying to tell a real suffix from a coincidence.
+const SYNCED_FOLDER_MARKERS = [
+  { provider: "OneDrive", pattern: /[\\/]OneDrive(?:[\\/ ]|$)/i },
+  { provider: "Dropbox", pattern: /[\\/]Dropbox(?:[\\/ ]|$)/i },
+  { provider: "Google Drive", pattern: /[\\/]Google ?Drive(?:[\\/ ]|$)/i },
+  { provider: "iCloud Drive", pattern: /[\\/](?:iCloud Drive|Mobile Documents)(?:[\\/]|$)/i },
+];
+
+// macOS "File Provider" desktop clients (OneDrive, Google Drive, Dropbox, Box, …) all mount under
+// ~/Library/CloudStorage/<Provider>-<account>/. Matching the parent catches every hyphenated suffix
+// without guessing it; the leading provider word maps to a friendly label.
+const CLOUD_STORAGE_MOUNT = /[\\/]Library[\\/]CloudStorage[\\/]([A-Za-z]+)/i;
+const CLOUD_STORAGE_PROVIDERS = { onedrive: "OneDrive", googledrive: "Google Drive", dropbox: "Dropbox", box: "Box", icloud: "iCloud Drive" };
+
+function pathIsInside(child, parent) {
+  const rel = path.relative(path.resolve(String(parent)), path.resolve(String(child)));
+  return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
+}
+
+// Best-effort heuristic: is the runtime/data directory inside a known file-sync client's folder?
+// Returns { provider } when it looks synced, else null. Used ONLY to warn — never to block, so a false
+// positive can never stop the app. Matches macOS CloudStorage mounts and the default folder names
+// cross-platform, plus the Windows %OneDrive%* env roots (OneDrive can redirect Documents/Desktop
+// without "OneDrive" in the visible path).
+export function detectSyncedRuntimeFolder(runtimeRoot, env = process.env) {
+  const resolved = path.resolve(String(runtimeRoot || "."));
+  const mount = resolved.match(CLOUD_STORAGE_MOUNT);
+  if (mount) return { provider: CLOUD_STORAGE_PROVIDERS[mount[1].toLowerCase()] || "cloud storage" };
+  for (const { provider, pattern } of SYNCED_FOLDER_MARKERS) {
+    if (pattern.test(resolved)) return { provider };
+  }
+  for (const key of ["OneDrive", "OneDriveConsumer", "OneDriveCommercial"]) {
+    const base = env?.[key];
+    if (base && String(base).trim() && pathIsInside(resolved, base)) return { provider: "OneDrive" };
+  }
+  return null;
 }
