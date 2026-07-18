@@ -194,6 +194,14 @@ jobs:
           fi
       - name: Publish to npm
         if: steps.npm.outputs.publish == 'true'
+        shell: bash
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: npm publish --access public
+        run: |
+          # A prerelease tag (vX.Y.Z-rc.1, -beta, …) publishes under the "next" dist-tag, never "latest",
+          # so `npx agent-room` (which installs latest) can't resolve to an RC/beta. Stable tags keep default.
+          if [[ "$GITHUB_REF_NAME" == *-* ]]; then
+            npm publish --access public --tag next
+          else
+            npm publish --access public
+          fi

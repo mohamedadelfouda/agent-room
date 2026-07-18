@@ -22,7 +22,12 @@ if (!process.env.AGENT_ROOM_RUNTIME_DIR) {
 }
 
 try {
-  await import(new URL("../server/index.js", import.meta.url).href);
+  const { serverReady } = await import(new URL("../server/index.js", import.meta.url).href);
+  // Launched via the bin, server/index.js's directEntry startup guard is NOT installed (process.argv[1]
+  // is this launcher, not server/index.js), so a post-evaluation startup failure (port already in use,
+  // runtime lock held) would otherwise surface as an unhandledRejection and still exit 0 — a false
+  // "started". Await the server's readiness so such a failure exits non-zero here.
+  await serverReady;
 } catch (error) {
   console.error(`Agent Room failed to start: ${error?.message || error}`);
   process.exit(1);
