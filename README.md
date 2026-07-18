@@ -1,19 +1,27 @@
+<div align="right"><a href="README.ar.md">🇪🇬 اقرأ بالعربية</a></div>
+
 # Agent Room
 
-Agent Room is a local workspace where multiple coding-agent CLIs share evidence, challenge one proposal, and leave the final decision to the user. It currently ships provider adapters for Claude Code and Codex CLI.
+**You already use two AI coding agents. Agent Room makes them work together — and keeps you in charge.**
 
-The product is built around four contracts:
+If you code with Claude and Codex, you know the routine: paste a task into one, paste its answer into the other to "have it reviewed," lose track of who suggested what, and play human glue between two chat windows — always one careless paste away from letting an agent loose on your real repo.
 
-- Both agents receive the same bounded evidence pack from a trusted project.
-- Early stopping requires a valid, delta-free agreement on the latest proposal version. A settled run may finish as complete, waiting for the user, or waiting for external validation; incomplete work and genuine disagreement keep the discussion open.
-- One executor changes a disposable local Git clone; a separate agent reviews the captured tree read-only.
-- The accepted project commit, merge, pull request, email, issue, or database write happens only after an explicit user decision. Disposable executor commits, if any, are collapsed before acceptance.
+Agent Room puts them in one room instead.
 
-## What is different
+Both agents get the same evidence from your project. One proposes a change and carries it out — but only inside a **throwaway copy** of your repo, never the real one. The other reviews the result. You see the proposal, the review, and a plain "here's why this run stopped and what it needs next" — then **you** decide. Nothing touches your project, no pull request opens, no email sends, until you say yes.
 
-Agent Room is not a side-by-side chat wrapper. It records proposal versions, a machine-approved pending-item registry, and separate agreement and task-completion states. The decision card shows why the latest run stopped and the next required step without treating a user choice or external check as agent disagreement. Its Execute → Review → Decide path creates the accepted Git commit only after approval and rechecks the immutable Git tree for secrets immediately before that commit.
+And it isn't two chat windows side by side. Agent Room keeps track of proposal versions, what the agents *actually* agreed on, and whether the work is done or just waiting on you — so a run ends because it's genuinely finished, not because someone ran out of things to say.
 
-Optional connector tools use the same rule. Read actions require per-session opt-in. State-changing GitHub, Gmail, and Supabase tools create a pending proposal; they do not perform the action until the user approves it in Agent Room. Connector credentials for source deployments use documented environment variables; optional Electron builds can use OS-backed encrypted storage when you package them locally.
+The same rule covers connectors: reading GitHub, Gmail, or Supabase is opt-in per session, and anything that *changes* something waits as a proposal until you approve it.
+
+### How one run goes
+
+1. **Trust a project.** Nothing is shared with the agents until you do.
+2. **They work from the same evidence.** One executes on a disposable clone; the other reviews the captured result read-only.
+3. **You get a decision card** — the proposal, the review, and exactly why it stopped and what's next.
+4. **You decide.** Only then does the real Git commit, merge, PR, email, or database write happen — and the tree is re-scanned for secrets right before it lands.
+
+> Try it with one command (once it's on npm): **`npx agent-room`** — it opens in your browser.
 
 ## Run the local server
 
