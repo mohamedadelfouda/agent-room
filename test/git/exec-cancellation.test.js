@@ -1,14 +1,15 @@
+import "./_runtime-isolation.mjs"; // MUST be first — redirects RUNTIME_ROOT before store.js loads.
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createWorktree } from "../../server/worktree.js";
+import { createWorktree, projectWorkspaceKey } from "../../server/worktree.js";
 import { runExecution } from "../../server/executor.js";
 import { runExecuteAndReview, stopExec, isExecuting } from "../../server/exec-orchestrator.js";
-import { createSession, getSession, rootPath, saveSession } from "../../server/store.js";
+import { createSession, executionWorkspacesRoot, getSession, rootPath, saveSession } from "../../server/store.js";
 import { projectIdentity } from "../../server/project.js";
 import { provider } from "../../server/providers/registry.js";
 import { claimSessionActivity } from "../../server/session-activity.js";
@@ -53,9 +54,12 @@ async function cleanupSession(id) {
   ]);
 }
 
-// The workspace root for one executor should hold no leftover task clones after a stop.
+// The out-of-tree bucket for this project's executor should hold no leftover task clones after a stop.
+function executorAgentRoot(dir, agent) {
+  return join(executionWorkspacesRoot(), projectWorkspaceKey(realpathSync(dir)), agent);
+}
 function executorWorkspaceCount(dir, agent) {
-  const root = join(dir, ".agent-workspaces", agent);
+  const root = executorAgentRoot(dir, agent);
   return existsSync(root) ? readdirSync(root).length : 0;
 }
 
@@ -87,7 +91,7 @@ test("a stop that lands after the clone aborts before the executor runs and clea
   // clone step, before the executor is launched. Filesystem-based so it doesn't depend on the exact
   // number of internal cancel checks (which would make the test brittle).
   const cloneExists = () => {
-    const agentRoot = join(dir, ".agent-workspaces", "codex");
+    const agentRoot = executorAgentRoot(dir, "codex");
     if (!existsSync(agentRoot)) return false;
     return readdirSync(agentRoot).some((entry) => existsSync(join(agentRoot, entry, ".git")));
   };

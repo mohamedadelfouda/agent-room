@@ -8,6 +8,7 @@
 // the blocked_secret branch by mocking hasBlockingSecrets. The orchestrator is imported *after* the
 // mocks so its `import { removeWorktree } from "./worktree.js"` binds to the mock; a static import at
 // the top of the file would have bound the real module before the mock was installed.
+import "./_runtime-isolation.mjs"; // MUST be first — redirects RUNTIME_ROOT before store.js loads.
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";

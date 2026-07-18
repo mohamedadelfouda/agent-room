@@ -5,6 +5,7 @@ import { resolveAllowedCommand, runProcess } from "./process.js";
 import { redact } from "./logger.js";
 import { isGitHubRemote } from "./github-remote.js";
 import { EXEC_STOPPED_MESSAGE } from "./exec-state.js";
+import { executionWorkspacesRoot } from "./store.js";
 
 const SAFE = /^[a-zA-Z0-9_.-]+$/;
 const EXECUTION_BRANCH = /^agent\/([a-zA-Z0-9_.-]+)\/([a-zA-Z0-9_.-]+)$/;
@@ -26,28 +27,56 @@ function normalizedPath(value) {
   return process.platform === "win32" ? resolved.toLowerCase() : resolved;
 }
 
+// Disposable execution clones live under the app runtime dir, namespaced by a short hash of the canonical
+// project path — OUT of the project tree, so the real repo is never a `cd ..` away from an executor and
+// never shows up in the project's git status. Records created before this move used an in-tree root
+// (<project>/.agent-workspaces); cleanup and reconciliation still recognize that legacy root too.
+export function projectWorkspaceKey(projectPath) {
+  return digest(normalizedPath(projectPath)).slice(0, 16);
+}
+
+function legacyExecutionRoot(canonicalProject) {
+  return path.join(canonicalProject, ".agent-workspaces");
+}
+
+function currentExecutionRootFor(canonicalProject) {
+  return path.join(executionWorkspacesRoot(), projectWorkspaceKey(canonicalProject));
+}
+
 async function executionLocation(projectPath, wtPath, branch) {
   const match = String(branch || "").match(EXECUTION_BRANCH);
   if (!match || !isSafeExecutionComponent(match[1]) || !isSafeExecutionComponent(match[2])) return null;
-  const canonicalProject = await fs.realpath(projectPath);
-  const root = path.join(canonicalProject, ".agent-workspaces");
-  const expected = path.join(root, match[1], match[2]);
-  if (!isPathInside(root, expected) || normalizedPath(expected) !== normalizedPath(wtPath)) return null;
-  return { root, agent: match[1], taskId: match[2], expected };
+  // The out-of-tree root is keyed off the (canonical) project path, so a clone stays cleanable even after
+  // its project folder is deleted. The legacy in-tree root only exists while the project does. Accept both
+  // so an execution created before the relocation stays cleanable; the branch <-> path binding must match
+  // exactly for exactly one of them. Safety for the out-of-tree root comes from it living under the
+  // app-owned exec root (validated again in removeWorktree), not from the project realpath.
+  let canonicalProject = null;
+  try { canonicalProject = await fs.realpath(projectPath); }
+  catch (error) { if (error.code !== "ENOENT" && error.code !== "ENOTDIR") throw error; }
+  const candidates = [currentExecutionRootFor(canonicalProject ?? path.resolve(projectPath))];
+  if (canonicalProject) candidates.push(legacyExecutionRoot(canonicalProject));
+  for (const root of candidates) {
+    const expected = path.join(root, match[1], match[2]);
+    if (isPathInside(root, expected) && normalizedPath(expected) === normalizedPath(wtPath)) {
+      return { root, agent: match[1], taskId: match[2], expected };
+    }
+  }
+  return null;
 }
 
 async function ensureExecutionRoot(projectPath) {
   const canonicalProject = await fs.realpath(projectPath);
-  const root = path.join(canonicalProject, ".agent-workspaces");
+  const root = currentExecutionRootFor(canonicalProject);
   try {
     const info = await fs.lstat(root);
-    if (!info.isDirectory() || info.isSymbolicLink()) throw new Error(".agent-workspaces must be a real directory");
+    if (!info.isDirectory() || info.isSymbolicLink()) throw new Error("Execution workspaces directory must be a real directory");
   } catch (error) {
     if (error.code !== "ENOENT") throw error;
     await fs.mkdir(root, { recursive: true, mode: 0o700 });
   }
   const canonical = await fs.realpath(root);
-  if (normalizedPath(canonical) !== normalizedPath(root)) throw new Error(".agent-workspaces cannot redirect outside the project");
+  if (normalizedPath(canonical) !== normalizedPath(root)) throw new Error("Execution workspaces directory cannot redirect elsewhere");
   return canonical;
 }
 
@@ -177,7 +206,6 @@ export async function createWorktree(projectPath, agent, taskId, { registerChild
   const baseSha = sha.trim();
   const approval = await publicationContext(projectPath);
   const executionRoot = await ensureExecutionRoot(projectPath);
-  const rel = path.join(".agent-workspaces", agent, taskId);
   const agentRoot = await ensureRealDirectory(path.join(executionRoot, agent), "Execution provider directory");
   const wtPath = path.join(agentRoot, taskId);
   const branch = `agent/${agent}/${taskId}`;
@@ -214,7 +242,6 @@ export async function createWorktree(projectPath, agent, taskId, { registerChild
     return {
       path: wtPath,
       branch,
-      rel,
       baseSha,
       isolation: "clone",
       cloneConfigFingerprint: digest(config),
@@ -993,27 +1020,62 @@ export async function removeWorktree(projectPath, wtPath, branch, { strict = fal
   return { ok: errors.length === 0, errors };
 }
 
-export async function listExecutionWorkspaces(projectPath) {
-  let root;
-  try { root = await ensureExecutionRoot(projectPath); }
-  catch (error) {
-    if (error.code === "ENOENT") return [];
-    throw error;
-  }
+async function scanExecutionRoot(root) {
+  let agentEntries;
+  try { agentEntries = await fs.readdir(root, { withFileTypes: true }); }
+  catch (error) { if (error.code === "ENOENT") return []; throw error; }
   const found = [];
-  for (const agentEntry of await fs.readdir(root, { withFileTypes: true })) {
+  for (const agentEntry of agentEntries) {
     if (!agentEntry.isDirectory() || agentEntry.isSymbolicLink() || !isSafeExecutionComponent(agentEntry.name)) continue;
     const agentPath = path.join(root, agentEntry.name);
     for (const taskEntry of await fs.readdir(agentPath, { withFileTypes: true })) {
       if (!taskEntry.isDirectory() || taskEntry.isSymbolicLink() || !isSafeExecutionComponent(taskEntry.name)) continue;
+      const workspacePath = path.join(agentPath, taskEntry.name);
       found.push({
-        path: path.join(agentPath, taskEntry.name),
+        path: workspacePath,
         branch: `agent/${agentEntry.name}/${taskEntry.name}`,
-        isolation: await workspaceIsolation(path.join(agentPath, taskEntry.name)),
+        isolation: await workspaceIsolation(workspacePath),
       });
     }
   }
   return found;
+}
+
+export async function listExecutionWorkspaces(projectPath) {
+  // Scan the current out-of-tree root AND any legacy in-tree root. Key the current root off the realpath
+  // (matching creation); if the project dir is gone, its bucket is keyed from the already-canonical stored
+  // path and the legacy in-tree root is gone with it.
+  let canonicalProject = null;
+  try { canonicalProject = await fs.realpath(projectPath); }
+  catch (error) { if (error.code !== "ENOENT" && error.code !== "ENOTDIR") throw error; }
+  const current = await scanExecutionRoot(currentExecutionRootFor(canonicalProject ?? path.resolve(projectPath)));
+  const legacy = canonicalProject ? await scanExecutionRoot(legacyExecutionRoot(canonicalProject)) : [];
+  return [...current, ...legacy];
+}
+
+// Out-of-tree clones don't die with a deleted project the way in-tree ones did. Sweep any exec-workspaces
+// project bucket whose key matches no surviving session (a project that still has a session keeps its
+// bucket; active executions within a kept bucket are handled per-record). Only ever removes a real
+// 16-hex directory directly under the app-owned root — never a symlink or anything that redirects out.
+export async function sweepOrphanExecutionWorkspaces(knownProjectKeys, base = executionWorkspacesRoot()) {
+  let entries;
+  try { entries = await fs.readdir(base, { withFileTypes: true }); }
+  catch (error) {
+    if (error.code === "ENOENT") return { ok: true, errors: [] };
+    return { ok: false, errors: [redact(error.message)] };
+  }
+  const errors = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory() || entry.isSymbolicLink() || !/^[0-9a-f]{16}$/.test(entry.name)) continue;
+    if (knownProjectKeys.has(entry.name)) continue;
+    const dir = path.join(base, entry.name);
+    try {
+      const canonical = await fs.realpath(dir);
+      if (normalizedPath(canonical) !== normalizedPath(dir)) { errors.push("orphan execution bucket changed before cleanup"); continue; }
+      await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
+    } catch (error) { errors.push(redact(error.message)); }
+  }
+  return { ok: errors.length === 0, errors };
 }
 
 async function workspaceIsolation(workspacePath) {

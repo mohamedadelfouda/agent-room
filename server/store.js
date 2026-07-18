@@ -26,6 +26,10 @@ function truncateTitle(title) {
   return [...String(title || "")].slice(0, TITLE_MAX_CODEPOINTS).join("");
 }
 const SCRATCH_WORKSPACE_DIR = path.join(RUNTIME_ROOT, "workspace");
+// Disposable execution clones live here — under the app runtime dir, OUTSIDE any user project tree — so
+// the real repo is never a few `cd ..` away from an executor and never shows up in the project's git
+// status. Per-project subdirs are created by worktree.js.
+const EXECUTION_WORKSPACES_DIR = path.join(RUNTIME_ROOT, "exec-workspaces");
 const MAX_SESSION_MESSAGES = 200;
 const MAX_MESSAGE_CHARS = 100000;
 const MAX_DECISIONS = 200;
@@ -559,6 +563,13 @@ export async function scratchWorkspacePath() {
   await fs.mkdir(SCRATCH_WORKSPACE_DIR, { recursive: true, mode: 0o700 });
   if (process.platform !== "win32") await fs.chmod(SCRATCH_WORKSPACE_DIR, 0o700);
   return SCRATCH_WORKSPACE_DIR;
+}
+
+// The base dir for disposable execution clones (worktree.js owns the per-project layout under it). Pure
+// path getter — no I/O — so it's safe to call from cleanup/validation paths; worktree.js creates the
+// directories it needs.
+export function executionWorkspacesRoot() {
+  return EXECUTION_WORKSPACES_DIR;
 }
 
 export async function mutateSession(id, mutate) {

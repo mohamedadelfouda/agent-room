@@ -1,6 +1,6 @@
 import { getSession, listSessions, mutateSession, scratchWorkspacePath } from "./store.js";
 import { runExecution } from "./executor.js";
-import { assertProjectReady, listAcceptedRefs, listExecutionWorkspaces, listWorktrees, recoverAgentRoomIndexLock, releaseAcceptedCommit, removeWorktree, mergeBranch, pushBranch, pruneObjects } from "./worktree.js";
+import { assertProjectReady, listAcceptedRefs, listExecutionWorkspaces, listWorktrees, recoverAgentRoomIndexLock, releaseAcceptedCommit, removeWorktree, mergeBranch, pushBranch, pruneObjects, sweepOrphanExecutionWorkspaces, projectWorkspaceKey } from "./worktree.js";
 import { provider } from "./providers/registry.js";
 import { resolveAllowedCommand, runProcess, terminateProcess } from "./process.js";
 import { hasBlockingSecrets } from "./secret-scan.js";
@@ -218,6 +218,22 @@ export async function reconcileExecutionWorktrees() {
     } catch (error) {
       logError(`orphan worktree reconciliation skipped project ${projectPath}`, error.message);
     }
+  }
+
+  // Out-of-tree clones don't die with a deleted project the way in-tree ones did. Sweep exec-workspaces
+  // buckets whose project no longer has any session — buckets for still-known projects are kept, and their
+  // live executions were handled per-record above. This never deletes an in-flight clone: reconciliation
+  // runs once at startup BEFORE `startupReconciled` flips true, and the /execute route refuses to create a
+  // clone until then (server/index.js), so no bucket can appear concurrently with this key snapshot. (A
+  // session in `recovery_needed` state has no usable projectPath, so its bucket, if any, is treated as
+  // orphaned; that only costs a "run the task again" after recovery — the reviewed diff lives in the
+  // session file, not the clone.)
+  try {
+    const knownKeys = new Set([...projects.keys()].map(projectWorkspaceKey));
+    const swept = await sweepOrphanExecutionWorkspaces(knownKeys);
+    if (!swept.ok) logError("orphan execution-workspace sweep incomplete", swept.errors.join("; "));
+  } catch (error) {
+    logError("orphan execution-workspace sweep failed", error.message);
   }
 }
 
