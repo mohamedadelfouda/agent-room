@@ -7,7 +7,7 @@
 
 ## Proven live
 - **Reviewer works.** Through the trusted launch chain, cursor-agent found a planted `a - b` vs `a + b` bug.
-- **Write-contained.** `--mode plan` wrote nothing (`git status` clean) even when explicitly prompted to write.
+- **No Git-visible writes.** `--mode plan` left `git status` clean even when explicitly prompted to write. (A clean `git status` is not proof of *zero* writes — untracked-ignored and hidden files are not reported; full write-containment needs the name-and-hash snapshot the integration plan specifies, not `git status` alone.)
 - **Output shape.** One JSON object: `{ type, subtype, is_error, result, session_id, usage:{ inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens } }` — usage tokens are available for the benchmark.
 - **Prompt over stdin** (no CLI length limit).
 - **Auth is OS-level.** An **empty** isolated `CURSOR_CONFIG_DIR` still authenticates → isolating user config is free: a clean config dir gives no user MCPs/settings while the login persists.
@@ -19,10 +19,10 @@ cursor-agent **fails closed** on `--sandbox enabled` on Windows (`"Sandbox requi
 
 ## What actually protects a Windows review
 1. `--mode plan` → read-only (verified: no writes).
-2. **Disposable clone as `cwd`** (`server/exec-orchestrator.js`) with no `--add-dir` → the agent sees only the reviewed code, not the user's other files.
+2. **Disposable clone as `cwd`** (`server/exec-orchestrator.js`) with no `--add-dir` → the agent's *default* directory is the reviewed code. This is a working directory, **not filesystem confinement**: with no OS sandbox (Windows), the process can still read absolute paths (the user's home, other accessible files). Read-isolation on Windows rests on `--mode plan` + config isolation, not on `cwd`.
 3. **Isolated `CURSOR_CONFIG_DIR`** → no user MCPs/settings leak in; login persists (OS-level).
 4. No `--approve-mcps`, never `--force`/`--yolo`.
-5. Reviewed-tree SHA is re-checked after review (existing behavior) → any mutation is rejected.
+5. Reviewed-tree SHA is re-checked after review (existing behavior) → any **Git-visible** mutation is rejected. Bound: `stageAcceptedTree` stages via `git add -A` + `git ls-files --others --exclude-standard` (`server/worktree.js`), so a *gitignored* file Cursor wrote is not covered by this SHA — the plan-mode read-only property (1) covers those, not the tree hash.
 
 ## Unresolved (needs more than tonight)
 - **Project MCP injection — inconclusive.** A malicious `.cursor/mcp.json` / `.cursor/cli.json` in the reviewed code did **not** run in any tested configuration (with/without `--trust`, even with `--approve-mcps`). **But** the control — a *user-level* MCP that should run — also didn't fire the marker, because cursor-agent appears to lazy-spawn stdio MCP servers only when a real tool is invoked, and the throwaway server exposed none. So the evidence is "did not run," not proven "cannot run." **Closing this needs a real minimal MCP server** (speaks the protocol, exposes one marker-writing tool) that the agent is asked to call.
