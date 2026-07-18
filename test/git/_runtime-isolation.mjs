@@ -5,14 +5,14 @@
 // the temp project dir the tests delete — leak into the checkout on every run. Import this FIRST (before
 // node:test and before any ../../server import) in every git test file that exercises execution clones.
 //
-// node --test isolates each test file in its own process, so this runs once per file. An operator-set
-// AGENT_ROOM_RUNTIME_DIR (e.g. in CI) is respected rather than overridden.
+// node --test isolates each test file in its own process, so this runs once per file. Always redirect to a
+// fresh throwaway dir — never reuse an inherited AGENT_ROOM_RUNTIME_DIR: these tests create real disposable
+// clones + session files through the app's own paths, so a stray/real value would be polluted, and parallel
+// test processes would collide on one shared runtime.
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-if (!process.env.AGENT_ROOM_RUNTIME_DIR) {
-  const runtime = mkdtempSync(join(tmpdir(), "ar-git-test-runtime-"));
-  process.env.AGENT_ROOM_RUNTIME_DIR = runtime;
-  process.on("exit", () => { try { rmSync(runtime, { recursive: true, force: true }); } catch {} });
-}
+const runtime = mkdtempSync(join(tmpdir(), "ar-git-test-runtime-"));
+process.env.AGENT_ROOM_RUNTIME_DIR = runtime;
+process.on("exit", () => { try { rmSync(runtime, { recursive: true, force: true }); } catch {} });

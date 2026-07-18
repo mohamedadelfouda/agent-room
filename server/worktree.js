@@ -999,22 +999,30 @@ export async function removeWorktree(projectPath, wtPath, branch, { strict = fal
   } else {
     try { await git(["worktree", "remove", "--force", wtPath], projectPath); } catch {}
   }
-  try { await git(["worktree", "prune", "--expire=now"], projectPath); }
-  catch (error) { errors.push(`worktree prune: ${error.message}`); }
+  // Project-side Git cleanup applies only to a legacy in-tree worktree (registered in the project's Git).
+  // An isolated clone is a separate repo (own objects/refs) the project never registered, so it needs none
+  // of this — and running `git worktree prune` / `git worktree list` with cwd = a possibly-deleted project
+  // (surviving project deletion is the relocation's whole point) spawns git with ENOENT and wrongly reports
+  // a cleanup failure, stranding the execution in cleanupPending. For an isolated clone the fs delete above
+  // + the existence check below ARE the cleanup.
   if (!isolatedClone) {
+    try { await git(["worktree", "prune", "--expire=now"], projectPath); }
+    catch (error) { errors.push(`worktree prune: ${error.message}`); }
     const branchRef = `refs/heads/${branch}`;
     if (await optionalGitValue(["rev-parse", "--verify", branchRef], projectPath)) {
       try { await git(["branch", "-D", branch], projectPath); }
       catch (error) { errors.push(`branch delete: ${error.message}`); }
     }
+    try { await git(["worktree", "prune", "--expire=now"], projectPath); }
+    catch (error) { errors.push(`worktree prune: ${error.message}`); }
   }
-  try { await git(["worktree", "prune", "--expire=now"], projectPath); }
-  catch (error) { errors.push(`worktree prune: ${error.message}`); }
   try { await fs.access(wtPath); errors.push("worktree directory still exists after cleanup"); } catch {}
-  const registered = (await listWorktrees(projectPath)).split(/\r?\n\r?\n/).some((block) => block.match(/^worktree (.+)$/m)?.[1] === wtPath);
-  if (registered) errors.push("worktree registration still exists after cleanup");
-  if (!isolatedClone && await optionalGitValue(["rev-parse", "--verify", `refs/heads/${branch}`], projectPath)) {
-    errors.push("execution branch still exists after cleanup");
+  if (!isolatedClone) {
+    const registered = (await listWorktrees(projectPath)).split(/\r?\n\r?\n/).some((block) => block.match(/^worktree (.+)$/m)?.[1] === wtPath);
+    if (registered) errors.push("worktree registration still exists after cleanup");
+    if (await optionalGitValue(["rev-parse", "--verify", `refs/heads/${branch}`], projectPath)) {
+      errors.push("execution branch still exists after cleanup");
+    }
   }
   if (strict && errors.length) throw new Error(`Execution cleanup failed: ${errors.join("; ")}`);
   return { ok: errors.length === 0, errors };

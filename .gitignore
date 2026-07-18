@@ -11,7 +11,8 @@ data/session-recovery/
 logs/
 workspace/
 # Disposable execution clones now live here (under the runtime dir), out of any project tree.
-exec-workspaces/
+# Anchored to the repo root so it ignores only the default runtime location, not an attached project's own.
+/exec-workspaces/
 *.log
 node_modules/
 .corepack/
