@@ -5,6 +5,7 @@ import assert from "node:assert/strict";
 import { launchBrowserHarness, waitFor } from "./harness.mjs";
 
 const STATUS = {
+  bothMissing: { providers: { claude: { installed: false, detail: "not found on PATH" }, codex: { installed: false, detail: "not found on PATH" } }, github: { authed: false, detail: "not signed in" } },
   claudeMissing: { providers: { claude: { installed: false, detail: "not found on PATH" }, codex: { installed: true, version: "codex-cli 1.0.0" } }, github: { authed: true, detail: "github.com" } },
   bothReady: { providers: { claude: { installed: true, version: "claude 1.0.0" }, codex: { installed: true, version: "codex-cli 1.0.0" } }, github: { authed: true, detail: "github.com" } },
 };
@@ -66,6 +67,23 @@ async function run() {
     await waitFor(() => devtools.evaluate(`document.getElementById("onboardModal").classList.contains("hidden")`));
     await waitFor(() => devtools.evaluate(`document.activeElement?.id === "openOnboard"`));
     console.log("browser check: Escape closes the Doctor and returns focus to the opener");
+
+    // --- Zero providers ready: BOTH show inline setup panels, still locked, badge on (the 0-of-2 case) ---
+    await devtools.evaluate(mockStatus(STATUS.bothMissing));
+    await devtools.evaluate(`(() => { document.getElementById("openOnboard").click(); return true; })()`);
+    await waitFor(() => devtools.evaluate(`document.querySelectorAll("#onboardList .onboard-detail").length === 2`));
+    const zero = await devtools.evaluate(`(() => {
+      const hint = document.getElementById("onboardLockHint");
+      return {
+        missingPanels: document.querySelectorAll("#onboardList .onboard-detail").length,
+        lockedHint: !hint.hidden && hint.classList.contains("is-locked"),
+        badge: document.getElementById("openOnboard").classList.contains("needs-setup"),
+      };
+    })()`);
+    assert.deepEqual(zero, { missingPanels: 2, lockedHint: true, badge: true });
+    await devtools.evaluate(`document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })); true`);
+    await waitFor(() => devtools.evaluate(`document.getElementById("onboardModal").classList.contains("hidden")`));
+    console.log("browser check: Doctor shows both providers' setup panels when zero are ready (0/2)");
 
     // --- Both ready: ready framing, no missing panels, no attention badge ---
     await devtools.evaluate(mockStatus(STATUS.bothReady));
