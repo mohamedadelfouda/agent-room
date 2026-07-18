@@ -25,11 +25,16 @@ async function run() {
   try {
     // Suppress the first-run auto-open so we drive the Doctor explicitly.
     await devtools.evaluate(`(() => { localStorage.setItem("agent-room-onboarded", "1"); return true; })()`);
+    // Arm the status stub as an init script BEFORE reloading, so initialize()'s own /api/agents/status
+    // request is already mocked in the fresh document. Otherwise a slow real response (a dev box with
+    // provider CLIs installed) can land after loadOnboard() and overwrite the badge via reflectSetupBadge,
+    // making the test host-dependent — and the stub in the current context is wiped by the reload, so it
+    // must run again in the new document before any page script.
+    await devtools.send("Page.addScriptToEvaluateOnNewDocument", { source: mockStatus(STATUS.claudeMissing) });
     await devtools.evaluate(`location.reload(); true`);
     await waitFor(() => devtools.evaluate(`document.readyState === "complete" && Boolean(document.getElementById("openOnboard"))`));
 
     // --- Missing provider: inline install/discover panel + locked framing + focus moves into the modal ---
-    await devtools.evaluate(mockStatus(STATUS.claudeMissing));
     await devtools.evaluate(`(() => { const b = document.getElementById("openOnboard"); b.focus(); b.click(); return true; })()`);
     await waitFor(() => devtools.evaluate(`Boolean(document.querySelector("#onboardList .onboard-detail"))`));
     // Focus moves into the dialog (openManagedModal focuses on the next frame — poll rather than snapshot).
