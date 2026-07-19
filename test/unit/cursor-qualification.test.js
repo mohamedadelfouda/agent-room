@@ -7,8 +7,9 @@ import {
   REQUIRED_EXECUTE_LAYERS,
 } from "../../server/providers/cursor-qualification.js";
 
-// The descriptor is a Windows-only artifact, so fixtures use win32 paths and the validator uses win32
-// path semantics — these assertions are therefore deterministic on the Ubuntu/Windows/macOS CI matrix.
+// Descriptors are per-platform, so fixtures pin their platform and are validated FOR that platform — the
+// validator uses that platform's path semantics, making these assertions deterministic on the
+// Ubuntu/Windows/macOS CI matrix regardless of the host OS.
 const TRUSTED_ROOT = "C:\\Users\\me\\.cursor\\versions\\2026.07.09-a3815c0";
 const NODE = `${TRUSTED_ROOT}\\node.exe`;
 const ENTRY = `${TRUSTED_ROOT}\\index.js`;
@@ -29,9 +30,24 @@ function descriptor(overrides = {}) {
   };
 }
 
+// Validate the win32 fixture FOR win32 explicitly, so the check is deterministic on any CI host.
+const WIN = { trustedRoot: TRUSTED_ROOT, platform: "win32", arch: "x64" };
+
+const POSIX_ROOT = "/home/me/.local/share/cursor-agent/versions/2026.07.09-a3815c0";
+function posixDescriptor(overrides = {}) {
+  const entry = `${POSIX_ROOT}/index.js`;
+  return {
+    schemaVersion: 1, providerId: "cursor",
+    executable: `${POSIX_ROOT}/node`, executableFingerprint: "sha256:node",
+    entryPoint: entry, entryPointFingerprint: "sha256:index",
+    fixedPrefixArgs: [entry], version: "2026.07.09-a3815c0",
+    platform: "linux", arch: "x64", ...overrides,
+  };
+}
+
 test("a well-formed Cursor trusted-launch descriptor validates", () => {
   assert.deepEqual(
-    validateTrustedLaunchDescriptor(descriptor(), { trustedRoot: TRUSTED_ROOT }),
+    validateTrustedLaunchDescriptor(descriptor(), WIN),
     { valid: true, violations: [] },
   );
 });
@@ -39,7 +55,7 @@ test("a well-formed Cursor trusted-launch descriptor validates", () => {
 test("a Node flag before the entry point is rejected — code would run before Cursor starts", () => {
   const result = validateTrustedLaunchDescriptor(
     descriptor({ fixedPrefixArgs: ["--require", "C:\\evil.js", ENTRY] }),
-    { trustedRoot: TRUSTED_ROOT },
+    WIN,
   );
   assert.equal(result.valid, false);
   assert.ok(result.violations.some((v) => /no Node flags may precede/.test(v)));
@@ -56,12 +72,10 @@ test("each descriptor invariant fails closed on its own", () => {
     [{ entryPointFingerprint: "" }, /entryPointFingerprint is required/],
     [{ fixedPrefixArgs: [] }, /non-empty array/],
     [{ fixedPrefixArgs: [NODE, ENTRY] }, /entryPoint must be the first/],
-    [{ fixedPrefixArgs: [ENTRY, "--force"] }, /only fixed-prefix arg/], // trailing args would smuggle a Cursor flag past the noForce evidence
-    [{ platform: "linux" }, /platform must be "win32"/],
-    [{ arch: "arm64" }, /arch must be "x64"/],
+    [{ fixedPrefixArgs: [ENTRY, "--force"] }, /exactly \[entryPoint\]/], // trailing arg baked into the trusted prefix
   ];
   for (const [override, pattern] of cases) {
-    const result = validateTrustedLaunchDescriptor(descriptor(override), { trustedRoot: TRUSTED_ROOT });
+    const result = validateTrustedLaunchDescriptor(descriptor(override), WIN);
     assert.equal(result.valid, false, `${JSON.stringify(override)} should be invalid`);
     assert.ok(result.violations.some((v) => pattern.test(v)), `${JSON.stringify(override)} → ${pattern}`);
   }
@@ -71,7 +85,7 @@ test("an entryPoint outside the trusted version directory is rejected", () => {
   const outside = "C:\\Users\\me\\.cursor\\versions\\other\\index.js";
   const result = validateTrustedLaunchDescriptor(
     descriptor({ entryPoint: outside, fixedPrefixArgs: [outside] }),
-    { trustedRoot: TRUSTED_ROOT },
+    WIN,
   );
   assert.equal(result.valid, false);
   assert.ok(result.violations.some((v) => /within the trusted Cursor version directory/.test(v)));
@@ -84,7 +98,7 @@ test("a missing or non-object descriptor fails closed", () => {
 });
 
 test("a descriptor validated without a trustedRoot fails closed — containment cannot be skipped", () => {
-  const result = validateTrustedLaunchDescriptor(descriptor()); // no options → no trustedRoot
+  const result = validateTrustedLaunchDescriptor(descriptor(), { platform: "win32", arch: "x64" }); // no trustedRoot
   assert.equal(result.valid, false);
   assert.ok(result.violations.some((v) => /trustedRoot must be supplied/.test(v)));
 });
@@ -99,7 +113,7 @@ test("containment rejects sibling-prefix, .. escape, cross-drive, and UNC paths"
   for (const entryPoint of outside) {
     const result = validateTrustedLaunchDescriptor(
       descriptor({ entryPoint, fixedPrefixArgs: [entryPoint] }),
-      { trustedRoot: TRUSTED_ROOT },
+      WIN,
     );
     assert.equal(result.valid, false, `${entryPoint} must not be contained`);
     assert.ok(result.violations.some((v) => /within the trusted Cursor version directory/.test(v)), entryPoint);
@@ -108,9 +122,31 @@ test("containment rejects sibling-prefix, .. escape, cross-drive, and UNC paths"
   const nested = `${TRUSTED_ROOT}\\node_modules\\cursor\\index.js`;
   const contained = validateTrustedLaunchDescriptor(
     descriptor({ entryPoint: nested, fixedPrefixArgs: [nested] }),
-    { trustedRoot: TRUSTED_ROOT },
+    WIN,
   );
   assert.deepEqual(contained.violations.filter((v) => /within the trusted/.test(v)), []);
+});
+
+test("a descriptor validates cross-platform for the platform it was built for (linux)", () => {
+  assert.deepEqual(
+    validateTrustedLaunchDescriptor(posixDescriptor(), { trustedRoot: POSIX_ROOT, platform: "linux", arch: "x64" }),
+    { valid: true, violations: [] },
+  );
+});
+
+test("a descriptor is rejected when validated for a platform it was not built for", () => {
+  const result = validateTrustedLaunchDescriptor(descriptor(), { trustedRoot: TRUSTED_ROOT, platform: "linux", arch: "x64" });
+  assert.equal(result.valid, false);
+  assert.ok(result.violations.some((v) => /does not match the target platform/.test(v)));
+});
+
+test("an unsupported platform or arch is rejected", () => {
+  const badPlatform = validateTrustedLaunchDescriptor(
+    posixDescriptor({ platform: "sunos" }), { trustedRoot: POSIX_ROOT, platform: "sunos", arch: "x64" });
+  assert.ok(badPlatform.violations.some((v) => /platform must be one of/.test(v)));
+  const badArch = validateTrustedLaunchDescriptor(
+    posixDescriptor({ arch: "mips" }), { trustedRoot: POSIX_ROOT, platform: "linux", arch: "mips" });
+  assert.ok(badArch.violations.some((v) => /arch must be one of/.test(v)));
 });
 
 const allTrue = (layers) => Object.fromEntries(layers.map((layer) => [layer, true]));

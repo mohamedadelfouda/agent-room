@@ -57,6 +57,8 @@ const ATTACH_MAX_BYTES = 100 * 1024;
 const ATTACH_MAX_FILES = 5;
 const ATTACH_MAX_TOTAL_BYTES = 300 * 1024;
 
+// Enumerates every possible per-provider control id. A descriptor-launched provider (e.g. Cursor) renders no
+// Command/Effort element, so saveSettings/loadSettings must keep their `if (!$(id)) continue` guards.
 const settingsIds = () => ["rounds", "finalizer", ...providers.flatMap((item) => ["Command", "Model", "Effort", "Role", "Enabled"].map((suffix) => `${item.id}${suffix}`))];
 const providerInfo = (id) => providers.find((item) => item.id === id) || { id, label: id || "Agent" };
 
@@ -300,13 +302,13 @@ async function loadProviderCatalog() {
     card.setAttribute("aria-labelledby", titleId);
     card.innerHTML = [
       `<div class="agent-head"><span class="agent-avatar ${esc(item.id)}" aria-hidden="true">${esc(item.label.slice(0, 1))}</span>`,
-      `<div class="agent-id"><h3 id="${esc(titleId)}">${esc(item.label)}</h3><span id="${esc(item.id)}Health" class="health" role="status" aria-live="polite" data-i18n="notChecked">${esc(t("notChecked"))}</span></div>`,
-      `<label class="switch" for="${esc(enabledId)}"><input id="${esc(enabledId)}" type="checkbox" checked data-provider-toggle="${esc(item.id)}" aria-label="${esc(t("providerEnabled")(item.label))}"><span aria-hidden="true"></span></label></div>`,
-      `<div class="agent-fields"><div class="field"><label for="${esc(commandId)}" data-i18n="command">${esc(t("command"))}</label><div class="inline"><input id="${esc(commandId)}" value="${esc(item.command)}"><button class="btn-mini check-cli" data-agent="${esc(item.id)}" data-i18n="check" aria-label="${esc(t("checkProvider")(item.label))}">${esc(t("check"))}</button><button class="btn-mini setup-cli" data-agent="${esc(item.id)}" data-i18n="setupCli" aria-label="${esc(t("setupProviderCli")(item.label))}" aria-expanded="false" aria-controls="${esc(item.id)}CliSetup">${esc(t("setupCli"))}</button></div></div>`,
+      `<div class="agent-id"><h3 id="${esc(titleId)}">${esc(item.label)}</h3>${item.descriptorLaunch ? "" : `<span id="${esc(item.id)}Health" class="health" role="status" aria-live="polite" data-i18n="notChecked">${esc(t("notChecked"))}</span>`}</div>`,
+      `<label class="switch" for="${esc(enabledId)}"><input id="${esc(enabledId)}" type="checkbox" ${item.defaultEnabled === false ? "" : "checked"} data-provider-toggle="${esc(item.id)}" aria-label="${esc(t("providerEnabled")(item.label))}"><span aria-hidden="true"></span></label></div>`,
+      `<div class="agent-fields">${item.descriptorLaunch ? "" : `<div class="field"><label for="${esc(commandId)}" data-i18n="command">${esc(t("command"))}</label><div class="inline"><input id="${esc(commandId)}" value="${esc(item.command)}"><button class="btn-mini check-cli" data-agent="${esc(item.id)}" data-i18n="check" aria-label="${esc(t("checkProvider")(item.label))}">${esc(t("check"))}</button><button class="btn-mini setup-cli" data-agent="${esc(item.id)}" data-i18n="setupCli" aria-label="${esc(t("setupProviderCli")(item.label))}" aria-expanded="false" aria-controls="${esc(item.id)}CliSetup">${esc(t("setupCli"))}</button></div></div>`}`,
       `<div class="field"><label for="${esc(modelId)}" data-i18n="model">${esc(t("model"))}</label><div class="inline"><input id="${esc(modelId)}" list="${esc(modelList)}" value="${esc(item.defaultModel || "")}">${item.dynamicModels ? `<button class="btn-mini load-models" data-agent="${esc(item.id)}" data-i18n="load" aria-label="${esc(t("loadProviderModels")(item.label))}">${esc(t("load"))}</button>` : ""}</div><datalist id="${esc(modelList)}">${modelOptions}</datalist></div>`,
-      `<div class="field"><label for="${esc(effortId)}" data-i18n="effort">${esc(t("effort"))}</label><select id="${esc(effortId)}">${effortOptions}</select></div>`,
+      `${(item.efforts || []).length ? `<div class="field"><label for="${esc(effortId)}" data-i18n="effort">${esc(t("effort"))}</label><select id="${esc(effortId)}">${effortOptions}</select></div>` : ""}`,
       `<div class="field"><label for="${esc(roleId)}" data-i18n="role">${esc(t("role"))}</label><input id="${esc(roleId)}" value="${esc(t("defaultRole"))}" data-role-preset="defaultRole" data-role-edited="false"></div></div>`,
-      `<div id="${esc(item.id)}CliSetup" class="cli-setup" aria-live="polite" hidden></div>`,
+      `${item.descriptorLaunch ? "" : `<div id="${esc(item.id)}CliSetup" class="cli-setup" aria-live="polite" hidden></div>`}`,
       `<div id="${esc(item.id)}RunState" class="run-state" role="status" aria-live="polite" data-i18n="ready">${esc(t("ready"))}</div>`,
     ].join("");
     grid.appendChild(card);
@@ -1441,8 +1443,12 @@ async function sendMessage() {
 
 /* ---------------- cli check / models ---------------- */
 async function checkCli(agent) {
-  const command = $(`${agent}Command`).value.trim();
+  const commandEl = $(`${agent}Command`);
   const health = $(`${agent}Health`);
+  // Descriptor-launched providers (e.g. Cursor) render neither a command input nor a health span — they
+  // resolve readiness via the descriptor, not this command-allowlist probe. Bail out safely if absent.
+  if (!commandEl || !health) return false;
+  const command = commandEl.value.trim();
   health.textContent = "..."; health.className = "health";
   try {
     const result = await api("/api/cli/check", { method: "POST", body: JSON.stringify({ provider: agent, command }) });
@@ -1470,7 +1476,9 @@ function toggleCliSetup(agent) {
 const cliSetupInFlight = new Set();
 
 async function applyDiscoveredCommand(agent, candidate) {
-  $(`${agent}Command`).value = candidate;
+  const commandEl = $(`${agent}Command`);
+  if (!commandEl) return false; // descriptor-launched providers have no editable command to trust
+  commandEl.value = candidate;
   saveSettings();
   return checkCli(agent);
 }
@@ -1578,7 +1586,7 @@ async function runCliSetup(agent) {
 async function loadModels(agent, btn) {
   btn.disabled = true; const old = btn.textContent; btn.textContent = "...";
   try {
-    const result = await api(`/api/providers/${encodeURIComponent(agent)}/models`, { method: "POST", body: JSON.stringify({ command: $(`${agent}Command`).value.trim() }) });
+    const result = await api(`/api/providers/${encodeURIComponent(agent)}/models`, { method: "POST", body: JSON.stringify({ command: $(`${agent}Command`)?.value.trim() || "" }) });
     if (result.code) throw failureFromPayload(result);
     const list = $(`${agent}Models`); list.innerHTML = "";
     for (const m of result.models) { const o = document.createElement("option"); o.value = m; list.appendChild(o); }
@@ -1720,11 +1728,17 @@ function renderMissingPanel(agent) {
     const sr = document.createElement("span"); sr.className = "sr-only"; sr.textContent = ` (${t("opensInNewTab")})`;
     docs.appendChild(sr); linkRow.appendChild(docs);
   }
-  const find = document.createElement("button"); find.className = "btn-mini";
-  find.textContent = t("findInstalled");
-  find.setAttribute("aria-label", `${t("findInstalled")}: ${info.label}`);
-  find.onclick = () => discoverForDoctor(agent, box, find);
-  linkRow.appendChild(find);
+  // A descriptor-launched provider (e.g. Cursor) has no editable command to discover or trust — a PATH probe
+  // can't resolve its shim, and the trust flow (applyDiscoveredCommand → checkCli) targets a command input +
+  // health span its card no longer renders. Offer only the install command + docs + Re-check; its readiness
+  // comes from the pinned descriptor and refreshes on Re-check.
+  if (!info.descriptorLaunch) {
+    const find = document.createElement("button"); find.className = "btn-mini";
+    find.textContent = t("findInstalled");
+    find.setAttribute("aria-label", `${t("findInstalled")}: ${info.label}`);
+    find.onclick = () => discoverForDoctor(agent, box, find);
+    linkRow.appendChild(find);
+  }
   const recheck = document.createElement("button"); recheck.className = "btn-mini btn-ghost";
   recheck.textContent = t("recheck");
   recheck.onclick = () => loadOnboard();

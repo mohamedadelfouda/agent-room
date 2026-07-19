@@ -4,10 +4,13 @@
 import assert from "node:assert/strict";
 import { launchBrowserHarness, waitFor } from "./harness.mjs";
 
+// Three providers ship now (claude, codex, cursor), so a fixture must give every one a status or the
+// unlisted provider renders as not-installed and skews the missing-panel counts below.
+const CURSOR_READY = { installed: true, version: "cursor-agent 2026.07.16" };
 const STATUS = {
-  bothMissing: { providers: { claude: { installed: false, detail: "not found on PATH" }, codex: { installed: false, detail: "not found on PATH" } }, github: { authed: false, detail: "not signed in" } },
-  claudeMissing: { providers: { claude: { installed: false, detail: "not found on PATH" }, codex: { installed: true, version: "codex-cli 1.0.0" } }, github: { authed: true, detail: "github.com" } },
-  bothReady: { providers: { claude: { installed: true, version: "claude 1.0.0" }, codex: { installed: true, version: "codex-cli 1.0.0" } }, github: { authed: true, detail: "github.com" } },
+  allMissing: { providers: { claude: { installed: false, detail: "not found on PATH" }, codex: { installed: false, detail: "not found on PATH" }, cursor: { installed: false, detail: "not found on PATH" } }, github: { authed: false, detail: "not signed in" } },
+  claudeMissing: { providers: { claude: { installed: false, detail: "not found on PATH" }, codex: { installed: true, version: "codex-cli 1.0.0" }, cursor: CURSOR_READY }, github: { authed: true, detail: "github.com" } },
+  allReady: { providers: { claude: { installed: true, version: "claude 1.0.0" }, codex: { installed: true, version: "codex-cli 1.0.0" }, cursor: CURSOR_READY }, github: { authed: true, detail: "github.com" } },
 };
 
 // Intercept only /api/agents/status; everything else (providers catalog, update-check) hits the real server.
@@ -68,10 +71,10 @@ async function run() {
     await waitFor(() => devtools.evaluate(`document.activeElement?.id === "openOnboard"`));
     console.log("browser check: Escape closes the Doctor and returns focus to the opener");
 
-    // --- Zero providers ready: BOTH show inline setup panels, still locked, badge on (the 0-of-2 case) ---
-    await devtools.evaluate(mockStatus(STATUS.bothMissing));
+    // --- Zero providers ready: ALL show inline setup panels, still locked, badge on (the 0-of-3 case) ---
+    await devtools.evaluate(mockStatus(STATUS.allMissing));
     await devtools.evaluate(`(() => { document.getElementById("openOnboard").click(); return true; })()`);
-    await waitFor(() => devtools.evaluate(`document.querySelectorAll("#onboardList .onboard-detail").length === 2`));
+    await waitFor(() => devtools.evaluate(`document.querySelectorAll("#onboardList .onboard-detail").length === 3`));
     const zero = await devtools.evaluate(`(() => {
       const hint = document.getElementById("onboardLockHint");
       return {
@@ -80,13 +83,22 @@ async function run() {
         badge: document.getElementById("openOnboard").classList.contains("needs-setup"),
       };
     })()`);
-    assert.deepEqual(zero, { missingPanels: 2, lockedHint: true, badge: true });
+    assert.deepEqual(zero, { missingPanels: 3, lockedHint: true, badge: true });
+    // A descriptor-launched provider (Cursor) must NOT offer "Find installed copy" — a PATH probe can't
+    // resolve its shim and the trust flow targets a command input its card doesn't render. Its panel shows
+    // only Re-check (1 button); a command-allowlist provider (Claude) offers Find + Re-check (2 buttons).
+    const discoverUi = await devtools.evaluate(`(() => {
+      const itemFor = (name) => [...document.querySelectorAll("#onboardList .onboard-item")].find(i => i.querySelector(".ob-name")?.textContent === name);
+      const linkButtons = (name) => itemFor(name)?.querySelectorAll(".onboard-detail .ob-link-row button").length ?? -1;
+      return { cursor: linkButtons("Cursor"), claude: linkButtons("Claude") };
+    })()`);
+    assert.deepEqual(discoverUi, { cursor: 1, claude: 2 });
     await devtools.evaluate(`document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })); true`);
     await waitFor(() => devtools.evaluate(`document.getElementById("onboardModal").classList.contains("hidden")`));
-    console.log("browser check: Doctor shows both providers' setup panels when zero are ready (0/2)");
+    console.log("browser check: Doctor shows every provider's setup panel when zero are ready (0/3), and Cursor hides command-discovery");
 
-    // --- Both ready: ready framing, no missing panels, no attention badge ---
-    await devtools.evaluate(mockStatus(STATUS.bothReady));
+    // --- All ready: ready framing, no missing panels, no attention badge ---
+    await devtools.evaluate(mockStatus(STATUS.allReady));
     await devtools.evaluate(`(() => { document.getElementById("openOnboard").click(); return true; })()`);
     await waitFor(() => devtools.evaluate(`(() => { const h = document.getElementById("onboardLockHint"); return !h.hidden && !h.classList.contains("is-locked"); })()`));
     const ready = await devtools.evaluate(`(() => ({

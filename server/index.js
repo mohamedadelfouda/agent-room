@@ -530,6 +530,9 @@ const server = http.createServer(async (req, res) => {
       try {
         const definition = provider(String(body.provider || ""));
         if (!definition) throw new Error("Select a known provider before trusting its executable");
+        // Descriptor-launched providers (e.g. Cursor) resolve readiness through their pinned launch
+        // descriptor, never the command allowlist — refuse a command probe here rather than mislead.
+        if (definition.descriptorLaunch) throw new Error(`${definition.label} launches via a trusted descriptor, not an editable command`);
         if (path.isAbsolute(String(body.command || ""))) {
           await approveProviderCommand(definition.id, body.command, new Set([definition.command]));
           invalidateProviderReadiness(definition.id);
@@ -547,6 +550,7 @@ const server = http.createServer(async (req, res) => {
       try {
         const definition = provider(String(body.provider || ""));
         if (!definition) throw new Error("Select a known provider before discovering its executable");
+        if (definition.descriptorLaunch) throw new Error(`${definition.label} launches via a trusted descriptor, not an editable command`);
         const candidates = await discoverProviderCommands(definition.command);
         let resolved = "";
         try { resolved = await resolveAllowedCommand(approvedProviderCommand(definition.id) || configuredProviderCommand(definition), new Set([definition.command]), { trustedPaths: trustedProviderCliPaths(definition) }); }

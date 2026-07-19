@@ -755,7 +755,7 @@ test("orchestration request validation rejects unsupported or inconsistent confi
     ["one participant", { ...base, agents: { claude: { enabled: true } } }, "invalid_participants"],
     [
       "unknown enabled provider",
-      { ...base, agents: { ...base.agents, cursor: { enabled: true } } },
+      { ...base, agents: { ...base.agents, nonexistent: { enabled: true } } },
       "invalid_provider",
     ],
     ["unselected finalizer", { ...base, finalizer: "cursor" }, "invalid_finalizer"],
