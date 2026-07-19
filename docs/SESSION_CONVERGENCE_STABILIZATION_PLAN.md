@@ -146,6 +146,11 @@ Additional consistency rules include:
 - `goalStatus: satisfied` cannot create remaining work;
 - `needs_user` requires an official open `user_decision` item after proposals are applied;
 - `blocked` requires an official open `external_validation` item after proposals are applied;
+- a version-2 terminal claim must address every currently open official item;
+- `satisfied` cannot keep an official item open;
+- open required steps derive completion with deterministic precedence:
+  `resume_agent_round` → `incomplete`, `run_external_check` → `blocked`,
+  `provide_decision` → `needs_user`;
 - classification, required-step, or item-action conflicts prevent a trusted terminal outcome; and
 - any substantive delta prevents early stopping in that round.
 
@@ -162,7 +167,8 @@ Early stop is driven by agreement, not by the task being fully done (see §13). 
 - approved registry and pending items;
 - derived next steps;
 - disagreements, conflicts, and unclassified legacy points; and
-- control validity.
+- control validity; and
+- optional aggregate Control Repair statistics when a repair was attempted.
 
 Normal reader-facing phases are:
 
@@ -259,3 +265,50 @@ A real session exposed three gaps between "the protocol is correct" and "the dec
 - **Debate anchoring.** When a session is switched *into* debate from another mode, the subject is the most recent substantive agent answer already in the session, passed to the debate prompt verbatim and bounded so it survives transcript trimming. The user's latest message ("let's debate this") is treated as the trigger, not the proposition, unless it states a proposition of its own. This applies only to a genuine switch: a session that was already in debate treats a new message as a fresh proposition, not a re-debate of the last rebuttal. A debate with no prior answer still uses the user's message as the question.
 
 Unresolved rounds now report in plain language — the agreement was not reached, more rounds are needed, and the open disagreement points the agents raised — rather than only an opaque control-data message. A round that fails purely on a control inconsistency (rather than an unreadable block) still names that cause but now lists the raised points alongside it.
+
+## 14. Refinement: bounded Control Repair
+
+The first implementation of Control Repair ran while each provider answer was
+being parsed and covered only a missing or malformed block. The stabilized path
+now performs the first normal round assessment before deciding whether any
+repair is allowed. This keeps deterministic validation authoritative and avoids
+turning Repair into a hidden second discussion round.
+
+Repair is limited to the following source errors:
+
+- `missing_control`;
+- `invalid_control_json`;
+- `invalid_control_schema`;
+- `target_version_mismatch`; and
+- `unaddressed_open_item`.
+
+Any other error remains conservative until it is classified explicitly. A
+valid narrow repair may update a stale target version and add actions for the
+specific omitted item IDs, but it must preserve `controlVersion`,
+`convergence`, `goalStatus`, `substantiveDelta`, and every unrelated proposal.
+A missing or malformed block may be regenerated in full because there is no
+valid original contract to preserve. In both cases the result passes the same
+parser, schema, consistency, registry, and consensus checks as an original
+control.
+
+Each affected participant receives at most one repair call for that assessment,
+but only when its provider advertises a tool-free Control Repair mode. Claude is
+currently eligible because its read configuration disables all tools. Codex is
+not eligible: its read-only sandbox prevents writes but does not confine host
+file reads, so the orchestrator records `repair_not_supported` without launching
+the provider. An eligible call receives the bounded reader-facing answer,
+original normalized control, official registry, target version, and structured
+error target. It runs in the runtime scratch workspace with `permission: read`,
+no tools, connector, or MCP session, the existing sanitized agent environment,
+a 60-second timeout, and a 64 KiB provider-output cap. Cancellation invalidates
+late repair output through the same run-state checks used by normal provider
+calls.
+
+The reader-facing answer remains unchanged. The message stores bounded
+`meta.controlRepair` audit data separately from `retryCount`, including source
+error codes, result, failure code, duration, truncation state, requested
+model/effort, real usage when returned, and bounded original/repaired control
+snapshots. The optional outcome-level `controlRepairStats` aggregates calls,
+duration, results, error codes, and only real provider usage; it never estimates
+tokens. Session persistence accepts both optional fields without a production
+schema migration.

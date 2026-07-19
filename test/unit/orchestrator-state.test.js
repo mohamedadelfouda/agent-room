@@ -12,7 +12,7 @@ import {
   stopRun,
   validateOrchestrationRequest,
 } from "../../server/orchestrator.js";
-import { createSession, getSession, mutateSession, rootPath } from "../../server/store.js";
+import { createSession, getSession, mutateSession, rootPath, scratchWorkspacePath } from "../../server/store.js";
 import { provider } from "../../server/providers/registry.js";
 import { claimSessionActivity } from "../../server/session-activity.js";
 import { assessRound, parseAgentControl } from "../../server/convergence.js";
@@ -21,15 +21,24 @@ function rawControl(overrides) {
   return parseAgentControl(`<agent-control>${JSON.stringify({ controlVersion: 2, convergence: "converged", goalStatus: "satisfied", substantiveDelta: false, itemProposals: [], targetVersion: 1, ...overrides })}</agent-control>`);
 }
 
-function controlBlock(goalStatus, itemProposals) {
+function versionedControl({
+  goalStatus,
+  itemProposals,
+  targetVersion = 1,
+  substantiveDelta = false,
+}) {
   return `<agent-control>${JSON.stringify({
     controlVersion: 2,
     convergence: "converged",
     goalStatus,
-    substantiveDelta: false,
+    substantiveDelta,
     itemProposals,
-    targetVersion: 1,
+    targetVersion,
   })}</agent-control>`;
+}
+
+function controlBlock(goalStatus, itemProposals) {
+  return versionedControl({ goalStatus, itemProposals });
 }
 
 function deferred() {
@@ -171,7 +180,8 @@ test("an inconsistent-but-parseable round reports the raised disagreement, not o
   ], 1);
   assert.equal(assessment.allValid, false);
   assert.equal(assessment.controlsParseable, true);
-  assert.deepEqual(assessment.consistencyErrors, [{ code: "missing_user_decision" }]);
+  assert.equal(assessment.consistencyErrors.some((error) => error.code === "missing_user_decision"), true);
+  assert.equal(assessment.consistencyErrors.some((error) => error.code === "completion_registry_mismatch"), true);
   const outcome = buildDiscussionOutcome(assessment, 2, 2);
   assert.equal(outcome.stopReason, "invalid_control");
   assert.equal(outcome.controlsParseable, true);
@@ -205,21 +215,20 @@ test("an agreed-but-incomplete stop reports as settled without claiming completi
   assert.doesNotMatch(report, /المهمة اكتملت/);
 });
 
-test("an agreed stop still surfaces a pending user decision, not hidden by incomplete (Codex #30)", () => {
-  // converged + goalStatus:incomplete + a user_decision item is schema-valid and now stops early.
-  // The user's required action must NOT be dropped from the terminal report just because the
-  // aggregate completion is "incomplete".
+test("an agreed stop derives a pending user decision from its required step (Codex #30)", () => {
+  // A conservative incomplete declaration must not hide the more useful official required step.
   const decision = { action: "create", kind: "user_decision", text: "اختَر آلية نشر النماذج", requiredStep: { actor: "user", action: "provide_decision" } };
   const assessment = assessRound([
     rawControl({ goalStatus: "incomplete", itemProposals: [decision] }),
     rawControl({ goalStatus: "incomplete" }),
   ], 1);
   assert.equal(assessment.agreementState, "converged");
+  assert.equal(assessment.completionState, "needs_user");
   assert.equal(assessment.canStop, true);
   const outcome = buildDiscussionOutcome(assessment, 3, 2);
-  assert.equal(outcome.phase, "converged");
+  assert.equal(outcome.phase, "needs_user");
   const report = discussionOutcomeReport(outcome);
-  assert.match(report, /محتاجة إجراء منك/);
+  assert.match(report, /تحتاج قرارك/);
   assert.match(report, /اختَر آلية نشر النماذج/);
 });
 
@@ -291,15 +300,33 @@ test("a five-round collaboration stops after round two and finalizes once", asyn
 
 test("a dropped control block is repaired so genuine agreement is not lost", async (t) => {
   const session = await createSession("control-repair");
+  await mutateSession(session.id, (stored) => {
+    stored.connectors = { gmail: { enabled: true } };
+  });
   let claudeCalls = 0;
   let codexCalls = 0;
+  let repairInvocation = null;
   const result = (text) => ({ text, model: "test", durationMs: 1, exitCode: 0, sessionId: null });
 
-  t.mock.method(provider("claude"), "run", async () => {
+  t.mock.method(provider("claude"), "run", async (invocation) => {
     claudeCalls += 1;
     if (claudeCalls === 1) return result("Claude opening proposal");
     if (claudeCalls === 2) return result("Claude agrees — but this reply drops its control block entirely.");
-    return result(controlBlock("satisfied", [])); // the one-shot repair call
+    repairInvocation = invocation;
+    return {
+      ...result(controlBlock("satisfied", [])),
+      durationMs: 7,
+      usage: {
+        source: "claude",
+        inputTokens: 10,
+        cachedInputTokens: 0,
+        cacheWriteTokens: 0,
+        outputTokens: 5,
+        reasoningTokens: 0,
+        totalTokens: 15,
+        costUsd: null,
+      },
+    };
   });
   t.mock.method(provider("codex"), "run", async () => {
     codexCalls += 1;
@@ -318,27 +345,231 @@ test("a dropped control block is repaired so genuine agreement is not lost", asy
 
     const saved = await getSession(session.id);
     const outcomeMessage = saved.messages.find((message) => message.meta?.outcome);
-    assert.equal(claudeCalls, 3); // opening + round 2 (no block) + one repair
     assert.equal(outcomeMessage.phase, "converged");
     assert.equal(outcomeMessage.meta.outcome.agreementState, "converged");
     assert.equal(outcomeMessage.meta.outcome.controlValid, true);
     const claudeRound2 = saved.messages.find((m) => m.agent === "claude" && m.round === 2 && m.phase === "collaboration");
     assert.equal(claudeRound2.control.valid, true);
-    assert.equal(claudeRound2.meta.controlRepaired, true);
+    assert.equal(claudeRound2.meta.controlRepaired, undefined);
+    assert.equal(claudeRound2.meta.controlRepair.status, "succeeded");
+    assert.equal(claudeRound2.meta.controlRepair.count, 1);
+    assert.deepEqual(claudeRound2.meta.controlRepair.errorCodes, ["missing_control"]);
+    assert.equal(claudeRound2.meta.controlRepair.durationMs, 7);
+    assert.equal(claudeRound2.meta.controlRepair.originalControl.value.valid, false);
+    assert.equal(claudeRound2.meta.controlRepair.repairedControl.value.valid, true);
     assert.match(claudeRound2.content, /Claude agrees/); // reader-facing answer preserved
+    assert.equal(repairInvocation.config.permission, "read");
+    assert.equal(repairInvocation.config.mcpSessionId, "");
+    assert.equal(repairInvocation.config.connectorSessionId, "");
+    assert.equal(repairInvocation.config.timeoutMs, 60000);
+    assert.equal(repairInvocation.config.maxOutputBytes, 64 * 1024);
+    assert.equal(repairInvocation.cwd, await scratchWorkspacePath());
+    assert.deepEqual(outcomeMessage.meta.outcome.controlRepairStats, {
+      attemptedCalls: 1,
+      succeededCalls: 1,
+      failedCalls: 0,
+      totalDurationMs: 7,
+      errorCodeCounts: { missing_control: 1 },
+      usage: {
+        inputTokens: 10,
+        cachedInputTokens: 0,
+        cacheWriteTokens: 0,
+        outputTokens: 5,
+        reasoningTokens: 0,
+        totalTokens: 15,
+        costUsd: null,
+      },
+    });
   } finally {
     await cleanupSession(session.id);
   }
 });
 
-test("an unrepairable control block is surfaced verbatim for diagnosis", async (t) => {
+test("control repair fails closed when the provider cannot guarantee a tool-free call", async (t) => {
+  const session = await createSession("unsupported-control-repair");
+  let claudeCalls = 0;
+  let codexCalls = 0;
+
+  t.mock.method(provider("claude"), "run", async () => {
+    claudeCalls += 1;
+    return providerResult(claudeCalls === 1
+      ? "Claude opening"
+      : versionedControl({ goalStatus: "satisfied", itemProposals: [] }));
+  });
+  t.mock.method(provider("codex"), "run", async () => {
+    codexCalls += 1;
+    if (codexCalls === 1) return providerResult("Codex opening");
+    if (codexCalls === 2) return providerResult("Codex agrees but omits the control block.");
+    throw new Error("Codex control repair must not launch without a tool-free provider mode");
+  });
+
+  try {
+    await runOrchestration(session.id, {
+      mode: "collaboration",
+      rounds: 2,
+      content: "Plan the change",
+      finalizer: "none",
+      agents: {
+        claude: { enabled: true, role: "Collaborator" },
+        codex: { enabled: true, role: "Collaborator" },
+      },
+    }, () => {});
+
+    const saved = await getSession(session.id);
+    const codexRound2 = saved.messages.find((message) => (
+      message.agent === "codex"
+      && message.round === 2
+      && message.phase === "collaboration"
+    ));
+    const outcome = saved.messages.find((message) => message.meta?.outcome)?.meta.outcome;
+
+    assert.equal(codexRound2.meta.controlRepair.attempted, false);
+    assert.equal(codexRound2.meta.controlRepair.count, 0);
+    assert.equal(codexRound2.meta.controlRepair.status, "skipped");
+    assert.equal(codexRound2.meta.controlRepair.failureCode, "repair_not_supported");
+    assert.deepEqual(codexRound2.meta.controlRepair.errorCodes, ["missing_control"]);
+    assert.equal(outcome.controlValid, false);
+    assert.equal("controlRepairStats" in outcome, false);
+  } finally {
+    await cleanupSession(session.id);
+  }
+});
+
+test("2026-07-18 regression: omitted approved items are repaired before the final assessment", async (t) => {
+  const session = await createSession("omitted-item-repair");
+  let claudeCalls = 0;
+  let codexCalls = 0;
+  const openDecision = {
+    action: "create",
+    kind: "user_decision",
+    text: "Choose the rollout mode",
+    requiredStep: { actor: "user", action: "provide_decision" },
+  };
+  const resolveDecision = [{ action: "resolve", itemId: "item-001" }];
+
+  t.mock.method(provider("claude"), "run", async () => {
+    claudeCalls += 1;
+    if (claudeCalls === 1) return providerResult("Claude opening");
+    if (claudeCalls === 2) {
+      return providerResult(versionedControl({
+        goalStatus: "needs_user",
+        itemProposals: [openDecision],
+        substantiveDelta: true,
+      }));
+    }
+    if (claudeCalls === 3) {
+      return providerResult(`Claude confirms the choice is resolved.\n${versionedControl({
+        goalStatus: "satisfied",
+        itemProposals: [],
+        targetVersion: 2,
+      })}`);
+    }
+    return providerResult(versionedControl({
+      goalStatus: "satisfied",
+      itemProposals: resolveDecision,
+      targetVersion: 2,
+    }));
+  });
+  t.mock.method(provider("codex"), "run", async () => {
+    codexCalls += 1;
+    if (codexCalls === 1) return providerResult("Codex opening");
+    if (codexCalls === 2) {
+      return providerResult(versionedControl({
+        goalStatus: "needs_user",
+        itemProposals: [openDecision],
+        substantiveDelta: true,
+      }));
+    }
+    if (codexCalls === 3) {
+      return providerResult(`Codex confirms the choice is resolved.\n${versionedControl({
+        goalStatus: "satisfied",
+        itemProposals: resolveDecision,
+        targetVersion: 2,
+      })}`);
+    }
+    throw new Error("Codex should not need a control repair call");
+  });
+
+  try {
+    await runOrchestration(session.id, {
+      mode: "collaboration",
+      rounds: 5,
+      content: "Resolve the rollout plan",
+      finalizer: "none",
+      agents: {
+        claude: { enabled: true, role: "Collaborator" },
+        codex: { enabled: true, role: "Collaborator" },
+      },
+    }, () => {});
+
+    const saved = await getSession(session.id);
+    const outcome = saved.messages.find((message) => message.meta?.outcome)?.meta.outcome;
+    assert.equal(outcome.completedRounds, 3);
+    assert.equal(outcome.stoppedEarly, true);
+    assert.equal(outcome.agreementState, "converged");
+    assert.equal(outcome.completionState, "satisfied");
+    assert.equal(outcome.itemRegistry[0].status, "resolved");
+    assert.equal(outcome.controlRepairStats.attemptedCalls, 1);
+    assert.equal(saved.status, "completed");
+    assert.equal(saved.activeRun.status, "completed");
+    const roundThree = saved.messages.filter((message) => message.round === 3 && message.phase === "collaboration");
+    assert.equal(roundThree.length, 2);
+    assert.equal(roundThree.find((message) => message.agent === "claude").meta.controlRepair.status, "succeeded");
+    assert.equal(roundThree.find((message) => message.agent === "codex").meta.controlRepair, undefined);
+    assert.equal(saved.messages.some((message) => message.round === 4), false);
+  } finally {
+    await cleanupSession(session.id);
+  }
+});
+
+test("a stale target version gets one narrow repair", async (t) => {
+  const session = await createSession("target-version-repair");
+  let claudeCalls = 0;
+  let codexCalls = 0;
+  t.mock.method(provider("claude"), "run", async () => {
+    claudeCalls += 1;
+    if (claudeCalls === 1) return providerResult("Claude opening");
+    if (claudeCalls === 2) {
+      return providerResult(versionedControl({ goalStatus: "satisfied", itemProposals: [], targetVersion: 9 }));
+    }
+    return providerResult(versionedControl({ goalStatus: "satisfied", itemProposals: [], targetVersion: 1 }));
+  });
+  t.mock.method(provider("codex"), "run", async () => {
+    codexCalls += 1;
+    if (codexCalls === 1) return providerResult("Codex opening");
+    return providerResult(versionedControl({ goalStatus: "satisfied", itemProposals: [], targetVersion: 1 }));
+  });
+
+  try {
+    await runOrchestration(session.id, {
+      mode: "collaboration",
+      rounds: 2,
+      content: "Repair the stale version",
+      finalizer: "none",
+      agents: {
+        claude: { enabled: true, role: "Collaborator" },
+        codex: { enabled: true, role: "Collaborator" },
+      },
+    }, () => {});
+    const saved = await getSession(session.id);
+    const claudeRoundTwo = saved.messages.find((message) => message.agent === "claude" && message.round === 2);
+    assert.equal(claudeRoundTwo.control.targetVersion, 1);
+    assert.deepEqual(claudeRoundTwo.meta.controlRepair.errorCodes, ["target_version_mismatch"]);
+    assert.equal(claudeRoundTwo.meta.controlRepair.status, "succeeded");
+  } finally {
+    await cleanupSession(session.id);
+  }
+});
+
+test("a provider failure during control repair stays conservative", async (t) => {
   const session = await createSession("control-diagnostic");
   let claudeCalls = 0;
   const result = (text) => ({ text, model: "test", durationMs: 1, exitCode: 0, sessionId: null });
   t.mock.method(provider("claude"), "run", async () => {
     claudeCalls += 1;
     if (claudeCalls === 1) return result("Claude opening proposal");
-    return result("Claude agrees but never emits a control block, even on repair.");
+    if (claudeCalls === 2) return result("Claude agrees but never emits a control block.");
+    throw new Error("controlled repair failure");
   });
   t.mock.method(provider("codex"), "run", async () => result(`Codex.\n${controlBlock("satisfied", [])}`));
 
@@ -352,17 +583,75 @@ test("an unrepairable control block is surfaced verbatim for diagnosis", async (
     }, () => {});
 
     const saved = await getSession(session.id);
-    assert.equal(claudeCalls, 3); // opening + round 2 + one repair attempt (which also emitted no block)
     const claudeRound2 = saved.messages.find((m) => m.agent === "claude" && m.round === 2 && m.phase === "collaboration");
     assert.equal(claudeRound2.control.valid, false);
-    assert.equal(claudeRound2.meta.controlInvalidRaw, "(no control block emitted)");
+    assert.equal(claudeRound2.meta.controlInvalidRaw, undefined);
     assert.equal(claudeRound2.meta.controlRepaired, undefined);
+    assert.equal(claudeRound2.meta.controlRepair.status, "failed");
+    assert.equal(claudeRound2.meta.controlRepair.count, 1);
+    assert.deepEqual(claudeRound2.meta.controlRepair.errorCodes, ["missing_control"]);
+    assert.equal(claudeRound2.meta.controlRepair.failureCode, "provider_error");
+    assert.equal(claudeRound2.meta.retryCount, 0);
+    const outcome = saved.messages.find((message) => message.meta?.outcome)?.meta.outcome;
+    assert.equal(outcome.controlRepairStats.failedCalls, 1);
+    assert.equal("usage" in outcome.controlRepairStats, false);
   } finally {
     await cleanupSession(session.id);
   }
 });
 
-test("an emitted-but-schema-invalid control block is stored verbatim, not the fallback", async (t) => {
+test("stopping during control repair rejects the late repaired control", async (t) => {
+  const session = await createSession("control-repair-cancellation");
+  const repairStarted = deferred();
+  const releaseRepair = deferred();
+  const events = [];
+  let claudeCalls = 0;
+
+  t.mock.method(provider("claude"), "run", async () => {
+    claudeCalls += 1;
+    if (claudeCalls === 1) return providerResult("Claude opening");
+    if (claudeCalls === 2) return providerResult("Claude agrees without a control block.");
+    repairStarted.resolve();
+    await releaseRepair.promise;
+    return providerResult(controlBlock("satisfied", []));
+  });
+  t.mock.method(provider("codex"), "run", async () => {
+    if (events.some((event) => event.type === "agent_complete" && event.agent === "codex")) {
+      return providerResult(controlBlock("satisfied", []));
+    }
+    return providerResult("Codex opening");
+  });
+
+  const runPromise = runOrchestration(session.id, {
+    mode: "collaboration",
+    rounds: 2,
+    content: "Stop during repair",
+    finalizer: "none",
+    agents: {
+      claude: { enabled: true, role: "Collaborator" },
+      codex: { enabled: true, role: "Collaborator" },
+    },
+  }, (event) => events.push(event));
+
+  try {
+    await repairStarted.promise;
+    assert.equal(await stopRun(session.id, { settleTimeoutMs: 50 }), true);
+    releaseRepair.resolve();
+    await runPromise;
+
+    const saved = await getSession(session.id);
+    assert.equal(saved.status, "stopped");
+    assert.equal(saved.activeRun.status, "stopped");
+    assert.equal(saved.messages.some((message) => message.meta?.controlRepair?.status === "succeeded"), false);
+    assert.equal(events.filter((event) => event.type === "run_stopped").length, 1);
+  } finally {
+    releaseRepair.resolve();
+    await runPromise;
+    await cleanupSession(session.id);
+  }
+});
+
+test("truncated repair output is rejected without storing raw provider output", async (t) => {
   const session = await createSession("control-verbatim");
   const badBlock = `<agent-control>${JSON.stringify({ controlVersion: 2, convergence: "bogus", goalStatus: "satisfied", substantiveDelta: false, itemProposals: [], targetVersion: 1 })}</agent-control>`;
   const result = (text) => ({ text, model: "test", durationMs: 1, exitCode: 0, sessionId: null });
@@ -370,7 +659,8 @@ test("an emitted-but-schema-invalid control block is stored verbatim, not the fa
   t.mock.method(provider("claude"), "run", async () => {
     claudeCalls += 1;
     if (claudeCalls === 1) return result("Claude opening proposal");
-    return result(`Claude agrees.\n${badBlock}`); // round 2 and the repair both emit the invalid block
+    if (claudeCalls === 2) return result(`Claude agrees.\n${badBlock}`);
+    return { ...result(controlBlock("satisfied", [])), outputTruncated: true };
   });
   t.mock.method(provider("codex"), "run", async () => result(`Codex.\n${controlBlock("satisfied", [])}`));
 
@@ -384,11 +674,14 @@ test("an emitted-but-schema-invalid control block is stored verbatim, not the fa
     }, () => {});
 
     const saved = await getSession(session.id);
-    assert.equal(claudeCalls, 3); // opening + round 2 + one repair (both invalid)
     const claudeRound2 = saved.messages.find((m) => m.agent === "claude" && m.round === 2 && m.phase === "collaboration");
     assert.equal(claudeRound2.control.valid, false);
-    assert.match(claudeRound2.meta.controlInvalidRaw, /"convergence":"bogus"/); // the actual block, verbatim
-    assert.notEqual(claudeRound2.meta.controlInvalidRaw, "(no control block emitted)");
+    assert.equal(claudeRound2.meta.controlInvalidRaw, undefined);
+    assert.equal(claudeRound2.meta.controlRepair.status, "failed");
+    assert.deepEqual(claudeRound2.meta.controlRepair.errorCodes, ["invalid_control_schema"]);
+    assert.equal(claudeRound2.meta.controlRepair.failureCode, "output_truncated");
+    assert.equal(claudeRound2.meta.controlRepair.outputTruncated, true);
+    assert.equal(claudeRound2.meta.controlRepair.repairedControl.value.valid, true);
     assert.match(claudeRound2.content, /Claude agrees\./); // reader-facing answer preserved, block stripped
     assert.doesNotMatch(claudeRound2.content, /agent-control/);
   } finally {

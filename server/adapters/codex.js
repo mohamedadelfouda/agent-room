@@ -278,6 +278,7 @@ export async function runCodex({ prompt, config, cwd, onEvent, registerChild }) 
       },
       envPolicy: "agent",
       timeoutMs: agentTimeoutMs(config.timeoutMs),
+      maxOutputBytes: config.maxOutputBytes,
       containTree: true,
       // Confine the model-run child in a Windows AppContainer, granting its SID only the disposable
       // clone (cwd) and the isolated Codex home/output (tempDir). runProcess adds cwd to the descriptor.
@@ -316,7 +317,7 @@ export async function runCodex({ prompt, config, cwd, onEvent, registerChild }) 
       throw error;
     }
     try {
-      const output = await readTextFileCapped(outputPath);
+      const output = await readTextFileCapped(outputPath, config.maxOutputBytes);
       finalText = output.text.trim();
       outputTruncated = output.truncated;
     } catch (error) {

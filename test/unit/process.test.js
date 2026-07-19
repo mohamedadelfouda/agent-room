@@ -223,17 +223,27 @@ test("a failed trusted-cli persist rolls back in-memory approval", async () => {
 });
 
 test("agent environment is allowlisted and does not inherit credentials", async () => {
-  const previous = process.env.AGENT_ROOM_TEST_TOKEN;
-  process.env.AGENT_ROOM_TEST_TOKEN = "do-not-inherit";
+  const secretKeys = [
+    "AGENT_ROOM_TEST_TOKEN",
+    "GH_TOKEN",
+    "GITHUB_TOKEN",
+    "AGENT_ROOM_GMAIL_ACCESS_TOKEN",
+    "AGENT_ROOM_SUPABASE_KEY",
+  ];
+  const previous = Object.fromEntries(secretKeys.map((key) => [key, process.env[key]]));
+  for (const key of secretKeys) process.env[key] = "do-not-inherit";
   try {
-    assert.equal(sanitizedAgentEnv().AGENT_ROOM_TEST_TOKEN, undefined);
+    const agentEnv = sanitizedAgentEnv();
+    for (const key of secretKeys) assert.equal(agentEnv[key], undefined);
     await withScript("console.log(JSON.stringify({secret:process.env.AGENT_ROOM_TEST_TOKEN||null,path:Boolean(process.env.PATH)}))\n", async (file) => {
       const r = await runProcess({ command: process.execPath, args: [file], envPolicy: "agent" });
       assert.deepEqual(JSON.parse(r.stdout), { secret: null, path: true });
     });
   } finally {
-    if (previous === undefined) delete process.env.AGENT_ROOM_TEST_TOKEN;
-    else process.env.AGENT_ROOM_TEST_TOKEN = previous;
+    for (const key of secretKeys) {
+      if (previous[key] === undefined) delete process.env[key];
+      else process.env[key] = previous[key];
+    }
   }
 });
 

@@ -18,7 +18,7 @@ function controlBlocks(source) {
     const closeAt = lower.indexOf(CLOSE_TAG, openAt + OPEN_TAG.length);
     if (closeAt === -1) break;
     const end = closeAt + CLOSE_TAG.length;
-    blocks.push({ start: openAt, end, raw: source.slice(openAt, end), inner: source.slice(openAt + OPEN_TAG.length, closeAt) });
+    blocks.push({ start: openAt, end, inner: source.slice(openAt + OPEN_TAG.length, closeAt) });
     cursor = end;
   }
   return blocks;
@@ -32,6 +32,13 @@ const ITEM_ID = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 const MAX_ITEMS = 20;
 const MAX_REGISTRY_ITEMS = 100;
 const MAX_ITEM_TEXT = 500;
+export const CONTROL_REPAIRABLE_ERRORS = new Set([
+  "missing_control",
+  "invalid_control_json",
+  "invalid_control_schema",
+  "target_version_mismatch",
+  "unaddressed_open_item",
+]);
 
 const ACTION_ACTORS = {
   provide_decision: new Set(["user"]),
@@ -85,9 +92,10 @@ function normalizeProposal(candidate) {
   return { action: candidate.action, itemId: candidate.itemId };
 }
 
-function invalidControl() {
+function invalidControl(errorCode = "invalid_control_schema") {
   return {
     valid: false,
+    errorCodes: [errorCode],
     controlVersion: null,
     convergence: "unknown",
     converged: false,
@@ -122,6 +130,7 @@ function validatedVersionTwo(candidate) {
   if (candidate.goalStatus === "satisfied" && itemProposals.some((proposal) => proposal.action === "create" && proposal.kind === "remaining_work")) return null;
   return {
     valid: true,
+    errorCodes: [],
     controlVersion: CONTROL_VERSION,
     convergence: candidate.convergence,
     converged: candidate.convergence === "converged",
@@ -143,6 +152,7 @@ function validatedLegacyControl(candidate) {
   const openPoints = candidate.openPoints.map((point) => point.trim()).filter(Boolean);
   return {
     valid: true,
+    errorCodes: [],
     controlVersion: 1,
     convergence: candidate.convergence,
     converged: candidate.convergence === "converged",
@@ -167,9 +177,9 @@ export function parseAgentControl(text) {
   // false `invalid_control` stops when agents had genuinely agreed. JSON shape and the
   // version-2 schema stay strict below, so a malformed or off-contract block still fails closed.
   const block = controlBlocks(String(text || "")).at(-1);
-  if (!block) return invalidControl();
+  if (!block) return invalidControl("missing_control");
   try { return validatedControl(JSON.parse(block.inner)) || invalidControl(); }
-  catch { return invalidControl(); }
+  catch { return invalidControl("invalid_control_json"); }
 }
 
 export function stripAgentControl(text) {
@@ -183,13 +193,6 @@ export function stripAgentControl(text) {
     cursor = block.end;
   }
   return (result + source.slice(cursor)).trimEnd();
-}
-
-// The last raw <agent-control> block as written (or "" if none). Used only for diagnostics —
-// when a control fails to validate, storing what the agent actually emitted turns an opaque
-// invalid_control into something the user can see and act on.
-export function rawAgentControl(text) {
-  return controlBlocks(String(text || "")).at(-1)?.raw || "";
 }
 
 function validRegistryItem(registryItem) {
@@ -376,15 +379,53 @@ function derivedNextSteps(pendingItems) {
   return [...grouped.values()];
 }
 
-function aggregateCompletion(controls) {
+function declaredCompletion(controls) {
   if (controls.some((control) => control.goalStatus === "incomplete")) return "incomplete";
   if (controls.some((control) => control.goalStatus === "blocked")) return "blocked";
   if (controls.some((control) => control.goalStatus === "needs_user")) return "needs_user";
   return "satisfied";
 }
 
-function roundConsistencyErrors({ controls, pendingItems, applicationErrors, enabled }) {
+function requiredStepCompletion(pendingItems) {
+  const actions = new Set(pendingItems.map((pendingItem) => pendingItem.requiredStep.action));
+  if (actions.has("resume_agent_round")) return "incomplete";
+  if (actions.has("run_external_check")) return "blocked";
+  if (actions.has("provide_decision")) return "needs_user";
+  return "satisfied";
+}
+
+function aggregateCompletion(controls, pendingItems) {
+  const requiredCompletion = requiredStepCompletion(pendingItems);
+  return requiredCompletion === "satisfied" ? declaredCompletion(controls) : requiredCompletion;
+}
+
+function terminalClaim(control) {
+  return control.convergence === "converged" && control.goalStatus !== "incomplete";
+}
+
+function terminalItemErrors(controls, currentRegistry) {
+  const errors = [];
+  const openItems = currentRegistry.filter((registryItem) => registryItem.status === "open");
+  controls.forEach((control, controlIndex) => {
+    if (!terminalClaim(control) || control.controlVersion !== CONTROL_VERSION) return;
+    const proposalsById = new Map(control.itemProposals
+      .filter((proposal) => proposal.action !== "create")
+      .map((proposal) => [proposal.itemId, proposal]));
+    for (const registryItem of openItems) {
+      const proposal = proposalsById.get(registryItem.itemId);
+      if (!proposal) {
+        errors.push({ code: "unaddressed_open_item", controlIndex, itemId: registryItem.itemId });
+      } else if (control.goalStatus === "satisfied" && proposal.action === "keep_open") {
+        errors.push({ code: "terminal_item_kept_open", controlIndex, itemId: registryItem.itemId });
+      }
+    }
+  });
+  return errors;
+}
+
+function roundConsistencyErrors({ controls, currentRegistry, pendingItems, applicationErrors, enabled }) {
   const errors = [...applicationErrors];
+  errors.push(...terminalItemErrors(controls, currentRegistry));
   if (!enabled) return errors;
   if (controls.some((control) => control.goalStatus === "needs_user") && !pendingItems.some((pendingItem) => pendingItem.kind === "user_decision")) {
     errors.push({ code: "missing_user_decision" });
@@ -392,7 +433,27 @@ function roundConsistencyErrors({ controls, pendingItems, applicationErrors, ena
   if (controls.some((control) => control.goalStatus === "blocked") && !pendingItems.some((pendingItem) => pendingItem.kind === "external_validation")) {
     errors.push({ code: "missing_external_validation" });
   }
+  const declared = declaredCompletion(controls);
+  const required = requiredStepCompletion(pendingItems);
+  if (required !== "satisfied" && declared !== "incomplete" && declared !== required) {
+    errors.push({ code: "completion_registry_mismatch", declaredCompletion: declared, requiredCompletion: required });
+  }
   return errors;
+}
+
+function repairTargets(controls, targetVersion, consistencyErrors) {
+  return controls.flatMap((control, controlIndex) => {
+    const errorCodes = new Set(control?.errorCodes || []);
+    if (control?.valid && control.targetVersion !== targetVersion) errorCodes.add("target_version_mismatch");
+    const itemIds = [];
+    for (const error of consistencyErrors) {
+      if (error.controlIndex !== controlIndex || error.code !== "unaddressed_open_item") continue;
+      errorCodes.add(error.code);
+      itemIds.push(error.itemId);
+    }
+    const repairableCodes = [...errorCodes].filter((code) => CONTROL_REPAIRABLE_ERRORS.has(code));
+    return repairableCodes.length ? [{ controlIndex, errorCodes: repairableCodes, itemIds: [...new Set(itemIds)] }] : [];
+  });
 }
 
 function validateRound(controls, targetVersion, itemRegistry) {
@@ -406,9 +467,25 @@ function validateRound(controls, targetVersion, itemRegistry) {
     ? applyProposals(present, currentRegistry)
     : { registry: currentRegistry || [], conflicts: [], errors: [] };
   const candidatePendingItems = application.registry.filter((registryItem) => registryItem.status === "open");
-  const consistencyErrors = roundConsistencyErrors({ controls: present, pendingItems: candidatePendingItems, applicationErrors: application.errors, enabled: versionAligned && registryValid });
+  const consistencyErrors = roundConsistencyErrors({
+    controls: present,
+    currentRegistry: currentRegistry || [],
+    pendingItems: candidatePendingItems,
+    applicationErrors: application.errors,
+    enabled: controlsValid && registryValid,
+  });
   const roundValid = controlsValid && registryValid && versionAligned && consistencyErrors.length === 0;
-  return { present, allPresent, versionAligned, currentRegistry: currentRegistry || [], application, consistencyErrors, roundValid, controlsValid };
+  return {
+    present,
+    allPresent,
+    versionAligned,
+    currentRegistry: currentRegistry || [],
+    application,
+    consistencyErrors,
+    repairTargets: repairTargets(controls, targetVersion, consistencyErrors),
+    roundValid,
+    controlsValid,
+  };
 }
 
 function agreementStateFor({ roundValid, controls, pendingItems, conflicts, unclassifiedPoints }) {
@@ -434,7 +511,7 @@ function discussionState(validation) {
     .map((proposal) => proposal.text)
     .filter(Boolean))];
   const agreementState = agreementStateFor({ roundValid, controls: present, pendingItems, conflicts: application.conflicts, unclassifiedPoints });
-  const completionState = roundValid ? aggregateCompletion(present) : "incomplete";
+  const completionState = roundValid ? aggregateCompletion(present, pendingItems) : "incomplete";
   const proposalChanged = roundValid && present.some((control) => control.substantiveDelta);
   // Early stop is driven by AGREEMENT, not by the task being fully done: once both agents
   // converge and a full round passes with no substantive change, further rounds only repeat.
@@ -474,6 +551,7 @@ function assessmentPayload(validation, state) {
     unclassifiedPoints: state.unclassifiedPoints,
     conflicts: validation.application.conflicts,
     consistencyErrors: validation.consistencyErrors,
+    repairTargets: validation.repairTargets,
     proposalChanged: state.proposalChanged,
     versionAligned: validation.versionAligned,
     allPresent: validation.allPresent,
@@ -485,4 +563,61 @@ function assessmentPayload(validation, state) {
 export function assessRound(controls, targetVersion, itemRegistry = []) {
   const validation = validateRound(controls, targetVersion, itemRegistry);
   return assessmentPayload(validation, discussionState(validation));
+}
+
+function equalJson(left, right) {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function unmatchedProposals(originalProposals, repairedProposals) {
+  const remaining = [...repairedProposals];
+  for (const proposal of originalProposals) {
+    const index = remaining.findIndex((candidate) => equalJson(candidate, proposal));
+    if (index === -1) return null;
+    remaining.splice(index, 1);
+  }
+  return remaining;
+}
+
+function repairedContractError(repairedControl, targetVersion) {
+  if (repairedControl?.valid
+      && repairedControl.controlVersion === CONTROL_VERSION
+      && repairedControl.targetVersion === targetVersion) return null;
+  return repairedControl?.errorCodes?.[0] || "invalid_control_schema";
+}
+
+function preservesNarrowRepairFields(originalControl, repairedControl, errorCodes) {
+  for (const field of ["controlVersion", "convergence", "goalStatus", "substantiveDelta"]) {
+    if (repairedControl[field] !== originalControl[field]) return false;
+  }
+  return errorCodes.has("target_version_mismatch") || repairedControl.targetVersion === originalControl.targetVersion;
+}
+
+function validNarrowProposalAdditions(originalControl, repairedControl, allowedItemIds) {
+  const addedProposals = unmatchedProposals(originalControl.itemProposals, repairedControl.itemProposals);
+  if (!addedProposals) return false;
+  const additionsAreNarrow = addedProposals.every((proposal) => (
+    proposal.action !== "create" && allowedItemIds.has(proposal.itemId)
+  ));
+  const addressedItems = new Set(addedProposals.map((proposal) => proposal.itemId));
+  return additionsAreNarrow && [...allowedItemIds].every((itemId) => addressedItems.has(itemId));
+}
+
+export function validateControlRepair(originalControl, repairedControl, repairTarget, targetVersion) {
+  const contractError = repairedContractError(repairedControl, targetVersion);
+  if (contractError) return { valid: false, errorCode: contractError };
+  const errorCodes = new Set(repairTarget.errorCodes);
+  if (!originalControl?.valid || [...errorCodes].some((code) => ["missing_control", "invalid_control_json", "invalid_control_schema"].includes(code))) {
+    return { valid: true, errorCode: null };
+  }
+  const allowedCodes = new Set(["target_version_mismatch", "unaddressed_open_item"]);
+  if ([...errorCodes].some((code) => !allowedCodes.has(code))) return { valid: false, errorCode: "repair_scope_violation" };
+  if (!preservesNarrowRepairFields(originalControl, repairedControl, errorCodes)) {
+    return { valid: false, errorCode: "repair_scope_violation" };
+  }
+  const allowedItemIds = new Set(repairTarget.itemIds);
+  if (!validNarrowProposalAdditions(originalControl, repairedControl, allowedItemIds)) {
+    return { valid: false, errorCode: "repair_scope_violation" };
+  }
+  return { valid: true, errorCode: null };
 }

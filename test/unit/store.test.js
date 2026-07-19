@@ -243,6 +243,42 @@ test("session persistence enforces the 24 MiB UTF-8 hard limit", async () => {
   } finally { await cleanup(session.id); }
 });
 
+test("control repair audit metadata survives a session persistence round trip", async () => {
+  const session = await createSession("control-repair-persistence");
+  const controlRepair = {
+    attempted: true,
+    count: 1,
+    status: "succeeded",
+    errorCodes: ["unaddressed_open_item"],
+    durationMs: 7,
+    outputTruncated: false,
+    originalControl: { truncated: false, value: { valid: true, itemProposals: [] } },
+    repairedControl: {
+      truncated: false,
+      value: { valid: true, itemProposals: [{ action: "resolve", itemId: "item-001" }] },
+    },
+  };
+  const controlRepairStats = {
+    attemptedCalls: 1,
+    succeededCalls: 1,
+    failedCalls: 0,
+    totalDurationMs: 7,
+    errorCodeCounts: { unaddressed_open_item: 1 },
+  };
+  try {
+    session.messages.push(
+      { id: "agent", content: "answer", meta: { controlRepair } },
+      { id: "outcome", content: "done", meta: { outcome: { controlRepairStats } } },
+    );
+    await saveSession(session);
+    const loaded = await getSession(session.id);
+    assert.deepEqual(loaded.messages[0].meta.controlRepair, controlRepair);
+    assert.deepEqual(loaded.messages[1].meta.outcome.controlRepairStats, controlRepairStats);
+  } finally {
+    await cleanup(session.id);
+  }
+});
+
 test("history retention never drops a terminal execution whose cleanup is pending", async () => {
   const session = await createSession("cleanup-retention-test");
   try {
