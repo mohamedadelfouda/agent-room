@@ -19,12 +19,12 @@ function parseClaudeLine(line) {
   try { return JSON.parse(line); } catch { return null; }
 }
 
-export function createClaudeStreamCollector(onEvent) {
+export function createClaudeStreamCollector(onEvent, maxOutputBytes) {
   let sessionId = null;
   let resultError = null;
   let usage = null;
-  const finalText = new CappedText();
-  const streamedText = new CappedText();
+  const finalText = new CappedText(maxOutputBytes);
+  const streamedText = new CappedText(maxOutputBytes);
   return {
     onStdoutLine(line) {
       const event = parseClaudeLine(line);
@@ -117,7 +117,7 @@ export async function runClaude({ prompt, config, cwd, onEvent, registerChild })
     "Use the complete task supplied through standard input. Return only your response for the shared session.",
   ];
 
-  const collector = createClaudeStreamCollector(onEvent);
+  const collector = createClaudeStreamCollector(onEvent, config.maxOutputBytes);
   const startedAt = Date.now();
   let result;
   try {
@@ -128,6 +128,7 @@ export async function runClaude({ prompt, config, cwd, onEvent, registerChild })
       cwd,
       envPolicy: "agent",
       timeoutMs: agentTimeoutMs(config.timeoutMs),
+      maxOutputBytes: config.maxOutputBytes,
       containTree: true,
       registerChild,
       onStdoutLine: collector.onStdoutLine,

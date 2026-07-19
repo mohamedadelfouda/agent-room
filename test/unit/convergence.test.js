@@ -1,6 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { parseAgentControl, stripAgentControl, rawAgentControl, assessRound } from "../../server/convergence.js";
+import {
+  assessRound,
+  CONTROL_REPAIRABLE_ERRORS,
+  parseAgentControl,
+  stripAgentControl,
+  validateControlRepair,
+} from "../../server/convergence.js";
 
 function legacyBlock(overrides = {}) {
   return `<agent-control>${JSON.stringify({
@@ -85,21 +91,17 @@ test("a well-formed control survives reader-facing prose around it", () => {
   assert.equal(parseAgentControl(`${block({ confidence: 0.9 })}\ntrailing`).valid, false);
 });
 
-test("parse, strip, and raw agree on block boundaries (unclosed/extra tags)", () => {
+test("parse and strip agree on block boundaries with unclosed or extra tags", () => {
   const valid = block();
-  // Clean block with prose around it: valid, stripped out, raw = the block. All three agree.
   const clean = `intro ${valid} outro`;
   assert.equal(parseAgentControl(clean).valid, true);
-  assert.equal(rawAgentControl(clean), valid);
   assert.doesNotMatch(stripAgentControl(clean), /agent-control/);
   assert.match(stripAgentControl(clean), /intro/);
   assert.match(stripAgentControl(clean), /outro/);
   // A stray unclosed open tag before the real block: first-open pairs with the first close, so
-  // the whole span is ONE (malformed) block — parse fails on the noisy inner, and strip/raw
-  // treat exactly that same span. No disagreement between the three functions.
+  // the whole span is one malformed block. Parse and strip must use the same scanner.
   const noisy = `<agent-control>stray ${valid}`;
   assert.equal(parseAgentControl(noisy).valid, false);
-  assert.equal(rawAgentControl(noisy), noisy);
   assert.equal(stripAgentControl(noisy), "");
 });
 
@@ -147,15 +149,197 @@ test("multiple pending kinds are preserved while completion stays conservative",
   assert.equal(result.nextSteps.length, 2);
 });
 
-test("an external follow-up does not imply blocked unless a control reports blocked", () => {
+test("an external follow-up cannot be certified as satisfied", () => {
   const result = assessRound([
     control({ itemProposals: [create("external_validation", "Measure token use later", "orchestrator", "run_external_check")] }),
     control(),
   ], 2);
-  assert.equal(result.completionState, "satisfied");
-  assert.equal(result.stopReason, "complete");
-  assert.equal(result.canStop, true);
-  assert.deepEqual(result.pendingKinds, ["external_validation"]);
+  assert.equal(result.completionState, "incomplete");
+  assert.equal(result.stopReason, "invalid_control");
+  assert.equal(result.canStop, false);
+  assert.deepEqual(result.itemRegistry, []);
+  assert.equal(result.consistencyErrors.some((error) => error.code === "completion_registry_mismatch"), true);
+});
+
+test("control parsing exposes closed repair diagnostics without broadening the whitelist", () => {
+  assert.deepEqual(
+    CONTROL_REPAIRABLE_ERRORS,
+    new Set([
+      "missing_control",
+      "invalid_control_json",
+      "invalid_control_schema",
+      "target_version_mismatch",
+      "unaddressed_open_item",
+    ]),
+  );
+  assert.deepEqual(parseAgentControl("reader-facing answer").errorCodes, ["missing_control"]);
+  assert.deepEqual(parseAgentControl("<agent-control>{broken}</agent-control>").errorCodes, ["invalid_control_json"]);
+  assert.deepEqual(parseAgentControl(block({ confidence: 0.5 })).errorCodes, ["invalid_control_schema"]);
+});
+
+test("2026-07-18 regression: a terminal claim cannot omit an approved open item", () => {
+  const registry = [item("item-001", "user_decision", "Choose a mode", "user", "provide_decision")];
+  const result = assessRound([control(), control()], 2, registry);
+
+  assert.equal(result.canStop, false);
+  assert.equal(result.stopReason, "invalid_control");
+  assert.equal(result.itemRegistry[0].status, "open");
+  assert.deepEqual(
+    result.consistencyErrors.filter((error) => error.code === "unaddressed_open_item").map((error) => error.controlIndex),
+    [0, 1],
+  );
+});
+
+test("a satisfied terminal claim cannot keep an approved item open", () => {
+  const registry = [item("item-001", "user_decision", "Choose a mode", "user", "provide_decision")];
+  const keepOpen = [{ action: "keep_open", itemId: "item-001" }];
+  const result = assessRound([
+    control({ itemProposals: keepOpen }),
+    control({ itemProposals: keepOpen }),
+  ], 2, registry);
+
+  assert.equal(result.canStop, false);
+  assert.equal(result.itemRegistry[0].status, "open");
+  assert.equal(result.consistencyErrors.some((error) => error.code === "terminal_item_kept_open"), true);
+  assert.deepEqual(result.repairTargets, []);
+});
+
+test("repair targets identify only stale or structurally incomplete controls", () => {
+  const registry = [item("item-001", "user_decision", "Choose a mode", "user", "provide_decision")];
+  const stale = control({ targetVersion: 1 });
+  const result = assessRound([stale, control()], 2, registry);
+
+  assert.deepEqual(result.repairTargets, [
+    {
+      controlIndex: 0,
+      errorCodes: ["target_version_mismatch", "unaddressed_open_item"],
+      itemIds: ["item-001"],
+    },
+    {
+      controlIndex: 1,
+      errorCodes: ["unaddressed_open_item"],
+      itemIds: ["item-001"],
+    },
+  ]);
+});
+
+test("a valid terminal omission stays repairable when a peer control is invalid", () => {
+  const registry = [item("item-001", "user_decision", "Choose a mode", "user", "provide_decision")];
+  const missing = parseAgentControl("reader-facing answer without a control");
+  const result = assessRound([control(), missing], 2, registry);
+
+  assert.deepEqual(result.repairTargets, [
+    {
+      controlIndex: 0,
+      errorCodes: ["unaddressed_open_item"],
+      itemIds: ["item-001"],
+    },
+    {
+      controlIndex: 1,
+      errorCodes: ["missing_control"],
+      itemIds: [],
+    },
+  ]);
+});
+
+test("narrow repair preserves every unaffected control field and proposal", () => {
+  const original = control({
+    itemProposals: [{ action: "keep_open", itemId: "item-002" }],
+  });
+  const target = {
+    controlIndex: 0,
+    errorCodes: ["unaddressed_open_item"],
+    itemIds: ["item-001"],
+  };
+  const repaired = control({
+    itemProposals: [
+      { action: "keep_open", itemId: "item-002" },
+      { action: "resolve", itemId: "item-001" },
+    ],
+  });
+  assert.deepEqual(validateControlRepair(original, repaired, target, 2), { valid: true, errorCode: null });
+
+  const changedDelta = control({
+    substantiveDelta: true,
+    itemProposals: [
+      { action: "keep_open", itemId: "item-002" },
+      { action: "resolve", itemId: "item-001" },
+    ],
+  });
+  assert.deepEqual(
+    validateControlRepair(original, changedDelta, target, 2),
+    { valid: false, errorCode: "repair_scope_violation" },
+  );
+
+  const changedUnrelatedProposal = control({
+    itemProposals: [
+      { action: "resolve", itemId: "item-002" },
+      { action: "resolve", itemId: "item-001" },
+    ],
+  });
+  assert.deepEqual(
+    validateControlRepair(original, changedUnrelatedProposal, target, 2),
+    { valid: false, errorCode: "repair_scope_violation" },
+  );
+});
+
+test("a malformed control may be fully regenerated but still needs the current contract", () => {
+  const missing = parseAgentControl("reader-facing answer");
+  const target = { controlIndex: 0, errorCodes: ["missing_control"], itemIds: [] };
+  assert.deepEqual(validateControlRepair(missing, control(), target, 2), { valid: true, errorCode: null });
+  assert.deepEqual(
+    validateControlRepair(missing, control({ targetVersion: 1 }), target, 2),
+    { valid: false, errorCode: "invalid_control_schema" },
+  );
+});
+
+test("required-step precedence is deterministic for every registry order", () => {
+  const openItems = [
+    item("item-001", "remaining_work", "Finish the patch", "agent", "resume_agent_round"),
+    item("item-002", "external_validation", "Run the external check", "orchestrator", "run_external_check"),
+    item("item-003", "user_decision", "Choose the rollout", "user", "provide_decision"),
+  ];
+  const permutations = [
+    openItems,
+    [openItems[0], openItems[2], openItems[1]],
+    [openItems[1], openItems[0], openItems[2]],
+    [openItems[1], openItems[2], openItems[0]],
+    [openItems[2], openItems[0], openItems[1]],
+    [openItems[2], openItems[1], openItems[0]],
+  ];
+
+  for (const registry of permutations) {
+    const result = assessRound([
+      control({ goalStatus: "incomplete" }),
+      control({ goalStatus: "incomplete" }),
+    ], 2, registry);
+    assert.equal(result.completionState, "incomplete");
+    assert.equal(result.stopReason, null);
+  }
+
+  const withoutAgentWork = openItems.map((registryItem) => (
+    registryItem.itemId === "item-001" ? { ...registryItem, status: "resolved" } : registryItem
+  ));
+  const keepPending = [
+    { action: "keep_open", itemId: "item-002" },
+    { action: "keep_open", itemId: "item-003" },
+  ];
+  const blocked = assessRound([
+    control({ goalStatus: "blocked", itemProposals: keepPending }),
+    control({ goalStatus: "blocked", itemProposals: keepPending }),
+  ], 2, withoutAgentWork);
+  assert.equal(blocked.completionState, "blocked");
+  assert.equal(blocked.canStop, true);
+
+  const onlyUser = withoutAgentWork.map((registryItem) => (
+    registryItem.itemId === "item-002" ? { ...registryItem, status: "resolved" } : registryItem
+  ));
+  const needsUser = assessRound([
+    control({ goalStatus: "needs_user", itemProposals: [{ action: "keep_open", itemId: "item-003" }] }),
+    control({ goalStatus: "needs_user", itemProposals: [{ action: "keep_open", itemId: "item-003" }] }),
+  ], 2, onlyUser);
+  assert.equal(needsUser.completionState, "needs_user");
+  assert.equal(needsUser.canStop, true);
 });
 
 test("agreement stops the rounds; pending agent work, disagreement, and change continue", () => {
@@ -200,7 +384,8 @@ test("a parseable but inconsistent round still surfaces the raised disagreement"
   ], 2);
   assert.equal(result.allValid, false);
   assert.equal(result.controlsParseable, true);
-  assert.deepEqual(result.consistencyErrors, [{ code: "missing_user_decision" }]);
+  assert.equal(result.consistencyErrors.some((error) => error.code === "missing_user_decision"), true);
+  assert.equal(result.consistencyErrors.some((error) => error.code === "completion_registry_mismatch"), true);
   assert.deepEqual(result.proposedDisagreements, ["Motivation vs learning-journey quality"]);
 });
 
@@ -256,7 +441,10 @@ test("unanimous merge supersedes only into an existing open target", () => {
     item("item-001", "external_validation", "Canonical check", "human_operator", "run_external_check"),
     item("item-002", "external_validation", "Duplicate check", "human_operator", "run_external_check"),
   ];
-  const merge = [{ action: "merge_into", itemId: "item-002", targetItemId: "item-001" }];
+  const merge = [
+    { action: "keep_open", itemId: "item-001" },
+    { action: "merge_into", itemId: "item-002", targetItemId: "item-001" },
+  ];
   const result = assessRound([
     control({ goalStatus: "blocked", itemProposals: merge }),
     control({ goalStatus: "blocked", itemProposals: merge }),

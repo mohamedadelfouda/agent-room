@@ -99,8 +99,8 @@ export function transcriptFor(session, maxChars = 24000) {
   return [base, tail.join(SEP)].filter(Boolean).join(SEP).slice(0, cap);
 }
 
-function controlInstruction(targetVersion, itemRegistry = []) {
-  const shape = JSON.stringify({
+function controlShape(targetVersion) {
+  return JSON.stringify({
     controlVersion: 2,
     convergence: "converged|open|not_evaluated",
     goalStatus: "satisfied|incomplete|blocked|needs_user",
@@ -115,24 +115,52 @@ function controlInstruction(targetVersion, itemRegistry = []) {
     }],
     targetVersion,
   });
+}
+
+function controlInstruction(targetVersion, itemRegistry = []) {
   return `End with exactly one machine-readable control block after your reader-facing answer:
-<agent-control>${shape}</agent-control>
+<agent-control>${controlShape(targetVersion)}</agent-control>
 Use convergence=converged only if you agree with the latest proposal. goalStatus describes whether the user's actual task is complete, not whether the agents agree. Set substantiveDelta=true only when your answer materially changes the proposal; that creates a newer version and prevents an early stop this round.
 itemProposals are proposals, not official state. For a new item use action=create without itemId or targetItemId. For an existing open item reuse its itemId and use keep_open, resolve, or merge_into; merge_into also requires targetItemId. A user_decision requires user/provide_decision. external_validation requires user, human_operator, or orchestrator with run_external_check. disagreement and remaining_work require agent/resume_agent_round. out_of_scope requires user/provide_decision. Do not include confidence or openPoints in version 2.
 When you and the other agent have genuinely landed in the same place and you're no longer materially changing the proposal, set convergence=converged and substantiveDelta=false so the session can stop early instead of repeating a round with nothing new. If the only thing left is the user's own decision or an outside check, say so through goalStatus (needs_user or blocked) and create the matching item — don't fall back on goalStatus=incomplete just because the task isn't fully finished. Reserve remaining_work for real work another agent round would still add; that is the one signal that legitimately keeps the rounds going.
 Current approved itemRegistry (reuse these IDs; omission never closes an item):
 ${JSON.stringify(itemRegistry)}
+Review every open item before making a terminal claim. Reuse its existing itemId. If your answer says it is resolved, obsolete, or no longer needs the user, emit resolve or merge_into. If it remains open, emit keep_open and choose a matching goalStatus. Omission of an open item prevents the terminal claim from being accepted. Do not create a new item for a topic whose itemId is already listed.
 Do not put the block in a code fence or write anything after it.`;
 }
 
-// One-shot repair asked of a single agent whose turn parsed without a valid control block. It
-// does NOT reopen the debate — the reader-facing answer already stands — it only recovers the
-// machine signal so a genuine agreement isn't lost to a dropped or malformed block.
-export function controlRepairPrompt({ agentLabel, priorAnswer, targetVersion = 1, itemRegistry = [] }) {
-  return `You're ${agentLabel}. Your previous reply stands, but its machine-readable control block was missing or invalid, so the session could not read your position. Do NOT rewrite or change your answer — output ONLY the corrected control block for that same answer, and nothing else.
-${controlInstruction(targetVersion, itemRegistry)}
-Your previous answer, for reference (do not repeat it):
-${boundedExcerpt(priorAnswer, 4000)}`;
+// Repair never reopens the debate: the reader-facing answer already stands. The prompt only
+// corrects the explicitly classified machine-signal defects supplied by deterministic assessment.
+export function controlRepairPrompt({
+  agentLabel,
+  role,
+  priorAnswer,
+  originalControl = null,
+  targetVersion = 1,
+  itemRegistry = [],
+  problems = [],
+}) {
+  return `You are ${agentLabel}, performing a narrow control repair for your previous ${role || "agent"} turn.
+Do not rewrite the reader-facing answer, add reasoning, change your position, or introduce any new decision or fact.
+
+Original reader-facing answer:
+<original-answer>
+${boundedExcerpt(priorAnswer, 4000)}
+</original-answer>
+
+Original normalized control:
+${JSON.stringify(originalControl)}
+
+Current approved itemRegistry:
+${JSON.stringify(itemRegistry)}
+
+Structured control problems:
+${JSON.stringify(problems)}
+
+Repair only the listed structural problems. When the original control is valid, preserve convergence, goalStatus, substantiveDelta, targetVersion, and every unrelated item proposal exactly unless that specific field is named by a listed problem. For unaddressed_open_item, only add an explicit action for the listed itemId. For target_version_mismatch, only update targetVersion. When the original control is missing or malformed, reconstruct it from the original answer and explicitly address every open registry item with its existing itemId.
+Return exactly one <agent-control> block using this contract:
+<agent-control>${controlShape(targetVersion)}</agent-control>
+Do not use a code fence. Do not write anything after it, and do not write anything before it.`;
 }
 
 export function collaborationPrompt({ session, agentLabel, role, round, totalRounds, userTask, projectSnapshot = "", targetVersion = 1, itemRegistry = [] }) {

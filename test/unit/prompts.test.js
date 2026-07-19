@@ -1,6 +1,14 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { chatPrompt, collaborationPrompt, controlRepairPrompt, debatePrompt, executionPrompt, synthesisPrompt, transcriptFor } from "../../server/prompts.js";
+import {
+  chatPrompt,
+  collaborationPrompt,
+  controlRepairPrompt,
+  debatePrompt,
+  executionPrompt,
+  synthesisPrompt,
+  transcriptFor,
+} from "../../server/prompts.js";
 
 const session = { messages: [] };
 const base = { session, agentLabel: "Claude", role: "Collaborator", totalRounds: 5, userTask: "design X" };
@@ -39,6 +47,36 @@ test("later collaboration rounds request a versioned control contract", () => {
   });
   assertControlContract(prompt, 7);
   assert.match(prompt, /item-001/);
+  assert.match(prompt, /review every open item/i);
+  assert.match(prompt, /reuse its existing itemId/i);
+  assert.match(prompt, /resolve or merge_into/i);
+  assert.match(prompt, /omission.*prevents/i);
+  assert.match(prompt, /do not create a new item/i);
+});
+
+test("control repair requests one control block without a second reader-facing answer", () => {
+  const prompt = controlRepairPrompt({
+    agentLabel: "Claude",
+    role: "Collaborator",
+    priorAnswer: "We agreed that the rollout choice is resolved.",
+    targetVersion: 7,
+    itemRegistry: [{
+      itemId: "item-001",
+      kind: "user_decision",
+      status: "open",
+      text: "Choose the rollout",
+      requiredStep: { actor: "user", action: "provide_decision" },
+    }],
+    problems: [{ errorCodes: ["unaddressed_open_item"], itemIds: ["item-001"] }],
+  });
+
+  assertControlContract(prompt, 7);
+  assert.match(prompt, /unaddressed_open_item/);
+  assert.match(prompt, /item-001/);
+  assert.match(prompt, /control repair/i);
+  assert.match(prompt, /do not rewrite.*reader-facing answer/i);
+  assert.match(prompt, /exactly one <agent-control>/i);
+  assert.match(prompt, /missing or malformed.*every open registry item/i);
 });
 
 test("project grounding appears only when a snapshot is supplied", () => {

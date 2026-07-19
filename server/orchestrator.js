@@ -2,14 +2,16 @@ import { getSession, listSessions, mutateSession, scratchWorkspacePath, SKIP_SES
 import { terminateProcess } from "./process.js";
 import { provider, providerIds } from "./providers/registry.js";
 import { collaborationPrompt, debatePrompt, synthesisPrompt, chatPrompt, controlRepairPrompt } from "./prompts.js";
-import { parseAgentControl, stripAgentControl, rawAgentControl, assessRound } from "./convergence.js";
+import { assessRound, parseAgentControl, stripAgentControl, validateControlRepair } from "./convergence.js";
 import { assertTrustedProject, projectSnapshot } from "./project.js";
 import fs from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { CappedText } from "./output-limits.js";
 import { logError, redact } from "./logger.js";
 import { registerProjectScope } from "./project-tools.js";
 import { claimSessionActivity } from "./session-activity.js";
 import { expectedApiError } from "./api-errors.js";
+import { sumUsage } from "./usage.js";
 import {
   assertRunAcceptsOutput as assertAttemptAcceptsOutput,
   claimRunTerminal,
@@ -25,7 +27,141 @@ import {
 const activeRuns = new Map();
 const DISCUSSION_MODES = new Set(["chat", "collaboration", "debate"]);
 const MAX_ROLE_CODEPOINTS = 180;
-const REPAIR_TIMEOUT_MS = 120000; // one control block only — never a full turn's budget
+const CONTROL_REPAIR_TIMEOUT_MS = 60000;
+const MAX_CONTROL_REPAIR_OUTPUT_BYTES = 64 * 1024;
+const MAX_CONTROL_SNAPSHOT_BYTES = 5000;
+const CONTROL_SNAPSHOT_PREVIEW_CHARS = 1500;
+
+function controlRepairConfig(agentConfig) {
+  const config = {};
+  for (const key of ["model", "effort", "command"]) {
+    if (agentConfig[key] !== undefined) config[key] = agentConfig[key];
+  }
+  return {
+    ...config,
+    permission: "read",
+    mcpSessionId: "",
+    connectorSessionId: "",
+    timeoutMs: CONTROL_REPAIR_TIMEOUT_MS,
+    maxOutputBytes: MAX_CONTROL_REPAIR_OUTPUT_BYTES,
+  };
+}
+
+function controlSnapshot(control) {
+  const serialized = JSON.stringify(control);
+  const bytes = Buffer.byteLength(serialized, "utf8");
+  if (bytes <= MAX_CONTROL_SNAPSHOT_BYTES) return { truncated: false, value: structuredClone(control) };
+  return {
+    truncated: true,
+    bytes,
+    sha256: createHash("sha256").update(serialized).digest("hex"),
+    preview: redact(serialized.slice(0, CONTROL_SNAPSHOT_PREVIEW_CHARS)),
+  };
+}
+
+function newControlRepairStats() {
+  return {
+    attemptedCalls: 0,
+    succeededCalls: 0,
+    failedCalls: 0,
+    totalDurationMs: 0,
+    errorCodeCounts: {},
+    usages: [],
+  };
+}
+
+function recordControlRepair(stats, audit) {
+  stats.attemptedCalls += 1;
+  stats[audit.status === "succeeded" ? "succeededCalls" : "failedCalls"] += 1;
+  stats.totalDurationMs += audit.durationMs;
+  for (const code of audit.errorCodes) {
+    stats.errorCodeCounts[code] = (stats.errorCodeCounts[code] || 0) + 1;
+  }
+  if (audit.usage) stats.usages.push(audit.usage);
+}
+
+function completedControlRepairStats(stats) {
+  if (!stats.attemptedCalls) return null;
+  const { usages, ...summary } = stats;
+  return usages.length ? { ...summary, usage: sumUsage(usages) } : summary;
+}
+
+function controlRepairAudit({
+  target,
+  originalControl,
+  repairedControl,
+  providerResult,
+  config,
+  status,
+  failureCode,
+  durationMs,
+}) {
+  return {
+    attempted: true,
+    count: 1,
+    status,
+    errorCodes: [...target.errorCodes],
+    ...(failureCode ? { failureCode } : {}),
+    durationMs,
+    outputTruncated: Boolean(providerResult?.outputTruncated),
+    requestedModel: config.model || "(default)",
+    requestedEffort: config.effort || "",
+    usage: providerResult?.usage ?? null,
+    originalControl: controlSnapshot(originalControl),
+    ...(repairedControl ? { repairedControl: controlSnapshot(repairedControl) } : {}),
+  };
+}
+
+function skippedControlRepairAudit({ target, originalControl, config }) {
+  return {
+    attempted: false,
+    count: 0,
+    status: "skipped",
+    errorCodes: [...target.errorCodes],
+    failureCode: "repair_not_supported",
+    durationMs: 0,
+    outputTruncated: false,
+    requestedModel: config.model || "(default)",
+    requestedEffort: config.effort || "",
+    usage: null,
+    originalControl: controlSnapshot(originalControl),
+  };
+}
+
+async function invokeControlRepairProvider({ definition, prompt, config, cwd, registerChild, state }) {
+  const repairPromise = Promise.resolve().then(() => definition.run({
+    prompt,
+    config,
+    cwd,
+    registerChild,
+    onEvent() {},
+  }));
+  state.pending.add(repairPromise);
+  try {
+    return await repairPromise;
+  } finally {
+    state.pending.delete(repairPromise);
+  }
+}
+
+function parsedControlRepair(providerResult, originalControl, target, targetVersion) {
+  const repairedControl = parseAgentControl(redact(providerResult.text));
+  const validation = providerResult.outputTruncated
+    ? { valid: false, errorCode: "output_truncated" }
+    : validateControlRepair(originalControl, repairedControl, target, targetVersion);
+  return { repairedControl, validation };
+}
+
+async function controlRepairWorkspace(sessionId, state) {
+  try {
+    const cwd = await scratchWorkspacePath();
+    assertRunAcceptsOutput(sessionId, state);
+    return { cwd, error: null };
+  } catch (error) {
+    if (!runAcceptsOutput(sessionId, state) || error.runInactive) throw runInactiveError(state);
+    return { cwd: null, error };
+  }
+}
 
 function invalidRequest(code, message) {
   throw expectedApiError(code, message, 400);
@@ -152,7 +288,7 @@ function discussionOutcomePhase(assessment) {
   }[assessment.stopReason] || "needs_more_rounds";
 }
 
-export function buildDiscussionOutcome(assessment, requestedRounds, completedRounds) {
+export function buildDiscussionOutcome(assessment, requestedRounds, completedRounds, controlRepairStats = null) {
   const phase = discussionOutcomePhase(assessment);
   return {
     outcomeVersion: 1,
@@ -175,6 +311,7 @@ export function buildDiscussionOutcome(assessment, requestedRounds, completedRou
     conflicts: structuredClone(assessment.conflicts),
     controlValid: assessment.allValid,
     controlsParseable: assessment.controlsParseable,
+    ...(controlRepairStats ? { controlRepairStats: structuredClone(controlRepairStats) } : {}),
   };
 }
 
@@ -484,34 +621,100 @@ async function runOrchestrationClaimed({ sessionId, request, validatedRequest, e
     if (!(await persistRunProgress(session, state, emit))) throw runInactiveError(state);
     emit({ type: "run_started", sessionId, runId: state.runId, mode, rounds });
 
-    // One extra provider call to recover a dropped or malformed control block from a single
-    // agent, tracked in state.pending and using the same registerChild so a stop cancels it
-    // cleanly like any other provider call.
-    const attemptControlRepair = async (definition, cfg, cwd, priorAnswer, controlContext) => {
-      if (!runAcceptsOutput(sessionId, state)) return null;
-      const repairPrompt = controlRepairPrompt({
-        agentLabel: definition.label,
-        priorAnswer,
-        targetVersion: controlContext.targetVersion,
-        itemRegistry: controlContext.itemRegistry,
-      });
-      // The repair emits only one JSON block, so cap its timeout well below a normal turn's
-      // (default 10min, up to 60): a hung repair must not double this round's tail latency.
-      const repairCfg = { ...cfg, timeoutMs: Math.min(Number(cfg.timeoutMs) || REPAIR_TIMEOUT_MS, REPAIR_TIMEOUT_MS) };
-      let repairPromise;
-      try {
-        repairPromise = Promise.resolve().then(() => definition.run({ prompt: repairPrompt, config: repairCfg, cwd, registerChild, onEvent() {} }));
-        state.pending.add(repairPromise);
-        const repairResult = await repairPromise;
-        return parseAgentControl(redact(repairResult.text));
-      } catch {
-        return null;
-      } finally {
-        if (repairPromise) state.pending.delete(repairPromise);
+    const controlRepairStats = newControlRepairStats();
+
+    const repairMessageControl = async ({ message, target, targetVersion, itemRegistry, originalControl }) => {
+      assertRunAcceptsOutput(sessionId, state);
+      const definition = provider(message.agent);
+      const config = controlRepairConfig(request.agents[message.agent]);
+      if (definition.capabilities?.controlRepair !== "tool-free") {
+        message.meta.controlRepair = skippedControlRepairAudit({
+          target,
+          originalControl,
+          config,
+        });
+        return;
       }
+      const startedAt = Date.now();
+      const workspace = await controlRepairWorkspace(sessionId, state);
+      let providerResult = workspace.error;
+      let repairedControl = null;
+      let status = "failed";
+      let failureCode = workspace.error ? "scratch_workspace_error" : "provider_error";
+      let providerFailed = Boolean(workspace.error);
+      if (!providerFailed) {
+        const prompt = controlRepairPrompt({
+          agentLabel: definition.label,
+          role: message.role,
+          priorAnswer: message.content,
+          originalControl: message.control,
+          targetVersion,
+          itemRegistry,
+          problems: [target],
+        });
+        assertRunAcceptsOutput(sessionId, state);
+        try {
+          providerResult = await invokeControlRepairProvider({
+            definition,
+            prompt,
+            config,
+            cwd: workspace.cwd,
+            registerChild,
+            state,
+          });
+        } catch (error) {
+          if (!runAcceptsOutput(sessionId, state) || error.runInactive) throw runInactiveError(state);
+          providerResult = error;
+          providerFailed = true;
+        }
+      }
+      if (!providerFailed) {
+        assertRunAcceptsOutput(sessionId, state);
+        const parsedRepair = parsedControlRepair(providerResult, originalControl, target, targetVersion);
+        repairedControl = parsedRepair.repairedControl;
+        const { validation } = parsedRepair;
+        status = validation.valid ? "succeeded" : "failed";
+        failureCode = validation.errorCode;
+        if (validation.valid) {
+          message.control = repairedControl;
+          message.convergence = repairedControl;
+        }
+      }
+      const audit = controlRepairAudit({
+        target,
+        originalControl,
+        repairedControl,
+        providerResult,
+        config,
+        status,
+        failureCode,
+        durationMs: providerResult?.durationMs ?? Date.now() - startedAt,
+      });
+      message.meta.controlRepair = audit;
+      recordControlRepair(controlRepairStats, audit);
     };
 
-    const callAgent = async (agent, prompt, round, phase, controlContext = null) => {
+    const assessRepairedRound = async (roundMessages, targetVersion, itemRegistry) => {
+      let assessment = assessRound(roundMessages.map((message) => message.control), targetVersion, itemRegistry);
+      if (!assessment.repairTargets.length) return assessment;
+      const originalControls = roundMessages.map((message) => message.control);
+      await Promise.all(assessment.repairTargets.map(async (target) => {
+        const message = roundMessages[target.controlIndex];
+        await repairMessageControl({
+          message,
+          target,
+          targetVersion,
+          itemRegistry,
+          originalControl: originalControls[target.controlIndex],
+        });
+      }));
+      assertRunAcceptsOutput(sessionId, state);
+      if (!(await persistRunProgress(session, state, emit))) throw runInactiveError(state);
+      assessment = assessRound(roundMessages.map((message) => message.control), targetVersion, itemRegistry);
+      return assessment;
+    };
+
+    const callAgent = async (agent, prompt, round, phase) => {
       assertRunAcceptsOutput(sessionId, state);
       // Planning turns run inside the attached project (read-only) so they can read its
       // files; chat stays in the scratch workspace; unattached planning is text-only.
@@ -581,22 +784,7 @@ async function runOrchestrationClaimed({ sessionId, request, validatedRequest, e
       const usesControl = round >= 2 && (phase === "collaboration" || phase === "rebuttal");
       const safeText = redact(result.text);
       const content = usesControl ? stripAgentControl(safeText) : safeText;
-      let control = usesControl ? parseAgentControl(safeText) : null;
-      let controlRepaired = false;
-      // A missing or malformed control block is the main cause of a false invalid_control stop
-      // even when the agent has agreed in prose (a dropped block, bad JSON — things the lenient
-      // parser cannot recover). When we have the control context, ask this one agent once for
-      // just the corrected block, based on its own answer, and use it if valid. The extra call
-      // happens only on failure; the reader-facing answer is never touched.
-      if (usesControl && controlContext && !control.valid) {
-        const repaired = await attemptControlRepair(definition, cfg, cwd, content, controlContext);
-        if (repaired?.valid) { control = repaired; controlRepaired = true; }
-        assertRunAcceptsOutput(sessionId, state); // the repair awaited a provider call — a stop may have landed
-      }
-      const rawBlock = usesControl && !control.valid ? rawAgentControl(safeText) : "";
-      const rawInvalidControl = usesControl && !control.valid
-        ? (rawBlock ? redact(rawBlock).slice(0, 2000) : "(no control block emitted)")
-        : null;
+      const control = usesControl ? parseAgentControl(safeText) : null;
       const message = makeMessage({ author: "agent", agent, role, content, round, phase, mode });
       message.control = control;
       message.convergence = control;
@@ -607,8 +795,6 @@ async function runOrchestrationClaimed({ sessionId, request, validatedRequest, e
         contextChars, contextMessages, retryCount: 0,
         outputTruncated: Boolean(result.outputTruncated),
         usage: result.usage ?? null,
-        ...(controlRepaired ? { controlRepaired: true } : {}),
-        ...(rawInvalidControl ? { controlInvalidRaw: rawInvalidControl } : {}),
       };
       session.messages.push(message);
       if (!(await persistRunProgress(session, state, emit))) throw runInactiveError(state);
@@ -673,9 +859,9 @@ async function runOrchestrationClaimed({ sessionId, request, validatedRequest, e
             targetVersion,
             itemRegistry,
           });
-          return callAgent(agent, prompt, round, "collaboration", { targetVersion, itemRegistry });
+          return callAgent(agent, prompt, round, "collaboration");
         }), state);
-        const assessment = assessRound(roundMessages.map((message) => message.control), targetVersion, itemRegistry);
+        const assessment = await assessRepairedRound(roundMessages, targetVersion, itemRegistry);
         lastAssessment = assessment;
         itemRegistry = assessment.itemRegistry;
         completedRounds = round;
@@ -726,9 +912,9 @@ async function runOrchestrationClaimed({ sessionId, request, validatedRequest, e
             itemRegistry,
             proposition,
           });
-          return callAgent(agent, prompt, round, "rebuttal", { targetVersion, itemRegistry });
+          return callAgent(agent, prompt, round, "rebuttal");
         }), state);
-        const assessment = assessRound(roundMsgs.map((message) => message.control), targetVersion, itemRegistry);
+        const assessment = await assessRepairedRound(roundMsgs, targetVersion, itemRegistry);
         lastAssessment = assessment;
         itemRegistry = assessment.itemRegistry;
         completedRounds = round;
@@ -739,7 +925,12 @@ async function runOrchestrationClaimed({ sessionId, request, validatedRequest, e
 
     // Persist the deterministic outcome before asking the finalizer to explain it.
     if (!runWasCancelled(state) && mode !== "chat" && rounds >= 2 && lastAssessment) {
-      officialOutcome = buildDiscussionOutcome(lastAssessment, rounds, completedRounds);
+      officialOutcome = buildDiscussionOutcome(
+        lastAssessment,
+        rounds,
+        completedRounds,
+        completedControlRepairStats(controlRepairStats),
+      );
       const outcomeMessage = makeMessage({
         author: "system",
         content: discussionOutcomeReport(officialOutcome),
