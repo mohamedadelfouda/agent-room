@@ -79,7 +79,9 @@ export function parseCursorModels(stdout) {
 function cursorErrorMessage(parsed, processResult, stderr) {
   const fromResult = parsed?.is_error && typeof parsed?.result === "string" ? parsed.result : "";
   const firstStderr = stderr.find((line) => line.trim()) || "";
-  return (fromResult || firstStderr || `Cursor exited with code ${processResult.code}`).trim();
+  // Redact the surfaced message — it becomes error.message, the most user-visible path; error.technical
+  // and discoverCursorModels already redact, so match them (redact strips username/local paths).
+  return redact((fromResult || firstStderr || `Cursor exited with code ${processResult.code}`).trim());
 }
 
 async function resolveDescriptor() {
@@ -120,7 +122,7 @@ export async function runCursor({ prompt, config, cwd, onEvent, registerChild })
     timeoutMs: agentTimeoutMs(config.timeoutMs),
     containTree: true,           // Stop kills cursor-agent and its whole child tree
     registerChild,
-    onStderrLine(line) { if (line.trim()) { stderr.push(line); onEvent?.({ kind: "stderr", text: line.slice(0, 500) }); } },
+    onStderrLine(line) { if (line.trim()) { if (stderr.length < 50) stderr.push(line); onEvent?.({ kind: "stderr", text: line.slice(0, 500) }); } }, // cap retained lines (only the first is used for the error) so a noisy/hostile child can't grow this unbounded
   }));
   const durationMs = Date.now() - startedAt;
   const parsed = parseCursorResult(processResult.stdout);

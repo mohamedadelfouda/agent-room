@@ -61,6 +61,10 @@ const providers = new Map([
     // its readiness comes from provider-readiness.js, and the client hides the command/Check/Setup controls
     // (a command-allowlist probe would report cursor-agent "not found" and contradict the Setup Doctor).
     descriptorLaunch: true,
+    // Optional, review-only, and not always installed — offered but NOT auto-selected, so adding Cursor
+    // never turns a Claude/Codex-only run into a provider_unavailable failure (assertProvidersReady) for
+    // users who don't have it. New/upgraded users get it off by default; they opt in from the toggle.
+    defaultEnabled: false,
     command: "cursor-agent",
     install: {
       command: installHint({
