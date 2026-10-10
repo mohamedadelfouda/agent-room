@@ -105,7 +105,7 @@ jobs:
           APPLE_APP_SPECIFIC_PASSWORD: ${{ steps.signing.outputs.mac == 'true' && secrets.APPLE_APP_SPECIFIC_PASSWORD || '' }}
           APPLE_TEAM_ID: ${{ steps.signing.outputs.mac == 'true' && secrets.APPLE_TEAM_ID || '' }}
         run: pnpm make
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: agent-room-${{ matrix.platform }}-${{ github.ref_name }}
           path: out/make/**
